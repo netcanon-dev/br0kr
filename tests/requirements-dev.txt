@@ -14,7 +14,7 @@ pytest-cov>=5
 
 # Type/lint tools the gate runs (so `tests/validate` finds them in a fresh venv):
 ruff>=0.5
-mypy>=1.10
+mypy>=2.4.0
 
 # e2e (opt-in, never in the hermetic default). Uncomment if the project has a UI
 # flow; the browser binary is installed only in the CI e2e job:
