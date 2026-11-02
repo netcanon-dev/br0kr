@@ -55,7 +55,7 @@ jobs:
       # ----- MODE A: ADVISORY (default) -----------------------------------
       # No GitHub Advanced Security required. Findings print to the job log and
       # never block CI. Good default for a private repo.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Install zizmor
