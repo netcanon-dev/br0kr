@@ -12,9 +12,11 @@ CI hermetic is what makes "green in CI" trustworthy and keeps every PR fast.
 |---|---|---|
 | `ci.yml` | PR + push to `main` | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (Python matrix) |
 | `security.yml` | PR + push + weekly | gitleaks full-history secret scan + pip-audit dependency CVEs |
-| `zizmor.yml` | `.github/**` changes + weekly | GitHub-Actions-specific supply-chain audit |
-| `docker.yml` | PR + push to `main` | builds the runtime image + smoke-runs it; never pushes (no registry scope) |
+| `pii-guard.yml` | PR + push to `main` | no maintainer identifier in a tracked file or in a merged commit's identity or message |
+| `zizmor.yml` | `.github/**` changes + weekly | GitHub-Actions-specific supply-chain audit (blocking; SARIF to Code scanning) |
+| `docker.yml` | PR + push to `main` | builds the runtime image, fails on a fixable CRITICAL CVE (Trivy), smoke-runs it; never pushes (no registry scope) |
 | `dependabot.yml` | weekly | pip + github-actions (+ docker) version PRs |
+| CodeQL (repo setting) | PR + push + weekly | GitHub's default setup: code scanning for Python and Actions |
 
 ## Non-negotiable workflow hardening
 
@@ -92,7 +94,39 @@ modes (pick one in the workflow):
   annotations (`advanced-security: false` on a private repo). Exits non-zero on
   a finding.
 
-Path-filtered to `.github/**` + weekly (new zizmor rules ship often).
+Path-filtered to `.github/**` + weekly (new zizmor rules ship often). br0kr is
+public, so it runs the blocking + SARIF mode; the job, not the file, holds
+`security-events: write`.
+
+## pii-guard.yml — no maintainer identifier ships
+
+`.github/scripts/pii_guard.py` is the same file in every netcanon repository.
+It runs three layers over every tracked file and over the author, committer and
+message of every commit being merged:
+
+1. **Shape**: an operator-machine user-profile path, in any slash spelling.
+2. **Digest**: personal identifiers listed by salted sha256 in
+   `.github/pii-guard.hashes`. A digest confirms a guess and never reveals the
+   value, so the guard never publishes what it guards. Each line is also checked
+   with `[`, `]` and `\` removed: a character-class spelling (`ab[c]d`), the
+   usual way to stop a grep matching itself, still publishes the value, so it is
+   a finding too.
+3. **Private tokens**: deployment names from the optional `PII_GUARD_TOKENS`
+   repository secret, one regex per line (absent on fork and Dependabot PRs,
+   where layers 1 and 2 still enforce).
+
+A finding prints the file, line and rule, never the matched text, and
+`--self-test` runs first so a scan that finds nothing is never a scan that
+checked nothing. Add a digest with `python3 .github/scripts/pii_guard.py --hash`
+(the value on stdin, never on the command line); label it by kind, not by what
+it is.
+
+## docker.yml — the image is CVE-gated before it can ship
+
+Trivy scans the locally built image and fails the PR on a fixable CRITICAL
+(`ignore-unfixed`: a CVE with no upstream patch is nothing to act on). The scan
+runs before anything could publish the image, so a vulnerable image never
+reaches a tag.
 
 ## Dependabot
 
@@ -116,6 +150,45 @@ desktop installer to GitHub Releases), so there is no one template workflow. The
 - Prefer **OIDC / keyless** auth (PyPI Trusted Publishing, cosign keyless via
   Sigstore + GH OIDC) over long-lived tokens, and attach an **SBOM** +
   **provenance** to published artifacts.
+
+## Repository baseline (all netcanon repositories)
+
+netcanon/netcanon is the reference. Every repository gets the same workflow
+conventions above; the repository settings depend on what the GitHub plan
+allows, so there are three tiers.
+
+| Setting | Public | Private (free plan) | Archive |
+|---|---|---|---|
+| CodeQL default setup | on | not available | — |
+| Secret scanning + push protection | on | not available | — |
+| Private vulnerability reporting | on | not available | — |
+| Dependabot alerts + security updates | on | on | — |
+| Workflow token read-only, cannot approve PRs | yes | yes | — |
+| Fork PR workflows need approval | first-time contributors | — | — |
+| `main` ruleset | PR + required checks, no deletion or force-push, admin bypass | not available | — |
+| `v*` tags immutable | ruleset | not available | — |
+| zizmor | blocking, SARIF to Code scanning | blocking at `medium`, findings as annotations (`advanced-security: false`) | — |
+| PII guard, tracked files | `--tree` | `--tree` (`--no-paths` while working notes name operator paths) | — |
+| PII guard, commit metadata | `--range` | only once the history carries no personal commit identity; until then a public cut is a clean snapshot into a new repository (the br0kr path) | — |
+| Secret / dependency scan in CI | gitleaks + pip-audit | gitleaks + pip-audit (the substitute for the missing settings) | — |
+| Image CVE gate | Trivy, fixable `CRITICAL` blocks | the same | — |
+| Image signing, SBOM, provenance | cosign keyless + SBOM + provenance on publish | not done: keyless signing writes the image identity to the public Rekor log | — |
+| Self-hosted runners | never (see below) | allowed; a root-capable host takes `workflow_dispatch` only | — |
+| Actions | on | on | disabled |
+
+The `main` ruleset requires green CI rather than a code-owner review: with a
+single maintainer, a required approval can only be met by bypassing it.
+`CODEOWNERS` still routes review requests and names the owner.
+
+**A public repository never reaches a self-hosted runner.** The organization's
+runner group keeps `allows_public_repositories: false`, so a fork PR on a public
+repository cannot schedule onto a self-hosted runner at all. That setting is
+load-bearing whenever the organization's runners have elevated rights on their
+host. Verify it before any repository in the organization goes public:
+
+```bash
+gh api orgs/<org>/actions/runner-groups   --jq '.runner_groups[] | {name, allows_public_repositories}'
+```
 
 ## See also
 - `tests/validate.sh` — the local gate `ci.yml`'s `validate` job re-runs

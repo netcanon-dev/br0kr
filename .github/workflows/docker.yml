@@ -1,4 +1,4 @@
-# docker — build + smoke-test the runtime image, but NEVER publish it.
+# docker — build, CVE-scan and smoke-test the runtime image, but NEVER publish it.
 #
 # br0kr is pre-alpha; no image is published yet. So this workflow has NO
 # registry login, NO `docker push`, and NO `packages: write` permission. It
@@ -37,6 +37,19 @@ jobs:
         # A unique local tag per commit; this tag exists only on the runner and is
         # removed below. No registry is contacted.
         run: docker build --pull -t "br0kr:ci-${{ github.sha }}" .
+
+      - name: Scan the image for CRITICAL CVEs (gating)
+        # Fails the PR on a fixable CRITICAL in any image layer, before the image
+        # could ever be published. ignore-unfixed drops CVEs with no upstream patch
+        # (nothing to act on). Third-party action: SHA-pinned per .github/zizmor.yml,
+        # the same pin netcanon's gating scan uses.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: br0kr:ci-${{ github.sha }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
 
       - name: Smoke test (the package imports + runs inside the image)
         run: docker run --rm "br0kr:ci-${{ github.sha }}"

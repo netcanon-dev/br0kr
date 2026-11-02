@@ -1,0 +1,54 @@
+# PII guard: fail the build if a tracked file, or a commit being merged, leaks a
+# maintainer identifier. Runs on every PR and push to main, and is a required
+# check on the main ruleset, so its job name is load-bearing.
+#
+# The scanner (.github/scripts/pii_guard.py) is the same file in every netcanon
+# repository. It never holds or prints the identifiers it hunts:
+#   1. user-profile paths are matched by SHAPE (any user, any slash spelling);
+#   2. personal identifiers are matched by sha256 DIGEST, listed in
+#      .github/pii-guard.hashes (a digest confirms a guess, never reveals a
+#      value); each line is also checked with `[`, `]` and `\` removed, so a
+#      character-class spelling (`ab[c]d`) is itself a finding;
+#   3. deployment names (hostnames, domains, LAN prefixes) come from the
+#      optional PII_GUARD_TOKENS repository secret, one regex per line. It is
+#      absent on fork and Dependabot PRs; layers 1 and 2 still enforce.
+# A finding prints the file, line and rule, never the matched text.
+name: PII guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only: this job only inspects the checked-out tree and its history.
+permissions:
+  contents: read
+
+jobs:
+  scan-tracked-files:
+    name: No leaked personal identifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the commit-metadata scan walks BASE..HEAD
+
+      - name: Self-test (every layer fires on a synthetic canary)
+        # A scan that finds nothing must never be a scan that checked nothing.
+        run: python3 -I .github/scripts/pii_guard.py --self-test
+
+      - name: Scan tracked files
+        env:
+          PII_GUARD_TOKENS: ${{ secrets.PII_GUARD_TOKENS }}
+        run: python3 -I .github/scripts/pii_guard.py --tree
+
+      - name: Scan the identity and message of every commit being merged
+        # File content is not the only vector: an author address or a
+        # Co-authored-by trailer leaks just as well.
+        env:
+          PII_GUARD_TOKENS: ${{ secrets.PII_GUARD_TOKENS }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 -I .github/scripts/pii_guard.py --range "$BASE" "$HEAD"

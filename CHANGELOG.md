@@ -13,6 +13,19 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 ## [Unreleased]
 
 ### Security
+- **CI matches the netcanon baseline: a PII guard, a CVE-gated image, blocking zizmor.** Why: br0kr is
+  public, and netcanon/netcanon is the reference every netcanon repository now follows.
+  - `pii-guard.yml` (new; SECURITY.md C19) runs the shared `.github/scripts/pii_guard.py` over every tracked
+    file and over the author, committer and message of every merged commit. Personal identifiers are matched by
+    salted sha256 digest (`.github/pii-guard.hashes`), so the repository never holds the value it guards.
+  - `docker.yml` fails on a fixable CRITICAL CVE in the built image (Trivy, SHA-pinned), before the image could
+    ever be published.
+  - `zizmor.yml` moves from advisory to blocking with SARIF to Code scanning, now that the repository is public;
+    the write scopes sit on the job, not the file.
+  - `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1; reports go through private
+    vulnerability reporting).
+  - `docs/standards/ci-cd.md` documents the new workflows and the repository-baseline tiers (public, private,
+    archive).
 - **`mcp` bumped `1.28.1` -> `1.30.0` (`requirements.txt`, `pyproject.toml`): pip-audit reports four
   CVEs against 1.28.1 (CVE-2026-59951, CVE-2026-116684, CVE-2026-116685, CVE-2026-116686), all fixed in
   1.30.0.** Why: the agent gateway is the broker's network-facing surface, and the weekly `security.yml`

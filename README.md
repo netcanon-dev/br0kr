@@ -228,3 +228,5 @@ CI runs on GitHub-hosted runners. Before you commit, run the same gate CI runs:
 `tests/validate.sh` (lint · secret-scan · types · unit · test-docs). Read [CLAUDE.md](CLAUDE.md)
 first — tests + docstrings + logging + docs land in the **same commit**; stale docs are a bug.
 This repo was generated from a portable scaffold — see [CONVENTIONS.md](CONVENTIONS.md).
+[CONTRIBUTING.md](CONTRIBUTING.md) is the short version for a first PR; everyone follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).
