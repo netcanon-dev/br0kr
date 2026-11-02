@@ -1,0 +1,42 @@
+# Pre-commit hooks — the first gate in the test-after-change pipeline.
+# Install once per clone:  pipx install pre-commit && pre-commit install
+#
+# gitleaks is managed BY pre-commit (no manual binary install), so it blocks
+# committing a plaintext secret on any platform. This is the primary local guard
+# that a key/token/password never reaches a commit (see SECURITY.md / the
+# never-commit-secrets rule). CI re-runs gitleaks over FULL history as a backstop.
+#
+# Keep the hook set lean and fast — anything slow (full test suite, e2e) belongs
+# in CI, not here. Heavier static analysis (ruff, mypy) runs in CI; add it here
+# too only if your team wants it enforced pre-commit.
+#
+# Pin `rev:` to a tag and let Dependabot/`pre-commit autoupdate` bump it.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks                  # uses .gitleaks.toml (allowlists encrypted/placeholder paths)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: detect-private-key        # PEM/SSH private keys by shape (complements gitleaks entropy rules)
+      - id: check-added-large-files   # block an accidental blob (an unstripped build artifact / data dump)
+        args: ["--maxkb=1024"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict      # block committing unresolved <<<<<<< markers
+      - id: check-yaml                # YAML must parse (yamllint covers style; this covers syntax)
+        args: ["--allow-multiple-documents"]
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL — uncomment to enforce lint/format locally (CI runs these anyway).
+  # Greenfield repos (e.g. br0kr) should turn these ON from commit 1 so the tree
+  # never accumulates drift. Config lives in pyproject.toml [tool.ruff].
+  # ---------------------------------------------------------------------------
+  # - repo: https://github.com/astral-sh/ruff-pre-commit
+  #   rev: v0.15.0
+  #   hooks:
+  #     - id: ruff          # lint
+  #       args: [--fix]
+  #     - id: ruff-format   # auto-format (only if you adopt `ruff format`)

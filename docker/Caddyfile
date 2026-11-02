@@ -1,0 +1,111 @@
+# br0kr — OPTIONAL TLS termination + a host-agnostic origin for a reverse-proxy / tunnel (the `caddy`
+# service in docker-compose.tls.yml).
+#
+# This is the BUILT-IN half of the deploy-time gate: either you front br0kr with your OWN reverse proxy
+# (or accept plain HTTP on a trusted network), OR you opt into this Caddy by adding
+# `-f docker-compose.tls.yml` (see docs/runbooks/docker-deploy.md §10). Caddy terminates TLS and reverse-
+# proxies to the gateway (and the dashboard), so the agent bearer token + the operator/dashboard secrets
+# never travel in cleartext beyond the host.
+#
+# DEFAULT = Caddy's INTERNAL self-signed CA (`tls internal`): works offline, no domain, no DNS — right for
+# a homelab/trusted LAN (clients trust Caddy's root once, or skip verification with curl -k). For a PUBLIC
+# certificate, set BR0KR_TLS_SITE to a real domain you control AND BR0KR_TLS_ISSUER to your ACME email;
+# Caddy then auto-provisions + renews a Let's Encrypt cert. The minted CA/certs persist in the caddy-data
+# volume across restarts.
+#
+# TUNNEL-FRIENDLY (behind a reverse proxy / tunnel, e.g. Cloudflare — docs/runbooks/public-tunnel.md): the
+# public hostname a client reaches != this internal origin, so the direct-TLS site (keyed to BR0KR_TLS_SITE)
+# can't serve it. The `http://:8081` site below is a HOST-AGNOSTIC plain-HTTP origin (matches ANY Host on the
+# internal port 8081, NEVER a published host port) that a tunnel forwards to over the compose network; the
+# tunnel terminates the PUBLIC TLS. The advertised OAuth discovery / WWW-Authenticate URL then comes from
+# BR0KR_PUBLIC_URL (the public https URL), decoupled from the internal site host. It is on 8081 — NOT :80 —
+# on purpose, so :80 stays free (and safe) for an ACME HTTP-01 solver and can never carry the gateway.
+
+{
+	# No automatic HTTP→HTTPS redirect site, so Caddy needs only the TLS ports (443/8443). The tunnel origin
+	# below is on :8081 (NOT :80), so :80 stays free for an ACME HTTP-01 solver if you ever use a public
+	# domain (publish :80 THEN, and only then; the default TLS-ALPN challenge on :443 needs no :80). NEVER
+	# publish :8081 — it's the cleartext tunnel origin (proxies /mcp with the bearer straight to the gateway).
+	auto_https disable_redirects
+	# A browser/CLI reaching this host by BARE IP sends NO SNI (RFC 6066 forbids an IP-literal server_name), so
+	# with more than one internal cert Caddy can't pick which to serve and ABORTS the handshake with an
+	# `internal_error` alert (the LAN operator sees Firefox SSL_ERROR_INTERNAL_ERROR_ALERT / curl error 35).
+	# default_sni names the cert to serve when a ClientHello omits SNI — the configured site host (the LAN IP
+	# or domain) — so a no-SNI / bare-IP client still connects. Harmless for a hostname deploy (clients send
+	# SNI then). To reach the DASHBOARD over TLS at a LAN IP, ALSO set BR0KR_TLS_DASHBOARD_SITE=<ip>:8443
+	# (default localhost:8443 matches only a localhost Host); browse https://<ip>:8443 (accept the internal CA).
+	default_sni {$BR0KR_TLS_SITE:localhost}
+}
+
+# ── Shared routing for the MCP gateway + OAuth shim — imported by BOTH the direct-TLS site and the
+# host-agnostic tunnel origin so there is ONE routing definition. `{args[0]}` = the PUBLIC base URL a client
+# reaches THIS entrypoint at (scheme+host, no trailing slash); it's what the RFC 9728 WWW-Authenticate
+# `resource_metadata` URL must advertise, so the OAuth-only client is pointed at a document it can actually
+# fetch. (The discovery documents the shim itself serves are built from the same public URL via
+# BR0KR_PUBLIC_URL / BR0KR_TLS_SITE in br0kr/oauth.py `issuer()`.)
+#
+# Path routing (first matching `handle` wins):
+#   1. The OAuth 2.1 shim endpoints (discovery / DCR / authorize / token) → the `oauth` service (only up
+#      with `--profile oauth`; without it these 502, which only an OAuth client would ever hit).
+#   2. `/mcp` with NO Authorization header → the RFC 9728 discovery challenge: 401 + WWW-Authenticate
+#      pointing at the protected-resource metadata. This is what makes an OAuth-only host (Claude Desktop)
+#      start the OAuth flow. A bearer client (the CLI) sends the header, so it never hits this.
+#   3. Everything else — `/mcp` WITH a bearer, `/healthz` — → the gateway, streamed (flush_interval -1
+#      disables response buffering so the MCP streamable-http / SSE responses forward promptly).
+(br0kr_routes) {
+	@oauth path /.well-known/oauth-authorization-server* /.well-known/oauth-protected-resource* /register /authorize /token
+	handle @oauth {
+		reverse_proxy oauth:9100
+	}
+
+	@mcp_noauth {
+		path /mcp*
+		not header Authorization *
+	}
+	handle @mcp_noauth {
+		header WWW-Authenticate `Bearer resource_metadata="{args[0]}/.well-known/oauth-protected-resource"`
+		respond 401
+	}
+
+	handle {
+		reverse_proxy gateway:8080 {
+			flush_interval -1
+			# Belt-and-suspenders for the MCP SDK's DNS-rebinding protection: FastMCP (mcp >= 1.23) arms a
+			# LOOPBACK-ONLY Host allowlist (127.0.0.1/localhost/[::1]) when CONSTRUCTED with a loopback host.
+			# The gateway now constructs with its real FASTMCP_HOST so a 0.0.0.0 bind escapes that (the root
+			# fix, br0kr/mcp_server.py); here we ALSO normalize the upstream Host to loopback + drop Origin so
+			# a request arriving with a real public/LAN Host is accepted regardless (and a BYO proxy behaves).
+			# Behind Caddy the trust boundary is the proxy + the bearer token (+ the tunnel), NOT the Host
+			# header. Without it a real Host would 421 "Invalid Host header" on the MCP data path. SECURITY.md C17.
+			header_up Host 127.0.0.1:8080
+			header_up -Origin
+		}
+	}
+}
+
+# ── Direct TLS front (LAN / direct access) — UNCHANGED behavior. Site host + cert + advertised URL all keyed
+# to BR0KR_TLS_SITE (your host's LAN name/IP, or a public domain). A bearer client (the CLI) reaches this
+# over TLS; an OAuth client that trusts Caddy's CA can too. The Authorization header is forwarded unchanged.
+{$BR0KR_TLS_SITE:localhost} {
+	tls {$BR0KR_TLS_ISSUER:internal}
+	import br0kr_routes https://{$BR0KR_TLS_SITE:localhost}
+}
+
+# ── Host-agnostic PLAIN-HTTP origin for a reverse-proxy / tunnel (e.g. Cloudflare) — :8081, matches ANY Host.
+# A tunnel terminates the PUBLIC TLS and forwards here over the compose network (cloudflared → http://caddy:8081);
+# :8081 is NEVER a published host port (see docker-compose.tls.yml — no `ports:` maps it), so this cleartext leg
+# stays inside the docker bridge. Because the public hostname != this origin, the advertised URL comes from
+# BR0KR_PUBLIC_URL (the public https URL the tunnel serves), NOT the internal site host. Idle/inert unless a
+# tunnel actually routes to it. SECURITY.md control C17.
+http://:8081 {
+	import br0kr_routes {$BR0KR_PUBLIC_URL:https://localhost}
+}
+
+# ── The dashboard (operator token + one-time agent secrets) on a second port ──────────────────────────
+# Only useful when the dashboard profile is also up (`--profile dashboard`); otherwise the upstream is
+# absent and this site returns 502, which is harmless. Override BR0KR_TLS_DASHBOARD_SITE to a real
+# host:port (matching your access address) as for the gateway.
+{$BR0KR_TLS_DASHBOARD_SITE:localhost:8443} {
+	tls {$BR0KR_TLS_ISSUER:internal}
+	reverse_proxy dashboard:8051
+}

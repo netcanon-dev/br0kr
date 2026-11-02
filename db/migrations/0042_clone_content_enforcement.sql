@@ -1,0 +1,28 @@
+-- 0042_clone_content_enforcement — the CLONE-PATH content-capability knob for the placement gate (PR-D of the
+-- storage/network auto-discovery arc; design §8). The build/rebuild seams already refuse a target pool that
+-- isn't {import, images}-capable (0041, placement.content_capable), but the TENANT CLONE path
+-- (placement._resolve_clone_storage, in admit()/recheck_instance) does NOT: a clone (full OR linked) whose target pool is
+-- declared WITHOUT `images` (e.g. an import-only or backup-only pool) is admitted, then FAILS at PVE disk-create
+-- time — a grant-then-kill the reaper cleans up. This knob adds the missing `images` gate to the clone path.
+--
+-- WHY DEFAULT OFF (fail-OPEN until the operator opts in): the gate is fail-CLOSED once ON (an UNDECLARED target
+-- pool — content_types IS NULL — refuses `storage_not_capable`), so turning it on before every BOUND storage pool
+-- has declared content (admin.set_storage_content) would refuse EVERY clone onto an undeclared pool — a fleet
+-- outage. The operator declares fleet-wide coverage FIRST, then flips this ON. With it OFF the clone path is
+-- byte-identical to the pre-PR-D gate (no content check) — the widening is INERT. An UNBOUND seed (no storage
+-- row) is skipped even when ON (nothing to declare; pre-0041 parity).
+--
+-- WHY the check lives INSIDE _resolve_clone_storage (the admit/recheck LOCKSTEP): both the gateway's admit()
+-- (resolve_placement) and the daemon's provision-time recheck_instance call _resolve_clone_storage, so putting the
+-- content check there makes plan-time and actuation-time evaluate it IDENTICALLY by construction — the sacred
+-- same-gate rule. It calls the SAME placement.content_capable the build path uses (with `required={images}`, NOT
+-- {import} — a clone writes a disk, it does not import an image), so the clone gate and the build gate can never
+-- drift in how they read a pool's declared content.
+--
+-- WHY operator_setting AND NOT env (0021/0037 pattern): the gate runs in BOTH the gateway's admit() AND the
+-- daemon's recheck_instance (and the scheduler's placeability probe), so an env-only value would let them
+-- disagree (the env-drift-across-containers class §3.5). A SHARED ledger column is the single source of truth,
+-- dashboard-tunable. Nullable → settings.resolve()'s COALESCE(ledger, env, default=False) keeps an all-NULL row
+-- byte-identical to the shipped default (OFF). Idempotent; a schema change is a NEW file.
+
+ALTER TABLE operator_setting ADD COLUMN IF NOT EXISTS clone_content_enforcement boolean;

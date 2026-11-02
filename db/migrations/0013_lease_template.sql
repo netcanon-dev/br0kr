@@ -1,0 +1,25 @@
+-- 0013_lease_template — per-request template selection: which catalog template a lease clones from (A2).
+--
+-- Phase A1 (0012) registered an OS-template CATALOG but nothing SELECTED from it — the daemon still cloned
+-- a single daemon-wide env vmid (BR0KR_VM_TEMPLATE). This column lets an agent pick a catalog template per
+-- request: request_lease/schedule_lease carry a `template_id`, admission validates it lives on the target
+-- node's cluster (a template vmid is per-cluster), and the daemon clones THAT template's vmid (resolved via
+-- a join to `template`) instead of the env default. NULL = the agent picked no template → the env-default /
+-- create-blank behaviour, unchanged from #36.
+--
+-- Unlike the cloud-init fields (#36), `template_id` IS part of the admission idempotency ask: a different
+-- image is a different VM, so a retry of the same idem_key that changes the template is an idem_key_conflict
+-- (admission._same_ask compares it), not a silent replay of the original.
+--
+-- The FK is NO ACTION (no ON DELETE clause), DELIBERATELY — the SAME fail-CLOSED choice as
+-- lease.node_id / lease.storage_id (0001). admin.delete_template REFUSES while ANY lease (live OR terminal
+-- audit history) references the template (`template_in_use`, pre-checked, exactly like delete_node/storage);
+-- a concurrent delete racing an admit that is inserting a referencing lease then FK-ABORTS (a retryable
+-- error) rather than succeeding. ON DELETE SET NULL would FAIL OPEN here: it would erase a live lease's
+-- template_id under that race, and because the daemon's "picked-but-vanished template" guard keys off
+-- template_id, the erased value would make the daemon silently clone the env default (the WRONG image with
+-- the agent's key injected) — so SET NULL is explicitly NOT used. The cost is the node/storage-consistent
+-- one: a template that ever cloned a (now-released) lease can't be removed until that lease history is
+-- purged. The partial index speeds the in-use pre-check (and a future per-template inventory).
+ALTER TABLE lease ADD COLUMN IF NOT EXISTS template_id text REFERENCES template(id);
+CREATE INDEX IF NOT EXISTS lease_template ON lease(template_id) WHERE template_id IS NOT NULL;

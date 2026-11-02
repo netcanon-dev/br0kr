@@ -1,0 +1,226 @@
+# br0kr — full deployment stack: an HA Postgres ledger (primary + hot standby) + the three
+# broker processes (migrate one-shot, MCP gateway, reconciler daemon). One image, three
+# entrypoints (see the Dockerfile). Config is `.env` (copy from .env.example).
+#
+#   docker compose up -d              # bring up the whole HA stack
+#   docker compose up -d --scale daemon=2   # run a hot-STANDBY daemon (leader lock picks one writer)
+#   docker compose logs -f daemon     # watch the reconciler
+#
+# The pg-primary/pg-standby pair is a HOMELAB STARTER topology — it demonstrates the multi-host
+# PGCONN re-homing (br0kr/db.py) that the failover harness proves, with trust replication on an
+# ISOLATED compose network. It is NOT a production HA setup: for that, point PGCONN at an
+# operator-run cluster (Patroni / managed Postgres) and skip the pg-* services. See
+# docs/runbooks/docker-deploy.md and docs/runbooks/ledger-ha.md.
+
+# Shared base for the three broker services: same locally-built image, restart policy, and the
+# bundled-ledger dependency. Per-service `command`/`environment`/`depends_on` refine it.
+x-broker: &broker
+  build: .
+  image: br0kr:local
+  restart: unless-stopped
+
+services:
+  # ── Ledger: primary ────────────────────────────────────────────────────────────
+  pg-primary:
+    image: postgres:16
+    # Bring the ledger back after a host reboot / dockerd restart / crash (the broker services
+    # restart too, so the ledger must as well or the deployment comes back half-up).
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-broker}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?set PGPASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-broker}
+    # Replication knobs (mostly PG16 defaults; explicit for clarity). App connections still use
+    # password auth (scram); only REPLICATION is opened to the standby — see pg-primary-init.sh.
+    # max_slot_wal_keep_size caps the standby's replication slot so a long-dead standby can't fill
+    # the primary's disk (past the cap the slot is invalidated and the standby needs a re-clone).
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_slot_wal_keep_size=2GB
+      - -c
+      - hot_standby=on
+    volumes:
+      - pg-primary-data:/var/lib/postgresql/data
+      - ./docker/pg-primary-init.sh:/docker-entrypoint-initdb.d/20-replication.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-broker} -d ${POSTGRES_DB:-broker}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ── Ledger: hot standby (clones from the primary on first boot, then streams) ───
+  pg-standby:
+    image: postgres:16
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/pg-standby-entrypoint.sh"]
+    environment:
+      # The entrypoint clones AS the cluster superuser, which the official image makes POSTGRES_USER
+      # (there is no "postgres" role when POSTGRES_USER is set). Must match pg-primary's.
+      POSTGRES_USER: ${POSTGRES_USER:-broker}
+    volumes:
+      - pg-standby-data:/var/lib/postgresql/data
+      - ./docker/pg-standby-entrypoint.sh:/pg-standby-entrypoint.sh:ro
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-broker} -d ${POSTGRES_DB:-broker}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      # generous: first boot does a full pg_basebackup before the server accepts connections
+      start_period: 60s
+
+  # ── Broker: schema migrations (one-shot; runs once before the services) ─────────
+  migrate:
+    <<: *broker
+    command: ["python", "-m", "br0kr.migrate"]
+    environment:
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Broker: agent-facing MCP gateway (scale freely — stateless) ─────────────────
+  gateway:
+    <<: *broker
+    command: ["python", "-m", "br0kr.mcp_server"]
+    environment:
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+      BR0KR_MCP_TRANSPORT: ${BR0KR_MCP_TRANSPORT:-streamable-http}
+      FASTMCP_HOST: 0.0.0.0
+      FASTMCP_PORT: "8080"
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    # /healthz (FastMCP custom_route) probes the ledger with a fast SELECT 1 → 200/503.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8080/healthz',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Broker: reconciler daemon (SINGLE leader; a 2nd replica is a hot standby) ────
+  daemon:
+    <<: *broker
+    command: ["python", "-m", "br0kr.daemon"]
+    environment:
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+      BR0KR_TICK_SECONDS: ${BR0KR_TICK_SECONDS:-5}
+      BR0KR_REAP_GRACE: ${BR0KR_REAP_GRACE:-30}
+      BR0KR_SWEEP_EVERY: ${BR0KR_SWEEP_EVERY:-12}
+      BR0KR_PROVISION_LIMIT: ${BR0KR_PROVISION_LIMIT:-8}
+      BR0KR_RELOAD_EVERY: ${BR0KR_RELOAD_EVERY:-60}
+      BR0KR_HEALTH_PORT: ${BR0KR_HEALTH_PORT:-9090}
+      BR0KR_VM_DISK: ${BR0KR_VM_DISK:-}
+      BR0KR_SWEEP_DRY_RUN: ${BR0KR_SWEEP_DRY_RUN:-}
+      # VM provisioning knobs the reconciler reads at boot (see vm-access.md §3). These MUST be listed here —
+      # compose only injects keys it names, so a `.env` entry alone is a silent no-op. Compose substitutes ""
+      # for an unset var, so: int/must-be-set knobs carry their code default (CI_USER=br0kr, IP_DISCOVER_LIMIT
+      # =16 — an empty value would blank the cloud-init login / crash int("") — and FULL_CLONE=1); the optional
+      # string knobs (TEMPLATE / CLONE_STORAGE / GUEST_IP_PREFIX) pass "" and daemon.py normalizes ""→unset (an
+      # empty CLONE_STORAGE would else send storage= on every full clone → PVE 400). Agents can always pass
+      # `template_id` per-lease regardless of TEMPLATE.
+      BR0KR_VM_TEMPLATE: ${BR0KR_VM_TEMPLATE:-}
+      BR0KR_VM_FULL_CLONE: ${BR0KR_VM_FULL_CLONE:-1}
+      # 0042/PR-D clone-path images gate ENV SEED for the daemon's recheck; empty = fall to the knob default (OFF).
+      # NOTE: admit() runs in the GATEWAY, so to actually ENABLE enforcement fleet-wide set the SHARED
+      # operator_setting via the dashboard/ledger (all processes read it) — this env alone only seeds the daemon.
+      BR0KR_CLONE_CONTENT_ENFORCEMENT: ${BR0KR_CLONE_CONTENT_ENFORCEMENT:-}
+      BR0KR_VM_CLONE_STORAGE: ${BR0KR_VM_CLONE_STORAGE:-}
+      BR0KR_CI_USER: ${BR0KR_CI_USER:-br0kr}
+      BR0KR_GUEST_IP_PREFIX: ${BR0KR_GUEST_IP_PREFIX:-}
+      BR0KR_IP_DISCOVER_LIMIT: ${BR0KR_IP_DISCOVER_LIMIT:-16}
+      # Replication DATA PLANE (PR-5). LIMIT 0 = OFF (default); >0 opts the leader into advancing clone_shared
+      # copies one saga step per tick AND publishes operator_setting.replication_enabled=(limit>0) so the request
+      # surface is honest. STALE_SECONDS sizes the stranded-copy reclaim cutoff + the reservation TTL (2×). Both
+      # carry an int default here (an empty inject would crash int("")); ENV-only — enabling the live-guest engine
+      # warrants a daemon restart. See docs/designs/template-sharing-cross-cluster.md §5.
+      BR0KR_REPLICATE_LIMIT: ${BR0KR_REPLICATE_LIMIT:-0}
+      BR0KR_REPL_STALE_SECONDS: ${BR0KR_REPL_STALE_SECONDS:-7200}
+      # Operator template BUILDS (phase A4.1: download an image -> import -> templatize -> catalog it).
+      # BUILD_LIMIT actuates at most this many REQUESTED builds per tick; 0 = DISABLED (the default — a build
+      # blocks the tick for a multi-hundred-MB download, so it is opt-in). STALE_SECONDS reclaims a build with
+      # no progress for that long (a leader died mid-build). CORES/MEMORY_MB size the resulting template VM.
+      # Without these lines the daemon container never SEES BR0KR_BUILD_LIMIT, so builds stay off regardless of
+      # .env — which also blocks rebuild_source replication (it needs a source-provenanced, i.e. BUILT, template).
+      # Int defaults here (an empty inject would crash int("")); ENV-only — enabling builds warrants a restart.
+      BR0KR_BUILD_LIMIT: ${BR0KR_BUILD_LIMIT:-0}
+      BR0KR_BUILD_STALE_SECONDS: ${BR0KR_BUILD_STALE_SECONDS:-3600}
+      BR0KR_BUILD_CORES: ${BR0KR_BUILD_CORES:-2}
+      BR0KR_BUILD_MEMORY_MB: ${BR0KR_BUILD_MEMORY_MB:-2048}
+      # Reachability-discovery cadence (0043, PR-G): the daemon runs the READ-ONLY discover_reachability drift
+      # report every N seconds (0 = OFF, the default). Seeds the daemon-only operator_setting; an empty inject is
+      # safe (the int env parse falls through to the ledger/default). Prefer the dashboard Settings ledger override
+      # so it is tunable without a restart. Report-only — it WRITES NOTHING to declarations (design §11).
+      BR0KR_DISCOVERY_INTERVAL_SECONDS: ${BR0KR_DISCOVERY_INTERVAL_SECONDS:-}
+      # Per-cluster PVE token secret(s): the daemon resolves cluster.token_secret_env from here.
+      # Add a line per cluster if their secret-env names differ.
+      PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}
+    # Reachable on the compose network (e.g. Prometheus scrapes daemon:9090/metrics — change the scrape
+    # target if you override BR0KR_HEALTH_PORT). Not host-published — a fixed host port would clash under
+    # `--scale daemon=2`. `expose` is informational; same-network containers reach any port regardless.
+    expose:
+      - "9090"
+    # /healthz liveness: a wedged daemon (either role) returns 503 → restarted; an alive one stays 200. No
+    # ledger I/O. Reads BR0KR_HEALTH_PORT at RUNTIME so BR0KR_HEALTH_PORT=0 (surface disabled) reports
+    # healthy instead of probing a dead port forever.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys,urllib.request as u; p=os.environ.get('BR0KR_HEALTH_PORT','9090'); sys.exit(0 if p in ('0','') else (0 if u.urlopen('http://localhost:'+p+'/healthz',timeout=3).status==200 else 1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Read-only dashboard (OPT-IN: `docker compose --profile dashboard up -d`) ─────
+  # Inventory + per-project allowances + the admission queue on one web page (br0kr/dashboard.py). It is
+  # READ-ONLY and holds no lock, but it is unauthenticated plain HTTP (SECURITY.md C3) — publish it only
+  # on a trusted network / behind a proxy. Gated behind a profile so the default stack stays lean and
+  # doesn't publish an extra port unless asked.
+  dashboard:
+    <<: *broker
+    command: ["python", "-m", "br0kr.dashboard"]
+    profiles: ["dashboard"]
+    environment:
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+      BR0KR_DASHBOARD_HOST: 0.0.0.0
+      BR0KR_DASHBOARD_PORT: "8051"
+      # Unset (default) = read-only. Set a strong secret to enable the token-gated operator actions
+      # (cancel a lease / edit a quota); it is a single shared token over plain HTTP, so keep on a
+      # trusted net / behind TLS (SECURITY.md C3). Passed through from .env.
+      BR0KR_DASHBOARD_TOKEN: ${BR0KR_DASHBOARD_TOKEN:-}
+      # Unset (default) = the inventory reads are OPEN. Set a strong secret to REQUIRE a bearer on the reads
+      # too (the operator token above also satisfies it); opt-in hardening for a less-trusted net. Passed
+      # through from .env.
+      BR0KR_DASHBOARD_READ_TOKEN: ${BR0KR_DASHBOARD_READ_TOKEN:-}
+    ports:
+      - "${DASHBOARD_PORT:-8051}:8051"
+    # /healthz probes the ledger with a fast SELECT 1 → 200/503.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8051/healthz',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pg-primary-data:
+  pg-standby-data:

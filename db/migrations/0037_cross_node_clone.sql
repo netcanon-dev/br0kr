@@ -1,0 +1,29 @@
+-- 0037_cross_node_clone — the CROSS-NODE placement knob for the template-sharing gate (PR-7; design §4.1, §11).
+-- v1 of the placement gate (0033) serves a templated lease ONLY from an instance HOSTED ON the lease's own node
+-- (`I.node_id = N.id` in placement._USABLE_INSTANCE_PICK), because `qm clone` must be POSTed to the node the
+-- template lives on. That means a template REPLICATED onto SHARED storage (a `clone_shared` copy, hosted on the
+-- source node) serves ONLY that source node's leases — a second node that reaches the SAME shared pool still
+-- refuses `no_reachable_instance`, even though its disk is right there. This knob is the documented
+-- "post-live-validation" widening: with it ON, the gate ALSO admits a READY instance on a DIFFERENT node in the
+-- SAME cluster PROVIDED that instance's storage REACHES the placement node (a `storage_node` row, un-quarantined)
+-- — i.e. it is genuinely SHARED. The daemon then POSTs the clone to the instance's HOME node with `--target
+-- <placement node>`, so the guest lands on the placement node with its disk on the shared pool.
+--
+-- WHY it stays SAFE (the double-allocation / cross-provision fear is NOT reopened): the pick ALREADY requires the
+-- instance's storage to reach the placement node, so lifting `I.node_id = N.id` only ever admits a shared-storage
+-- copy (a node-local pool still can't reach another node → excluded, fail-closed).
+-- Every other guard is UNCHANGED: same-cluster scoping, the mandatory post-clone disk-location assertion (it
+-- reads the NEW guest's config on the placement node), the per-VMID fence, and the reachability lifecycle
+-- (an over-broad `storage_node` declaration is caught the same way it always is — the clone fails or the
+-- assertion quarantines the pair). With the knob OFF the widening is INERT (no cross-node instance is admitted);
+-- the only delta from the pre-0037 gate is a latent ORDER-BY fix that now prefers a node-local instance over a
+-- coexisting node_id-NULL sibling (a deleted-host bound instance) rather than mis-ranking the NULL row first —
+-- a bug fix, not a regression (see placement._USABLE_INSTANCE_PICK).
+--
+-- WHY operator_setting AND NOT env (0021 pattern): the gate runs in BOTH the gateway's admit() AND the daemon's
+-- recheck_instance, so an env-only value would let them disagree (the env-drift-across-containers class §3.5). A
+-- SHARED ledger column is the single source of truth, dashboard-tunable. Nullable → settings.resolve()'s
+-- COALESCE(ledger, env, default=False) keeps an all-NULL row byte-identical to the shipped default (OFF).
+-- Idempotent; a schema change is a NEW file.
+
+ALTER TABLE operator_setting ADD COLUMN IF NOT EXISTS cross_node_clone boolean;

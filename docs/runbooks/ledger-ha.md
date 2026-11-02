@@ -1,0 +1,313 @@
+# Runbook — Ledger high availability (single cluster)
+
+**Status:** 🟡 client-side resilience shipped & proven; replication + failover is operator-owned.
+**Scope:** keeping the Postgres **ledger** available and durable for a single-cluster br0kr
+deployment. Cross-cluster ledger topology is out of scope (later roadmap).
+
+The ledger is br0kr's *one* source of truth — admission correctness, lease state, and which
+guest is fenced to which lease all live there. "Ledger HA" is two jobs:
+
+1. **Availability** — survive a Postgres restart/failover without crashing the daemon or
+   hard-failing an agent. This is shipped in the client (`br0kr/db.py`) and proven by
+   `scripts/harness_ledger_ha.py`.
+2. **Durability** — never lose the ledger. Logical backups + WAL archiving (PITR). This is
+   operator tooling + procedure (`scripts/backup_ledger.sh` + this runbook).
+
+---
+
+## The one rule that cannot be broken: exactly one primary
+
+br0kr's single-writer guarantee (one reconciler provisions at a time — SECURITY.md **C9**) is
+enforced by a Postgres **session-level advisory lock** (`br0kr/leader.py`). Postgres does **not
+replicate advisory locks** to standbys. Therefore:
+
+> **A split-brain — two Postgres primaries accepting writes at once — defeats single-writer.**
+> Two daemons would each acquire "the" leader lock on their own primary and could provision two
+> VMs on the same unreserved `vmid`. This is precisely the double-allocation br0kr exists to
+> prevent.
+
+So the failover mechanism's **number one responsibility is to guarantee a single primary** —
+the old primary must be fenced (STONITH / demoted / network-isolated) before a standby is
+promoted. Do **not** hand-promote a standby while the old primary may still be alive.
+
+This is *more* acute for a **stretched / cross-segment standby** (the Docker
+[docker-deploy.md §9](docker-deploy.md#9-stretched--dr-standby-remote-host-over-the-mesh) DR
+variant): a network partition between sites is a far more plausible split-brain trigger than the
+same-host pair, so a remote standby must **never** be promoted without the fencing + quorum above.
+
+**Recommended topology:** a managed failover controller that owns promotion + fencing through a
+consensus store — e.g. **Patroni** (with etcd/Consul/raft), repmgr with a fencing hook, or a
+cloud-managed Postgres (RDS/Cloud SQL) that guarantees single-primary for you. Use
+**synchronous replication** to a standby if you need RPO≈0 (no acknowledged lease lost on
+failover); accept async only if a small RPO is tolerable.
+
+**Isolation is pinned, not inherited.** br0kr's admission floor requires `READ COMMITTED` (the
+post-advisory-lock capacity re-read must see a competitor that committed *while this txn waited on the
+lock*). `br0kr/db.py` pins `default_transaction_isolation=read committed` on every connection, and the
+daemon + gateway assert it at boot (`db.assert_read_committed`) and refuse to serve otherwise — so a
+managed-DB parameter group or a `postgresql.conf` set to `repeatable read` cannot silently reopen the
+double-allocation race (SECURITY.md **C14**). If you front the ledger with a **connection pooler**
+(PgBouncer et al.), keep it in **session** pooling mode or verify the `-c` startup option survives your
+pool mode; the boot assertion is your canary — a wrong isolation makes the daemon/gateway fail loudly
+at startup rather than double-allocate. The canary runs at **process start only**, so redeploy/restart
+the daemon **and** gateway after any pooler or `default_transaction_isolation` change so it re-checks.
+
+---
+
+## Client configuration (what br0kr needs)
+
+HA is **config-as-data** — no code change to point br0kr at a replicated ledger. Set `PGCONN`
+to list every candidate host and let libpq route to the current primary:
+
+```
+PGCONN="host=pg-a,pg-b port=5432 dbname=broker user=broker target_session_attrs=read-write"
+```
+
+- Each host is tried in turn; `target_session_attrs=read-write` selects the one that is the
+  **primary** (a read-only standby is skipped), so after a failover a *fresh* connection lands
+  on the promoted node automatically.
+- **Every host in the list is DNS-resolved on every connect, whether or not it is reachable.**
+  psycopg (`psycopg/_conninfo_attempts.py::conninfo_attempts`) splits a multi-host DSN into one
+  attempt per host and calls `getaddrinfo` on each **eagerly, before any connection is attempted** —
+  it is not libpq walking the list lazily. So a host that is *permanently* down still costs a
+  resolution (A **and** AAAA) per connection, forever, and psycopg logs the failure only at
+  `debug`. In 2026-07 that turned a dead standby into 71% of a LAN's DNS traffic in silence. If you
+  retire a host, take it out of `PGCONN`; the monitoring below is what tells you one has died.
+- Every br0kr process opens connections through `br0kr/db.py`, which applies TCP keepalives + a
+  connect timeout and, where a brief outage should be ridden through, **bounded retry**
+  (`connect_with_retry`): a transient connection error (server unreachable / starting up /
+  overloaded) is retried with exponential backoff; a misconfig (bad password, missing database)
+  fails fast.
+
+**Behaviour during a failover window:**
+
+| Component | What happens | Why it's safe |
+|---|---|---|
+| **Daemon leader conn** | the leader session drops → the advisory lock auto-releases; `serve()` sees `still_leader` go false and stops serving; `run()` reconnects (retrying) and re-stands-by, re-electing on the new primary. | At most the documented ~one-tick overlap (C9 residual); never two long-lived leaders **provided there is one primary**. |
+| **Daemon work conn** | the per-tick connect is a single attempt (`db.connect`); a tick whose connect fails is logged by `serve()` and the loop retries on the next interval (the tick loop *is* the retry). | A transient ledger gap delays a reconcile by one interval; it never crashes the daemon. |
+| **MCP gateway** | each tool call's connect retries briefly; a short failover is transparent to the agent, a long outage surfaces as an error (not a hang). | Bounded — the agent gets an answer or a clear failure, never an indefinite block. |
+| **Migrator** | `br0kr/migrate.py` connects with retry and (with `target_session_attrs=read-write`) runs DDL only on the primary. | A boot-time migrate waits for the primary instead of crash-looping. |
+
+**Locale note (fail-fast on a misconfig):** libpq does not attach a SQLSTATE to a *connect-time*
+failure, so `br0kr/db.py` tells a permanent misconfig (bad password / missing database / pg_hba
+rejection) from a transient blip by the server's **message text**. That matching assumes the
+ledger emits C/English messages — the Postgres default. If you set a non-default `lc_messages`
+on the ledger, a misconfigured DSN still surfaces (with its real error text) but only after the
+bounded retry budget, not instantly. For instant fail-fast under any locale, keep the ledger's
+`lc_messages = C` (or `en_US`). This is a diagnostics nicety — correctness is never affected (the
+retry is bounded; a misconfig can never be retried into a double-allocation).
+
+---
+
+## Monitoring the replication posture (is the standby actually there?)
+
+**Read this even if you think you would notice.** On 2026-07-27 the bundled `pg-standby` died and
+crash-looped 2701 times over **45 hours** and nothing in br0kr said a word: the daemon held
+leadership, the ledger stayed writable through the surviving `PGCONN` host, admission stayed correct,
+and `/healthz`, `/readyz` and every dashboard tile stayed green. The DR posture was gone with all the
+lights on. It was eventually found *from the network side*, because the dead container's DNS lookups
+became 71% of all traffic on the LAN. Replication failing silently is the default; you have to
+measure it on purpose.
+
+`br0kr/ledgerhealth.py` reads the primary's own `pg_replication_slots` + `pg_stat_replication` and
+surfaces them two ways:
+
+- **`/metrics`** — leader-only `br0kr_ledger_*` gauges (ledger-wide facts, so only the leader emits
+  them, the same no-double-counting rule as leases-by-state).
+- **the dashboard** — a "Ledger — DR posture" tile strip in the Capacity tab, from `GET /api/ledger`.
+
+The load-bearing mechanic: **a replication slot outlives the standby that used it.** When the consumer
+dies the slot stays, flips to `active=false`, and the primary starts *pinning WAL* for a consumer that
+will never return. That pair — an inactive slot with growing retention — is the signature.
+
+**What counts, and what deliberately does not.** The DR aggregates are computed over **physical** slots
+and real standbys only. A LOGICAL slot (a CDC consumer that connects nightly is `active=false` by
+design) would otherwise page you daily, and a `pg_basebackup` session (`state='backup'`) would flip a
+slotless single-node ledger to "configured" for the duration of every backup. Logical slots still appear
+in the per-slot detail and in `br0kr_ledger_slot_*{slot=…}`, labelled — so their WAL retention stays
+visible without pretending to be a replica. Known residual: a `pg_receivewal` archiver reports
+`state='streaming'` and is counted as a standby (it is a real WAL consumer, just not a replayable one).
+
+| gauge | means |
+|---|---|
+| `br0kr_ledger_replication_readable` | `0` = we could not ask (managed Postgres without these columns, permission denial). **UNKNOWN, not a fault** |
+| `br0kr_ledger_replication_configured` | `0` = no slots and no walsenders. A single-node ledger, **legitimate** |
+| `br0kr_ledger_standbys_streaming` | connected standbys actually keeping up |
+| `br0kr_ledger_standbys_sync` | of those, how many are SYNCHRONOUS — losing one **blocks commits**, not just DR |
+| `br0kr_ledger_slots_inactive` | slots with **no consumer** — the dead-standby signal |
+| `br0kr_ledger_slots_lost` | `wal_status='lost'`: WAL already recycled, the standby needs a **re-clone**, not a restart |
+| `br0kr_ledger_slot_retained_wal_bytes{slot}` | WAL the primary is holding for that slot; the disk-pressure side |
+| `br0kr_ledger_replay_lag_bytes` | worst standby lag, measured from the primary's current WAL position |
+
+**Three states on purpose.** "cannot read", "not configured", and "configured but broken" are
+rendered differently, and only the third is ever red. A signal that cried wolf over a deliberate
+single-node ledger would get muted — and would then be muted on the day a real standby died. That is
+the same class of mistake as logging the failure at `debug`.
+
+**The rules worth having.** Real alerting-rule YAML, not a one-liner — `for` is a rule field, not part
+of the expression, and pasting it into `expr` is a parse error:
+
+```yaml
+groups:
+  - name: br0kr-ledger-dr
+    rules:
+      # The 45-hour incident. A configured ledger whose physical slot has no consumer.
+      - alert: Br0krLedgerStandbyGone
+        expr: br0kr_ledger_replication_configured == 1 and br0kr_ledger_slots_inactive > 0
+        for: 10m
+        # See the staleness note below: without this, an unreadable window RESOLVES this alert.
+        keep_firing_for: 15m
+
+      # Unreadable is its OWN alert, not silence. Required for the rule above to mean anything.
+      - alert: Br0krLedgerPostureUnknown
+        expr: br0kr_ledger_replication_readable == 0
+        for: 10m
+
+      # Unrecoverable in place: the WAL is gone, the standby needs a re-clone.
+      - alert: Br0krLedgerSlotLost
+        expr: br0kr_ledger_slots_lost > 0
+        for: 0m
+
+      # A standby can be state='streaming' with an active slot and still replay NOTHING (replay paused,
+      # a recovery conflict, a dying disk). Neither rule above sees it; only the lag does. Tune the
+      # threshold to your WAL rate — this is "further behind than a normal burst".
+      - alert: Br0krLedgerStandbyStalled
+        expr: br0kr_ledger_replay_lag_bytes > 1073741824
+        for: 15m
+
+      # A SYNCHRONOUS standby is not a DR nicety: commits BLOCK on it. Page immediately.
+      - alert: Br0krLedgerSyncStandbyLost
+        expr: br0kr_ledger_replication_configured == 1 and br0kr_ledger_standbys_sync == 0
+        for: 0m
+```
+
+> **⚠️ Why `Br0krLedgerPostureUnknown` and `keep_firing_for` are not optional.** Every posture gauge
+> except `br0kr_ledger_replication_readable` is emitted **only when the read succeeded** — deliberately,
+> so an unreadable ledger never renders as a confident set of zeros. The consequence is that during an
+> unreadable window those series are *absent*, Prometheus marks them stale, the `and` in the
+> dead-standby rule matches nothing, and a **firing alert resolves with its `for` clock reset**. A
+> ledger that flaps in and out of readability would therefore flap straight through the incident. The
+> `readable == 0` rule covers the gap and `keep_firing_for` stops the flap.
+
+`Br0krLedgerSlotLost`'s remedy differs from the others — re-clone, don't restart:
+`docker compose stop pg-standby && docker volume rm <project>_pg-standby-data && docker compose up -d
+pg-standby`.
+
+**On an external / managed Postgres, grant `pg_monitor` first.** `pg_stat_replication` does not refuse
+a least-privilege role — it returns the rows with every column but `pid` set to **NULL**. br0kr detects
+that and reports `readable=0` / `reason=stats_masked` rather than misreading a healthy standby as a dead
+one, but you get no standby visibility until you fix it:
+
+```sql
+GRANT pg_monitor TO <the role in PGCONN>;
+```
+
+The bundled compose pair needs nothing — its `POSTGRES_USER` is the image's bootstrap superuser.
+
+**This is deliberately NOT wired into `/readyz`.** A dead replica means DR is degraded — it does not
+mean this reconciler stopped doing its job. Gating readiness on it would turn a degraded standby into
+a not-ready broker and, under an orchestrator, into a total outage: strictly worse than the problem
+being reported. The reasoning is recorded in `observability.readiness`'s docstring so it cannot be
+"fixed" by accident. There is also **no knob** — a knob would only mute a red state, and the signal is
+built not to *be* red for a configuration you chose.
+
+**Proven, not asserted:** `scripts/run_ledger_replication.sh` (**:5492**/:5493) stands up a real
+primary + hot standby on a named slot, then stops the standby on purpose and asserts the slot survives
+`INACTIVE`, still reads *configured*, and the primary's retained WAL **grows** — then that it drains
+when the standby returns, and that dropping the slot reads a neutral *not_configured*.
+
+## Backups (durability)
+
+Replication protects against a node failure; it does **not** protect against a bad migration, an
+operator `DELETE`, or corruption — those replicate. Keep independent backups.
+
+**Logical dump (baseline safety net):**
+
+```
+PGCONN="host=… dbname=broker user=… password=…" scripts/backup_ledger.sh /var/backups/br0kr
+```
+
+Writes a timestamped custom-format dump. Run it on a schedule (cron/systemd-timer), ship the
+files **off the database host**, and set a retention window. Suggested starting point: hourly
+dumps kept 48h + daily kept 30d — tune to your RPO and disk.
+
+**WAL archiving / PITR (low RPO):** for the ability to restore to *any* point in time (not just
+the last dump), enable continuous WAL archiving (`archive_mode=on`, `archive_command` to durable
+off-box storage) or use a tool like pgBackRest / WAL-G. This is the real low-RPO story; the
+logical dump is the floor.
+
+---
+
+## Restore drill (practice this before you need it)
+
+A backup you have never restored is a hope, not a backup. Periodically:
+
+1. Provision a fresh, empty Postgres (NOT the production primary).
+2. Restore the latest dump:
+   `pg_restore --clean --if-exists --no-owner --dbname "$PGCONN_TARGET" <dump>`
+3. Apply migrations (a restore + a newer code deploy may need them):
+   `PGCONN="$PGCONN_TARGET" python -m br0kr.migrate`
+4. Sanity-check: `SELECT count(*) FROM lease;`, the latest `schema_migrations.version`, and that
+   `node`/`cluster` rows are present.
+5. Record the restore time — that is your real **RTO** input.
+
+> **⚠️ After a restore or a failover to a lagging standby, the ledger is BEHIND the real fleet — do these two
+> steps BEFORE resuming the reconcile daemon, or the orphan sweep can destroy live guests:**
+>
+> Guests provisioned after the backup/replication point have no lease row, so the sweep sees them as absent. The
+> **rollback watermark** (`lease.max_lease_id`) mitigates this: when any absent guest's id is at/above the
+> ledger's max, a rollback is suspected and the sweep spares EVERY absent guest that pass (below-watermark ones
+> too — lease id order is not commit order). But the id **sequence** is rolled back with the ledger, so new
+> admissions re-mint ids in the spared range and a re-minted id going terminal can still destroy the old guest.
+> So:
+>
+> 1. **Restart the id sequence past the fleet's highest fence id.** Find the max `br0kr-lease-<id>` tag across
+>    all nodes (`qm config`/the tags on each guest), then:
+>    `ALTER TABLE lease ALTER COLUMN id RESTART WITH <max_fence_id + 1>;`
+>    This stops re-minting into the spared range and restores the "ids are monotonic, never reused" invariant the
+>    sweep (and admission) rely on.
+> 2. **Dry-run the sweep first.** Point the daemon at the restored ledger with `sweep_dry_run=true` (or call
+>    `orphan_sweep(..., dry_run=True)`) and confirm the destroy list is empty / expected before allowing real
+>    teardown. Only set `allow_mass_absent` after you have confirmed a genuine teardown.
+
+---
+
+## Failover checklist (operator)
+
+- [ ] The failover controller (Patroni/etc.) is healthy and its consensus store has quorum.
+- [ ] Promotion **fences the old primary** before/at promotion (no two writable primaries).
+- [ ] `PGCONN` lists all candidate hosts + `target_session_attrs=read-write` (clients re-home
+      themselves; no per-service reconfig needed).
+- [ ] After failover: confirm exactly one primary (`SELECT pg_is_in_recovery();` → `f` on one
+      node only), the daemon has re-elected a single leader, and a test `request_lease` admits.
+- [ ] Backups are still running against the new primary.
+
+---
+
+## What is proven vs operator-owned
+
+- **Proven — client ride-through** of a real server stop/restart, transient-vs-misconfig
+  classification, bounded backoff: `scripts/harness_ledger_ha.py` (real Postgres) +
+  `tests/unit/test_db.py` (hermetic).
+- **Proven — failover behaviour end to end** against REAL streaming replication (a primary +
+  hot standby, killed and `pg_promote`d mid-lifecycle):
+  - `scripts/harness_ha_failover.py` (hermetic, **two contending daemons**, fake actuator):
+    SINGLE-WRITER holds across the failover — a burst of leases each land on a DISTINCT vmid
+    (the actuator's `nextid()` models Proxmox's unreserved id, so a second writer would collide),
+    committed leases survive on the promoted primary, a daemon re-homes and resumes serving, and
+    leases are reaped. This is the no-double-allocation proof under HA contention.
+  - `scripts/harness_ha_failover_live.py` (LIVE on a Proxmox node, real fenced VM): a real guest's
+    lease survives the failover, the daemon re-homes and provisions a second real guest on the
+    promoted primary, and the guest is reaped — proven on a real PVE node.
+- **Operator-owned (standard Postgres ops):** the production replication TOPOLOGY itself —
+  streaming replication, the failover controller (Patroni/etc.) + **single-primary fencing**, WAL
+  archiving, and off-box backup storage. The harnesses hand-roll a primary+standby and promote it
+  to *exercise* the code's failover behaviour; production uses a real failover manager. br0kr does
+  not reimplement that infra; it is built (and now proven) to ride through the window it creates.
+
+## See also
+- [docker-deploy.md](docker-deploy.md) — the Compose stack that wires this HA topology (the bundled primary+standby starter; §9 the stretched/DR standby over the mesh)
+- [/SECURITY.md](../../SECURITY.md) — C9 single-writer + the split-brain residual
+- [../architecture.md](../architecture.md) — roadmap item #9 (ledger HA)
+- `br0kr/db.py` — the connection seam (keepalives, retry, classifier)
+- `scripts/backup_ledger.sh` — the logical-backup tool this runbook drives

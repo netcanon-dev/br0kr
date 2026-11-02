@@ -1,0 +1,62 @@
+# =============================================================================
+# .gitignore — a secret-hygiene control, not just noise reduction.
+# Grouped by intent so a reviewer can see at a glance what is excluded and why.
+# =============================================================================
+
+# --- Secrets & keys: NEVER commit -------------------------------------------
+# The committed config TEMPLATE is *.example; the real, secret-bearing file is
+# always ignored. This ships the config shape without the secret.
+.env
+*.env
+!*.env.example
+*.agekey
+*.key
+keys.txt
+# TLS replication material for the stretched DR standby (operator-generated, host-only): the dir
+# holds private keys (also matched by *.key) — never commit it.
+certs/
+**/age/keys.txt
+secrets.yaml
+secrets.yml
+# Decrypted outputs (SOPS/age decrypts in place — decrypted copies are transient)
+*.dec
+*.decrypted
+*.plain.yml
+*.plain.yaml
+
+# --- Runtime data: local only, may carry PII --------------------------------
+# Live databases, logs, caches, uploads — regenerated locally, never tracked.
+data/
+*.log
+*.sqlite
+*.sqlite3
+uploads/
+local/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv*/
+venv/
+env/
+build/
+dist/
+
+# --- Test / lint / type caches + coverage -----------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- OS / editor noise ------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.journal.jsonl

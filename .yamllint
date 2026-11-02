@@ -1,0 +1,26 @@
+# yamllint config — the YAML lint layer. `extends: default`, relaxed ONLY where a
+# real, justified idiom conflicts with strict YAML. Keep relaxations commented so a
+# future reader knows each was a deliberate choice, not an accident.
+extends: default
+
+rules:
+  line-length:
+    max: 120
+    level: warning          # long lines (URLs, inline data) warn, never fail the gate
+  comments:
+    min-spaces-from-content: 1
+  truthy:
+    # Default is strict (only true/false). Widen ONLY if a tool you use treats
+    # yes/no/on/off as booleans (Ansible, some compose idioms). Delete the extras
+    # for a plain Python repo to keep the check tight.
+    allowed-values: ["true", "false"]
+    check-keys: false
+  document-start: disable   # `---` not required at the top of every file
+  braces:
+    max-spaces-inside: 1    # allow `{ key: value }` flow maps
+
+# Skip generated / vendored / secret trees. Add paths your repo renders or vendors.
+ignore: |
+  .venv/
+  **/*.generated.yml
+  **/*.generated.yaml

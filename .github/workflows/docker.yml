@@ -1,0 +1,46 @@
+# docker — build + smoke-test the runtime image, but NEVER publish it.
+#
+# br0kr is pre-alpha; no image is published yet. So this workflow has NO
+# registry login, NO `docker push`, and NO `packages: write` permission. It
+# builds the image on the ephemeral GitHub-hosted runner (see ci.yml's RUNNERS
+# note), proves it runs, and deletes it. The day the broker is ready to ship,
+# add a push step gated behind a tag + an explicit visibility decision.
+name: docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only. The absence of `packages: write` is the guarantee: even a malicious
+# step could not publish the image, because the token has no registry scope.
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  build:
+    name: build image (unpublished) + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build the image (local only — never pushed)
+        # A unique local tag per commit; this tag exists only on the runner and is
+        # removed below. No registry is contacted.
+        run: docker build --pull -t "br0kr:ci-${{ github.sha }}" .
+
+      - name: Smoke test (the package imports + runs inside the image)
+        run: docker run --rm "br0kr:ci-${{ github.sha }}"
+
+      - name: Remove the local image (tidy; the hosted VM is discarded anyway)
+        if: always()
+        run: docker image rm "br0kr:ci-${{ github.sha }}" || true

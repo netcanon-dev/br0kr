@@ -1,0 +1,29 @@
+-- 0047_multi_disk_enabled — the request-surface master switch for the MULTI-DISK arc (design §9 PR-5, §11
+-- open-decision #3). PR-2..PR-4 landed the admission per-pool debit, the placement lockstep, and the PVE
+-- actuation INERT — inert ONLY because no request surface populated AdmissionRequest.data_disks (nothing a
+-- tenant could call ever set it). PR-5 OPENS that surface (gateway.request_lease/schedule_lease + the MCP
+-- tools gain a `data_disks` param), so the natural inertness ends — and THIS knob becomes the deliberate
+-- go-live gate in its place:
+--   * OFF (default): the request surface REFUSES a non-empty `data_disks` ask with `multi_disk_disabled`
+--     BEFORE any admission lock/debit/child-row write, so the surface can DEPLOY while multi-disk stays
+--     inert (byte-identical single-disk behaviour — an empty `data_disks` ask never even reads this knob).
+--   * ON: a `data_disks` ask is accepted, validated (multidisk.validate_data_disks), debited per-pool under
+--     the admission scope-lock SET, and actuated (the PR-4 attach + per-disk landed assertion).
+-- Flip it ON deliberately ONCE every pool a tenant may name as a DATA target is declared images-capable
+-- (admin.set_storage_content — design §11-#1), exactly the fleet-wide coverage discipline the
+-- clone_content_enforcement (0042) flip itself required. Reversible: clear the override → OFF.
+--
+-- WHY a knob at all (rather than shipping the surface already-live): the arc's discipline is
+-- land-dark-then-flip-deliberately (cross_node_clone/0037, clone_content_enforcement/0042). A ledger toggle
+-- lets the request surface deploy INERT and go live as a separate, reversible, dashboard-visible gesture —
+-- no redeploy, and instantly revertible if a real data-disk provision misbehaves.
+--
+-- WHY operator_setting (0021 pattern) and NOT env: this gate is read ONLY in the gateway request surface
+-- (the daemon actuates whatever child rows already exist — it is knob-AGNOSTIC, so there is no cross-process
+-- daemon/gateway drift to close here as there was for full_clone/cross_node_clone). It is a ledger column
+-- purely so the flip is a dashboard edit, revertible without a redeploy — matching every other go-live flip
+-- in this codebase. Nullable → settings.resolve()'s COALESCE(ledger, env, default=False) keeps an all-NULL
+-- row byte-identical to the shipped default (OFF): the surface is deployed but inert. Idempotent; a schema
+-- change is a NEW file (never an edit of a shipped migration).
+
+ALTER TABLE operator_setting ADD COLUMN IF NOT EXISTS multi_disk_enabled boolean;

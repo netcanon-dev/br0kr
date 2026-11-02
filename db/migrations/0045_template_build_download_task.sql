@@ -1,0 +1,41 @@
+-- 0045_template_build_download_task — persist the download TASK handle so the stale-build reclaim can reap a
+-- guest-free DOWNLOADING build's transient SOURCE image too (the last import-source-reap residual, PR-I; the
+-- follow-up the #127 reclaim-reap review deliberately deferred). Closes the leak: a build whose server-side
+-- download-url task outran build_template's wait budget (secs=1800) is left NON-TERMINAL (DOWNLOADING, no vmid);
+-- daemon._reclaim_builds later reclaims it, but with vmid NULL it has no guest to destroy AND — before this — no
+-- way to know whether/where the ~cloud-image-sized source landed, so it marked the build FAILED (terminal →
+-- invisible to every sweep) WITHOUT reaping. The file then lands after the free (or after the mark) and orphans
+-- FOREVER, with no later actor.
+--
+-- WHY persist the (node, upid): the ONLY sound reap of a download-stage source is AFTER the download task has
+-- SETTLED — PVE download-url writes to a temp path and renames to the final volid only after the checksum
+-- verifies, so a blind free while the task is still running 404s the not-yet-renamed volid (harmless) and the
+-- file lands later anyway (the exact orphan). To learn the task settled, the reclaim RE-ATTACHES via pve.wait()
+-- on the EXACT node the download ran on — the same write-once-upid resume primitive replication.rebuild_source
+-- uses (pve.download_start, 0040/PR-6). So two nullable columns:
+--   * download_upid — the download-url task UPID build_template already holds (reconciler.build_template calls
+--     pve.download_start then wait(upid); the upid was simply discarded on TIMEOUT). build.set_download_task
+--     stamps it the instant the POST returns, BEFORE the long wait, so a crash mid-wait leaves the handle.
+--   * download_node — the br0kr node the download actuated on (the daemon's chosen build node). A DOWNLOADING
+--     build stamps NO node_id (that is the guest-created-on node, set with the vmid at import — build.py), so a
+--     dedicated column carries the download node WITHOUT overloading node_id's "a guest exists" meaning. The
+--     reclaim resolves this node's driver (registry.get) to re-attach + reap on the RIGHT node — never a
+--     reach-blind cluster-any driver (the PR-A2 bug class the #127 review flagged).
+--
+-- The reap is PURE hygiene and NEVER gates the finalize: a download-stage build has no guest, so the reclaim
+-- ALWAYS finalizes it and only reaps the source IF the re-attach confirms the download SETTLED. A download it
+-- cannot confirm settled (node unserved/repointed, still running or unqueryable past the bounded poll, or the
+-- re-attach raised) is finalized WITHOUT a reap, with a WARNING naming the volid + a manual `pvesm free` (never
+-- deferred — deferring on the reap would wedge the build in RECLAIMING forever and brick its target).
+--
+-- Both NULLABLE: NULL for a legacy/pre-0045 in-flight build, an operator/tenant build that never reached
+-- download_start, and every non-DOWNLOADING row. A guest-free reclaim with NULL download_upid finalizes with no
+-- reap — USUALLY nothing landed, but a POST that returned inside the crash/stamp window (leader died between the
+-- POST and the set_download_task commit) can still land its file, so it too is a named `pvesm free` residual, not
+-- a guarantee of "nothing to leak". download_node -> node(id) ON DELETE SET NULL (mirrors 0029's node_id): a
+-- since-deleted node nulls the handle and the reclaim finalizes without a reap (also a named residual). download_upid
+-- has no FK (a PVE task id is not a br0kr row). Strictly ADDITIVE + safe for builds in flight across the upgrade.
+-- Idempotent (ADD COLUMN IF NOT EXISTS); a schema change is a NEW file.
+
+ALTER TABLE template_build ADD COLUMN IF NOT EXISTS download_upid text;
+ALTER TABLE template_build ADD COLUMN IF NOT EXISTS download_node text REFERENCES node(id) ON DELETE SET NULL;

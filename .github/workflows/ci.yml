@@ -1,0 +1,108 @@
+# CI — the OFFLINE correctness gate.
+#
+# Runs the SAME validate gate contributors run locally (tests/validate.sh) plus
+# the test matrix, hermetically: nothing here touches live infrastructure,
+# credentials, or a real database. Anything that needs those stays out of CI
+# (run it on the deploy host / a dedicated environment). Keeping CI offline is
+# what makes "green in CI" a trustworthy signal and keeps every PR fast.
+#
+# RUNNERS: GitHub-hosted (ubuntu-latest), deliberately — in every workflow. This
+# repo is public and CI runs on `pull_request`, so a FORK's PR executes here. On
+# a self-hosted runner that means a stranger's code runs on the maintainer's own
+# network (next to the hypervisors and the ledger this project manages). Hosted
+# runners are ephemeral and isolated. Keep self-hosted runners for PRIVATE repos
+# only; nothing here needs them, because the gate is hermetic (above).
+name: ci
+
+on:
+  push:
+    branches: [main]          # main — add 'master' if that's your default
+  pull_request:
+
+# Default-deny the GITHUB_TOKEN. Every job below is read-only (lint + tests);
+# none push to the repo, publish a package, or write a release. A compromised
+# step (a typo-squatted action, a malicious transitive dep pulled by pip)
+# inherits only read scope. Grant more on the ONE job that needs it, never here.
+permissions:
+  contents: read
+
+# Collapse superseded runs on the same ref — push twice and the first run is
+# cancelled. Saves runner minutes; avoids an older commit's stale green racing
+# the new one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Opt JS actions into the Node24 runtime ahead of GitHub's forced cutover
+  # (Node20 deprecation, 2025-09 → mid-2026). Surfaces any incompatibility now
+  # rather than at the deadline. Remove once the runners default to Node24.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  validate:
+    name: validate (lint · secrets · syntax)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Clear the token-in-.git/config default; this job never pushes, so
+          # there's no reason to leave a credential on disk for a later step
+          # (or a malicious dep) to read.
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'   # the version used to RUN the linters; the
+          cache: pip               # test matrix below covers the support range
+
+      - name: Install lint toolchain (pinned for determinism)
+        # Pin the linter so an unrelated PR doesn't go red because a new ruff
+        # minor added a rule. Bump deliberately via Dependabot.
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements-dev.txt
+          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | sudo tar -xz -C /usr/local/bin gitleaks
+
+      - name: validate (the same gate as local + the deploy host)
+        # tests/validate.sh is the single source of truth for "is it green":
+        # contributors run it before commit, CI runs it here, the deploy host
+        # runs it on release. --strict makes a missing tool a failure (in CI
+        # every tool must be present; locally it degrades gracefully).
+        run: bash tests/validate.sh --strict
+
+  test:
+    name: tests — py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't let one Python version's failure hide the others — we want to see
+      # the full pass/fail grid on a red PR.
+      fail-fast: false
+      matrix:
+        # The support range — keep it in lockstep with pyproject.toml's
+        # `requires-python` + version classifiers. CONVENTION: if you exclude a
+        # version (no wheel yet, upstream gap), leave a comment HERE saying why
+        # and when to re-add it, so the gap is documented at the point of truth.
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install runtime + test deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r tests/requirements-dev.txt
+
+      - name: pytest (offline — e2e/slow excluded; the hermetic default)
+        # The PR gate runs the fast, hermetic tiers. Slow/e2e tiers (real
+        # browser, live service) run in a dedicated job or out-of-band so the
+        # gate stays fast. Coverage targets your package(s).
+        run: pytest -m "not e2e and not slow" --cov=br0kr --cov-report=term-missing

@@ -1,0 +1,18 @@
+# zizmor site config — hybrid action-pinning policy.
+#
+# `unpinned-uses` fires only on THIRD-PARTY action publishers. First-party
+# publishers (`actions/*`, `github/*`) may use tag-pins because GitHub controls
+# those repos and force-push protections apply. Third-party publishers
+# (`docker/*`, `pypa/*`, `softprops/*`, `sigstore/*`, `astral-sh/*`, ...) MUST
+# SHA-pin, since a hijacked tag in those orgs is a real (if low-probability)
+# supply-chain compromise vector.
+#
+# Without this policy the rule re-fires on every `actions/checkout@v4` call and
+# drowns the real third-party findings in noise.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "actions/*": ref-pin   # GitHub-owned, force-push protected
+        "github/*": ref-pin    # GitHub-owned
+        "*": hash-pin          # third-party publishers: full SHA required

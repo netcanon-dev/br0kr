@@ -1,0 +1,61 @@
+# Security — secret scanning + dependency audit.
+#
+# Complements the working-tree secret scan in the local validate gate with a
+# FULL-HISTORY scan (a secret committed and later "removed" still lives in
+# history), and audits the dependencies for known CVEs. The weekly schedule
+# catches a CVE disclosed against a dependency you didn't touch, or a secret
+# already in the tree.
+#
+# Runs on GitHub-hosted runners (see ci.yml's RUNNERS note). Dependabot bumps
+# the actions and requirements.txt; the gitleaks release below is a pinned curl
+# URL, which Dependabot cannot see, so bump it BY HAND (here and in ci.yml).
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'        # weekly, Monday 06:00 UTC
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  gitleaks-history:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0        # full history, so a secret in ANY past commit is caught
+          persist-credentials: false
+      - name: Install gitleaks
+        # Pinned release; bump by hand, in lockstep with ci.yml (Dependabot can't
+        # see a curl URL).
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+      - name: Scan all commits
+        # -c .gitleaks.toml allowlists known-safe matches (ciphertext, fixtures);
+        # drop the flag if you have no config. --redact keeps secrets out of logs.
+        run: gitleaks detect -c .gitleaks.toml --redact --no-banner
+
+  pip-audit:
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: pip install --quiet pip-audit
+      # requirements.txt — your dependency manifest. Dependabot proposes the
+      # upgrades; pip-audit is the fail-the-build backstop if a CVE lands.
+      - run: pip-audit -r requirements.txt

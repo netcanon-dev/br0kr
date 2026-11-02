@@ -1,0 +1,36 @@
+# ── Line endings: LF everywhere, on every platform ───────────────────────────────────────
+# WHY THIS EXISTS (a real, measured outage — 2026-07-29). The deploy path for this repo is
+# `git archive` on a Windows maintainer box → tar → scp → extract on the deploy host.
+# `git archive` emits the WORKING-TREE representation of each file, so under
+# core.autocrlf=true EVERY file in the deploy artifact arrived CRLF.
+#
+# Python tolerated it (it normalises source newlines at import, so even the sha256-pinned
+# ui_assets.py payloads still hashed correctly) and so did YAML — which is exactly why this
+# went unnoticed: CI was green, the tests passed, only the deployed artifact was broken.
+# But `docker/pg-standby-entrypoint.sh` is a BIND-MOUNTED bash entrypoint, and CRLF is fatal
+# to bash in a way that is worse than a plain syntax error:
+#
+#   * `set -e` becomes `set -e$'\r'` → "set: -: invalid option" → errexit is silently NOT
+#                                      enabled, so later failures stop being fatal
+#   * `fi`     becomes `fi$'\r'`     → the block never closes → "syntax error: unexpected
+#                                      end of file", and the whole body never runs
+#
+# Consequence: pg-standby crash-looped 2701 times over 45 hours. Because a non-running
+# container has NO record in Docker's embedded DNS, every ledger connection's `pg-standby`
+# lookup (PGCONN is multi-host: `host=pg-primary,pg-standby`) escaped the compose network to
+# the LAN resolver — 530,477 NXDOMAIN queries in 2.15 days, 71% of all DNS on the network,
+# with a shape indistinguishable from malware beaconing. See CHANGELOG [Unreleased] and
+# docs/runbooks/docker-deploy.md §"Line endings are load-bearing".
+#
+# `text=auto` lets git detect text vs binary, so binaries stay byte-exact. `eol=lf` pins the
+# working-tree AND `git archive` representation to LF regardless of the committer's
+# core.autocrlf/core.eol. The index was already 100% LF, so declaring this changes no
+# committed content — it fixes the ARTIFACT, which is where the bug lived.
+#
+# tests/check_line_endings.py is the covering check (wired into tests/validate.sh).
+* text=auto eol=lf
+
+# The vendored UI-spec payloads are sha256-pinned (tests/unit/test_ui_assets.py), which makes
+# their EOL load-bearing in a second, independent way. Covered by the repo-wide rule above;
+# kept explicit so a future narrowing of that rule cannot silently unpin them.
+br0kr/ui_assets.py text eol=lf

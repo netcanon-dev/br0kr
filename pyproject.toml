@@ -1,0 +1,175 @@
+# -----------------------------------------------------------------------------
+# Package metadata + build ([build-system]/[project]) and all Python tooling
+# config ([tool.*] — lint, format, type, test, coverage). Keep rule config here
+# so CI/pre-commit invoke the tools config-free (`ruff check .`, `mypy br0kr`,
+# `pytest`) and the rules can't drift between local and CI.
+# -----------------------------------------------------------------------------
+
+[build-system]
+requires = ["hatchling>=1.27"]   # 1.27+ for PEP 639 SPDX `license` + `license-files`
+build-backend = "hatchling.build"
+
+[project]
+name = "br0kr"
+dynamic = ["version"]            # single source of truth: br0kr/__init__.py __version__
+description = "Postgres-backed capacity broker: race-free, admission-controlled VM provisioning on Proxmox"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# The CI test matrix (ci.yml) is the support range: keep the two in lockstep.
+requires-python = ">=3.11"
+authors = [{ name = "netcanon-dev" }]
+keywords = ["proxmox", "postgresql", "capacity-planning", "admission-control", "mcp", "vm-provisioning"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: System :: Systems Administration",
+]
+# Mirrors requirements.txt (which the Dockerfile + CI install from). Keep the
+# two identical; the mcp pin's rationale lives in requirements.txt.
+dependencies = [
+    "psycopg[binary]>=3.2",
+    "requests>=2.32",
+    "mcp==1.30.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/netcanon-dev/br0kr"
+Documentation = "https://github.com/netcanon-dev/br0kr/blob/main/docs/README.md"
+Issues = "https://github.com/netcanon-dev/br0kr/issues"
+Changelog = "https://github.com/netcanon-dev/br0kr/blob/main/CHANGELOG.md"
+
+# The four long-running/one-shot services, so an installed br0kr doesn't need
+# `python -m`. Each maps to the module's existing main().
+[project.scripts]
+br0kr-migrate = "br0kr.migrate:main"
+br0kr-gateway = "br0kr.mcp_server:main"
+br0kr-daemon = "br0kr.daemon:main"
+br0kr-dashboard = "br0kr.dashboard:main"
+
+[tool.hatch.version]
+path = "br0kr/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["br0kr"]
+
+# A wheel can't ship the repo's top-level db/ beside the package, so the schema
+# rides INSIDE it as br0kr/_migrations; br0kr/migrate.py prefers that packaged
+# copy and falls back to ../db/migrations (source checkout, editable install,
+# Docker image). db/migrations stays the single source of truth.
+[tool.hatch.build.targets.wheel.force-include]
+"db/migrations" = "br0kr/_migrations"
+
+[tool.hatch.build.targets.sdist]
+include = ["/br0kr", "/db", "/LICENSE", "/README.md", "/CHANGELOG.md", "/requirements.txt"]
+
+# =============================================================================
+# ruff — linter + formatter (https://docs.astral.sh/ruff/)
+# =============================================================================
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+exclude = ["scripts", "examples"]
+
+[tool.ruff.lint]
+# Curated, explained rule set. Each family earns its place; add others (e.g. "S"
+# for bandit-style security lints, "PTH" for pathlib) as the codebase warrants.
+select = [
+    "F",    # pyflakes      — unused imports/vars, undefined names
+    "E",    # pycodestyle   — errors
+    "W",    # pycodestyle   — warnings
+    "I",    # isort         — import ordering (autofixable)
+    "UP",   # pyupgrade     — modernize syntax for the target version
+    "B",    # bugbear       — likely-bug patterns
+    "C4",   # comprehensions
+    "PIE",  # misc lints
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    # Every ignore MUST carry a reason. An unexplained ignore is a code smell —
+    # delete it or document the trade-off so a future reader can re-evaluate.
+    "SIM108",  # ternary-over-if/else often hurts readability on non-trivial arms
+    "RUF002",  # ambiguous unicode in docstrings — em-dashes/curly quotes are intentional prose
+    "RUF003",  # ambiguous unicode in comments — same rationale
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Package re-exports: a symbol imported only to be surfaced via __all__ is intentional.
+"__init__.py" = ["F401"]
+# Test scaffolding differs from production standards:
+#   B017 - pytest.raises(Exception) is sometimes the intended assertion
+#   B905 - zip() without strict= is fine when lengths are fixture-controlled
+#   RUF012 - mutable class attrs on throwaway fake/helper classes
+"tests/**" = ["B017", "B905", "RUF012", "E501"]
+# Vendored spec payloads (netcanon-dev/ui-design-spec dist files embedded as string constants):
+# the bytes must stay EXACTLY as shipped — tests/unit/test_ui_assets.py sha256-gates them — so no
+# re-wrapping (E501: theme-picker.js carries a ~1000-char generated data line), no whitespace
+# "fixes" (W291/W293: the payloads contain trailing spaces), and no unicode nits (RUF001:
+# em-dashes in the vendored comments; RUF002/003 are already ignored globally for the same
+# prose reason).
+"br0kr/ui_assets.py" = ["E501", "W291", "W293", "RUF001"]
+
+[tool.ruff.lint.isort]
+# Force the future-import so `str | None` annotations evaluate on older legs and
+# import order is deterministic. Drop this line if your minimum is 3.10+ and you
+# don't want it.
+
+[tool.ruff.format]
+# `ruff format` is adopted here (greenfield-friendly: no giant reflow diff if you
+# start formatted). An existing unformatted tree may choose to OMIT this section
+# to avoid a one-shot whole-tree reflow — that's a deliberate per-project call.
+quote-style = "double"
+
+# =============================================================================
+# mypy — gradual static typing (https://mypy.readthedocs.io/)
+# =============================================================================
+[tool.mypy]
+python_version = "3.13"
+files = ["br0kr"]            # type the engine; tests stay untyped
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+# Gradual adoption: start permissive, then tighten. Flip these to `true` once the
+# codebase is clean, or scope `strict` to new modules via a [[tool.mypy.overrides]].
+check_untyped_defs = true
+disallow_untyped_defs = false
+
+# Third-party libs without type stubs — silence the missing-import noise per lib
+# rather than globally, so a genuinely-missing first-party import still errors.
+[[tool.mypy.overrides]]
+module = ["psycopg.*", "requests.*", "mcp.*"]
+ignore_missing_imports = true
+
+# =============================================================================
+# pytest (https://docs.pytest.org/)
+# =============================================================================
+[tool.pytest.ini_options]
+# --strict-markers: an unknown @pytest.mark.* (typo) fails instead of silently
+#                   registering. -q: quiet. Register every marker you use below.
+addopts = "-q --strict-markers --import-mode=importlib"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "unit: pure-function tests, no I/O",
+    "integration: components wired together with external I/O mocked (no live DB/network)",
+    "e2e: full end-to-end flow — opt-in, excluded from the fast CI default",
+    "slow: long-running; excluded from the fast pre-commit/CI subset",
+]
+
+# =============================================================================
+# coverage (https://coverage.readthedocs.io/)
+# =============================================================================
+[tool.coverage.run]
+source = ["br0kr"]   # scope to YOUR code so the number reflects what's under test
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true        # print the uncovered line numbers — actionable, not just a %

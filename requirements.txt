@@ -1,0 +1,11 @@
+psycopg[binary]>=3.2
+requests>=2.32
+# PINNED EXACTLY, not `>=`. mcp 2.0.0 REMOVED `mcp.server.fastmcp`, which br0kr/mcp_server.py imports,
+# so the previous `mcp>=1.2` silently resolved to 2.0.0 the moment it was published and produced an image
+# whose gateway cannot even import (CI build-smoke: ModuleNotFoundError). Nothing in the repo changed —
+# main's 2026-07-24 run of the same code was green. The pin was 1.28.1 (verified in the live gateway
+# container) until pip-audit flagged four CVEs against it; 1.30.0 is the fixed release on the 1.x line
+# and still ships `mcp.server.fastmcp`. Bump within 1.x by editing this line AND pyproject.toml.
+# Upgrading to 2.x means porting mcp_server.py to the new API: do that deliberately, behind the compose
+# smoke test, never as a side effect of a transitive resolve.
+mcp==1.30.0       # the agent gateway (br0kr/mcp_server.py) exposes the broker as MCP tools

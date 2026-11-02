@@ -1,0 +1,28 @@
+# Layer onto docker-compose.yml on the PRIMARY host to enable authenticated, TLS-encrypted
+# replication for a STRETCHED (remote) standby — see docs/runbooks/docker-deploy.md §9.
+#
+#   bash docker/gen-replication-certs.sh <this-host's-mesh-IP-or-name>     # once, into ./certs
+#   # in .env: set REPLICATION_PASSWORD, narrow REPLICATION_CIDR, set PRIMARY_BIND=<mesh IP>
+#   docker compose -f docker-compose.yml -f docker-compose.primary-remote.yml up -d \
+#     pg-primary migrate gateway daemon          # NOT pg-standby (that one is trust/same-host only)
+#
+# Setting REPLICATION_PASSWORD switches pg-primary-init.sh into DR mode: a scram `replicator` role +
+# a `hostssl … scram-sha-256` rule (NO trust line) + slot br0kr_standby_dr. The cert wrapper turns on
+# TLS. The ledger port is published — BIND IT TO YOUR MESH INTERFACE (PRIMARY_BIND), never 0.0.0.0.
+services:
+  pg-primary:
+    entrypoint: ["/bin/bash", "/pg-primary-tls-entrypoint.sh"]
+    environment:
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?set REPLICATION_PASSWORD in .env for DR mode}
+      # Narrow this to your mesh CIDR; the default is acceptable ONLY because TLS + scram gate it.
+      REPLICATION_CIDR: ${REPLICATION_CIDR:-0.0.0.0/0}
+    volumes:
+      - ./certs:/certs:ro
+      - ./docker/pg-primary-tls-entrypoint.sh:/pg-primary-tls-entrypoint.sh:ro
+      # The DR posture guard (review S09) the entrypoint runs before start — refuses a trust-initialised
+      # volume converted to DR. Mounted as a sibling so `dirname "$0"` resolves it.
+      - ./docker/assert-dr-hba-safe.sh:/assert-dr-hba-safe.sh:ro
+    ports:
+      # Reachable to the remote standby over the mesh. PRIMARY_BIND should be the host's mesh
+      # (Tailscale/Headscale) IP — binding 0.0.0.0 would expose the ledger port to every interface.
+      - "${PRIMARY_BIND:-127.0.0.1}:${PRIMARY_PUBLISH_PORT:-5432}:5432"

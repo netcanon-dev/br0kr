@@ -1,0 +1,22 @@
+# Dev/test deps for the hermetic suite (tests/unit + tests/integration).
+# Keep this TINY: the suite mocks every I/O boundary in its home module, so it
+# needs the libraries to IMPORT, not live services.
+pytest>=8
+pytest-cov>=5
+
+# Import-time deps of the package (psycopg, requests, the MCP SDK) come from the
+# RUNTIME manifest, never restated here. A restated copy drifts: this file once
+# carried an unpinned `mcp>=1.2` beside requirements.txt's exact `mcp==` pin, so a CLEAN
+# environment that installed only this file (the CI validate job on a fresh
+# hosted runner) resolved mcp 2.x, which removed `mcp.server.fastmcp`. The `-r`
+# path is resolved relative to THIS file.
+-r ../requirements.txt
+
+# Type/lint tools the gate runs (so `tests/validate` finds them in a fresh venv):
+ruff>=0.5
+mypy>=1.10
+
+# e2e (opt-in, never in the hermetic default). Uncomment if the project has a UI
+# flow; the browser binary is installed only in the CI e2e job:
+#   python -m playwright install chromium
+# pytest-playwright>=0.5

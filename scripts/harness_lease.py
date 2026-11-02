@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""
+Lease-lifecycle concurrency gate — proves the guarded-CAS transitions in
+br0kr/lease.py and the reaper in br0kr/reaper.py are race-free against a REAL
+Postgres, with the "proven, not assumed" discipline.
+
+Deterministic checks:
+  forgotten_expires    a live lease past its deadline IS reaped (→ RELEASING/expired).
+  heartbeat_saves      a heartbeat pushes the deadline out, so the reaper skips it.
+  provision_guard      begin_provisioning/mark_active are guarded; mark_active refuses
+                       to resurrect a RELEASING lease.
+  full_release_path    release → RELEASING → mark_released → RELEASED, capacity freed.
+  reaper_end_to_end    reap_once expires + destroys (mixed vmid / null-vmid leases) and
+                       frees all the capacity; a null-vmid lease is settled WITHOUT a destroy.
+  reaper_release_failed a guest whose destroy always fails ends RELEASE_FAILED (capacity
+                       freed, orphan vmid flagged) instead of pinning the slot forever.
+
+Concurrent invariants (barrier-synchronized, thousands of rounds):
+  renew_vs_expire      1 heartbeat vs N reapers on one due lease → renewed XOR expired.
+  release_vs_expire    1 release vs N reapers → EXACTLY one transition into RELEASING.
+  provision_vs_expire  1 mark_active vs N reapers on a due PROVISIONING lease → ACTIVE
+                       XOR RELEASING, never a resurrected-after-RELEASING lease.
+  expired_no_double    M due leases, C reapers (claim_expired) → each claimed once.
+  releasing_no_double  M RELEASING leases, C reapers (claim_releasing) → each claimed once.
+  backlog_drains       limit << due-count, reapers loop → every lease claimed exactly once
+                       across passes (bounded-LIMIT multi-pass drain, no loss, no dupes).
+
+Exit 0 + "GO" iff every invariant holds.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import threading
+from pathlib import Path
+
+import psycopg
+
+# Import the modules under test from the repo root (scripts/ is a sibling of br0kr/).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from br0kr import lease, migrate, reaper  # noqa: E402
+
+CONN = os.environ["PGCONN"]
+NODE = "n1"
+NODE_CPU, NODE_MEM = 100, 100_000
+REQ_CPU, REQ_MEM = 2, 2048
+ROUNDS = 250
+REAPERS = 8
+
+
+def connect() -> psycopg.Connection:
+    return psycopg.connect(CONN)
+
+
+def load_schema() -> None:
+    with psycopg.connect(CONN) as c:
+        migrate.apply_pending(c)
+
+
+def reset() -> None:
+    with psycopg.connect(CONN, autocommit=True) as c:
+        # CASCADE: migration 0003 added a `migration` table with an FK to lease, so a bare
+        # TRUNCATE lease is refused; CASCADE clears that referrer too (cf. harness_project_quota).
+        c.execute("TRUNCATE lease CASCADE")
+        c.execute("DELETE FROM node")
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb) VALUES (%s,%s,%s)", (NODE, NODE_CPU, NODE_MEM))
+
+
+def insert_lease(state: str, expires_offset_s: int, ttl: int = 900, vmid: int | None = None) -> int:
+    """Insert a lease in a chosen state with expires_at = now()+offset (negative =
+    already past, i.e. due) and an optional vmid. Returns the lease id."""
+    with psycopg.connect(CONN, autocommit=True) as c:
+        row = c.execute(
+            """INSERT INTO lease(node_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid)
+               VALUES (%s,%s,%s,%s::lease_state,%s, now() + make_interval(secs => %s), %s)
+               RETURNING id""",
+            (NODE, REQ_CPU, REQ_MEM, state, ttl, expires_offset_s, vmid),
+        ).fetchone()
+        return row[0]
+
+
+def avail_cpu() -> float:
+    with psycopg.connect(CONN, autocommit=True) as c:
+        return float(
+            c.execute(
+                """SELECT n.cpu_total - COALESCE(SUM(l.req_cpu)
+                       FILTER (WHERE l.state IN ('ADMITTED','PROVISIONING','ACTIVE','RELEASING')), 0)
+                   FROM node n LEFT JOIN lease l ON l.node_id = n.id WHERE n.id = %s GROUP BY n.id""",
+                (NODE,),
+            ).fetchone()[0]
+        )
+
+
+def state_of(lid: int) -> str | None:
+    with connect() as c:
+        return lease.state_of(c, lid)
+
+
+# ── deterministic checks ──────────────────────────────────────────────────────
+def check_forgotten_expires() -> bool:
+    reset()
+    lid = insert_lease("ACTIVE", expires_offset_s=-1)
+    with connect() as c:
+        claimed = lease.claim_expired(c)
+    ok = [x.id for x in claimed] == [lid] and state_of(lid) == "RELEASING"
+    print(f"[forgotten_expires]    due lease {lid} reaped -> {state_of(lid)}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_heartbeat_saves() -> bool:
+    reset()
+    lid = insert_lease("ACTIVE", expires_offset_s=-1)   # already due...
+    with connect() as c:
+        new_exp = lease.heartbeat(c, lid)               # ...until we beat it
+    with connect() as c:
+        claimed = lease.claim_expired(c)
+    ok = new_exp is not None and claimed == [] and state_of(lid) in lease.LIVE_STATES
+    print(f"[heartbeat_saves]      renewed -> reaper skipped it, state={state_of(lid)}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_provision_guard() -> bool:
+    reset()
+    lid = insert_lease("ADMITTED", expires_offset_s=3600)
+    with connect() as c:
+        won_prov = lease.begin_provisioning(c, lid, vmid=950, name="g")
+    s1 = state_of(lid)
+    with connect() as c:
+        won_active = lease.mark_active(c, lid)
+    s2 = state_of(lid)
+    # Now release it and prove mark_active cannot resurrect a RELEASING lease.
+    with connect() as c:
+        lease.release(c, lid)
+    with connect() as c:
+        resurrect = lease.mark_active(c, lid)
+    s3 = state_of(lid)
+    ok = (won_prov and s1 == "PROVISIONING" and won_active and s2 == "ACTIVE"
+          and not resurrect and s3 == "RELEASING")
+    print(f"[provision_guard]      ADMITTED->{s1}->{s2}; resurrect RELEASING={resurrect} ({s3})  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_full_release_path() -> bool:
+    reset()
+    base = avail_cpu()
+    lid = insert_lease("ACTIVE", expires_offset_s=3600)
+    held = avail_cpu()
+    with connect() as c:
+        won = lease.release(c, lid)
+    s1 = state_of(lid)
+    with connect() as c:
+        again = lease.release(c, lid)                   # idempotent: second release loses
+    with connect() as c:
+        freed = lease.mark_released(c, lid)
+    s2 = state_of(lid)
+    back = avail_cpu()
+    ok = (won and not again and freed and s1 == "RELEASING" and s2 == "RELEASED"
+          and held == base - REQ_CPU and back == base)
+    print(f"[full_release_path]    avail {base}->{held}->{back}; {s1}->{s2}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_reaper_end_to_end() -> bool:
+    reset()
+    base = avail_cpu()
+    expired_lid = insert_lease("ACTIVE", expires_offset_s=-1, vmid=901)     # due + has a guest
+    released_lid = insert_lease("RELEASING", expires_offset_s=3600, vmid=902)  # normal release in flight
+    novm_lid = insert_lease("ADMITTED", expires_offset_s=-1, vmid=None)     # reaped before it got a guest
+    destroyed: list[int] = []
+    with connect() as c:
+        summary = reaper.reap_once(c, lambda cl: destroyed.append(cl.vmid), grace_seconds=0)
+    states = {lid: state_of(lid) for lid in (expired_lid, released_lid, novm_lid)}
+    ok = (sorted(destroyed) == [901, 902]                       # the two with a vmid, each once
+          and all(s == "RELEASED" for s in states.values())     # all three settled
+          and avail_cpu() == base                                # capacity fully reclaimed
+          and summary.destroy_errors == 0 and summary.failed == 0)
+    print(f"[reaper_end_to_end]    destroyed={sorted(destroyed)} states={list(states.values())} "
+          f"avail={avail_cpu()} {summary}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_reaper_release_failed() -> bool:
+    reset()
+    base = avail_cpu()
+    lid = insert_lease("RELEASING", expires_offset_s=3600, vmid=903)
+
+    def always_fail(_claimed) -> None:
+        raise RuntimeError("destroy boom")
+
+    passes = 0
+    while state_of(lid) != "RELEASE_FAILED" and passes < 12:
+        with connect() as c:
+            reaper.reap_once(c, always_fail, grace_seconds=0)
+        passes += 1
+    ok = state_of(lid) == "RELEASE_FAILED" and avail_cpu() == base   # terminal + slot freed
+    print(f"[reaper_release_failed] after {passes} failed passes -> {state_of(lid)}, avail={avail_cpu()}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+# ── concurrent invariants ─────────────────────────────────────────────────────
+def _race(setup_state: str, racer, reapers: int = REAPERS, rounds: int = ROUNDS):
+    """Run `rounds` barrier-synchronized races: one `racer(lid)` thread against
+    `reapers` claim_expired threads on a single due lease. Yields (racer_won, claims)
+    per round for the caller to assert an invariant."""
+    for _ in range(rounds):
+        reset()
+        lid = insert_lease(setup_state, expires_offset_s=0)   # at/just past the deadline
+        barrier = threading.Barrier(reapers + 1)
+        won = [False]
+        claims: list[int] = []
+        lock = threading.Lock()
+
+        def do_race() -> None:
+            with connect() as c:
+                barrier.wait()
+                if racer(c, lid):
+                    won[0] = True
+
+        def reap() -> None:
+            with connect() as c:
+                barrier.wait()
+                got = lease.claim_expired(c)
+            with lock:
+                claims.extend(x.id for x in got)
+
+        ts = [threading.Thread(target=do_race)] + [threading.Thread(target=reap) for _ in range(reapers)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        yield lid, won[0], claims.count(lid)
+
+
+def check_renew_vs_expire() -> bool:
+    bad = 0
+    for lid, renewed, expired in _race("ACTIVE", lease.heartbeat):
+        # renewed XOR expired, no double-claim, and the final state agrees.
+        st = state_of(lid)
+        if expired > 1 or (renewed == (expired == 1)) or (renewed and st not in lease.LIVE_STATES) \
+                or (expired == 1 and st != "RELEASING"):
+            bad += 1
+    ok = bad == 0
+    print(f"[renew_vs_expire]      {ROUNDS} rounds, 1 beat vs {REAPERS} reapers: violations={bad}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_release_vs_expire() -> bool:
+    bad = 0
+    for lid, released, expired in _race("ACTIVE", lambda c, x: lease.release(c, x)):
+        wins = (1 if released else 0) + expired
+        if wins != 1 or state_of(lid) != "RELEASING":
+            bad += 1
+    ok = bad == 0
+    print(f"[release_vs_expire]    {ROUNDS} rounds, 1 release vs {REAPERS} reapers: !=1 winner {bad}x  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_provision_vs_expire() -> bool:
+    bad = 0
+    for lid, activated, expired in _race("PROVISIONING", lambda c, x: lease.mark_active(c, x)):
+        st = state_of(lid)
+        # exactly one of {activated, expired}; never both (no resurrection-after-RELEASING)
+        if expired > 1 or (activated == (expired == 1)) or (activated and st != "ACTIVE") \
+                or (expired == 1 and st != "RELEASING"):
+            bad += 1
+    ok = bad == 0
+    print(f"[provision_vs_expire]  {ROUNDS} rounds, 1 activate vs {REAPERS} reapers: violations={bad}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def _concurrent_claim(setup_state: str, claim_fn, leases: int = 50, reapers: int = REAPERS) -> bool:
+    reset()
+    ids = {insert_lease(setup_state, expires_offset_s=-1) for _ in range(leases)}
+    barrier = threading.Barrier(reapers)
+    all_claims: list[int] = []
+    lock = threading.Lock()
+
+    def reap() -> None:
+        with connect() as c:
+            barrier.wait()
+            got = claim_fn(c)
+        with lock:
+            all_claims.extend(x.id for x in got)
+
+    ts = [threading.Thread(target=reap) for _ in range(reapers)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    return len(all_claims) == len(set(all_claims)) and set(all_claims) == ids
+
+
+def check_expired_no_double() -> bool:
+    ok = _concurrent_claim("ACTIVE", lambda c: lease.claim_expired(c, limit=50))
+    print(f"[expired_no_double]    50 due leases, {REAPERS} reapers (claim_expired): each once = {ok}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_releasing_no_double() -> bool:
+    ok = _concurrent_claim("RELEASING", lambda c: lease.claim_releasing(c, grace_seconds=0, limit=50))
+    print(f"[releasing_no_double]  50 RELEASING leases, {REAPERS} reapers (claim_releasing): each once = {ok}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_backlog_drains(leases: int = 40, reapers: int = 4, limit: int = 7) -> bool:
+    """limit << due-count: each reaper LOOPS claim_expired until empty. Proves a
+    bounded-LIMIT pass drains the whole backlog across passes with no loss / no dupe."""
+    reset()
+    ids = {insert_lease("ACTIVE", expires_offset_s=-(i + 1)) for i in range(leases)}  # staggered deadlines
+    barrier = threading.Barrier(reapers)
+    all_claims: list[int] = []
+    lock = threading.Lock()
+
+    def reap() -> None:
+        mine: list[int] = []
+        with connect() as c:
+            barrier.wait()
+            while True:
+                got = lease.claim_expired(c, limit=limit)
+                if not got:
+                    break
+                mine.extend(x.id for x in got)
+        with lock:
+            all_claims.extend(mine)
+
+    ts = [threading.Thread(target=reap) for _ in range(reapers)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    ok = len(all_claims) == len(set(all_claims)) == leases and set(all_claims) == ids
+    print(f"[backlog_drains]       {leases} due, {reapers} reapers, limit={limit}: "
+          f"claimed={len(all_claims)} unique={len(set(all_claims))}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def main() -> int:
+    load_schema()
+    print("=== lease-lifecycle concurrency gate (migrations) ===\n")
+    checks = [
+        check_forgotten_expires,
+        check_heartbeat_saves,
+        check_provision_guard,
+        check_full_release_path,
+        check_reaper_end_to_end,
+        check_reaper_release_failed,
+        check_renew_vs_expire,
+        check_release_vs_expire,
+        check_provision_vs_expire,
+        check_expired_no_double,
+        check_releasing_no_double,
+        check_backlog_drains,
+    ]
+    results = [fn() for fn in checks]
+    print("\n" + ("GO" if all(results) else "NO-GO"))
+    return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

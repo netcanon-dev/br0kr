@@ -1,0 +1,24 @@
+-- 0025_audit_outcome — record DENIED / rejected authorization attempts in the operator_audit trail (0023),
+-- turning it from an applied-writes-only log into ALSO an intrusion signal ("someone hit /api/node/cordon with
+-- a bad token 40 times from 10.x").
+--
+-- A new nullable `outcome` column classifies each row:
+--   NULL     → an APPLIED write (the historical + ongoing success trail; EVERY pre-0025 row is NULL, so the
+--              table stays byte-identical and br0kr/audit.py.record is unchanged for successes).
+--   'denied' → a REJECTED authorization attempt — a wrong/absent bearer (401) or a forbidden tier/scope (403),
+--              recorded at the AUTHORIZE layer BEFORE any action runs (see br0kr/audit.py.DenialLog). The
+--              denial reason + a coalesced attempt count live in `params` ({reason, attempts}); NEVER the
+--              presented secret (redact by name). A KNOWN over-reaching token (forbidden_scope) is attributed
+--              via actor='agent' + actor_token_id/project_id/scope; an anonymous/bad-token attempt is
+--              actor='anonymous' with those NULL.
+--
+-- Deliberately NO CHECK constraint (unlike 0024's retention knob): `outcome` is written by the BEST-EFFORT
+-- denial writer, and 0023's design is that a future value must NEVER make that best-effort writer fail (the
+-- same reason surface/scope carry no CHECK). The two-value domain is a CODE convention, documented here, not a
+-- DB constraint.
+--
+-- Still strictly APPEND-ONLY + the ONE sanctioned prune (0024): denial rows are plain INSERTs in
+-- br0kr/audit.py, aged out by the SAME retention, and read/filtered/exported by the SAME machinery (a new
+-- `outcome=denied|applied` filter splits the views). Idempotent (ADD COLUMN IF NOT EXISTS).
+ALTER TABLE operator_audit
+  ADD COLUMN IF NOT EXISTS outcome text;

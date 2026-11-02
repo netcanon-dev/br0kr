@@ -1,0 +1,79 @@
+# zizmor — GitHub-Actions workflow-security scan.
+#
+# Audits .github/ for GHA-specific supply-chain anti-patterns the rest of the
+# pipeline doesn't model: template injection via ${{ github.event.* }} in run:
+# blocks, over-broad permissions:, untrusted checkout, secrets leaking to forks
+# via pull_request_target, and unpinned third-party actions. The action-pinning
+# policy lives in .github/zizmor.yml.
+#
+# TWO MODES — keep the one that matches your repo (see the 'zizmor' job below):
+#   (A) ADVISORY  — private repo without GitHub Advanced Security. Run via pip,
+#                   continue-on-error, findings go to the JOB LOG. Non-blocking.
+#   (B) BLOCKING  — via zizmorcore/zizmor-action (SHA-pinned), exits non-zero on
+#                   a finding. SARIF → Security tab if you have GHAS, else inline
+#                   annotations.
+name: zizmor — GHA workflow security scan
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/dependabot.yml'
+      - '.github/zizmor.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/dependabot.yml'
+      - '.github/zizmor.yml'
+  schedule:
+    # Weekly — zizmor ships new rules often; a workflow clean last month can have
+    # a finding today. Monday early-UTC, before the weekly Dependabot cadence.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # MODE B only — uncomment to upload SARIF to Code Scanning (needs GHAS):
+  # security-events: write
+  # actions: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  zizmor:
+    name: zizmor scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # ----- MODE A: ADVISORY (default) -----------------------------------
+      # No GitHub Advanced Security required. Findings print to the job log and
+      # never block CI. Good default for a private repo.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install zizmor
+        run: pip install --quiet "zizmor>=1,<2"
+      - name: Run zizmor (advisory — policy in .github/zizmor.yml)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}   # online audits resolve action refs via the API (read-only)
+        run: zizmor .github/
+
+      # ----- MODE B: BLOCKING + SARIF (uncomment to use; remove Mode A) ----
+      # The action does not publish a v0 major alias — SHA-pin it (third-party
+      # publisher → hash-pin per .github/zizmor.yml) and bump via Dependabot.
+      # - name: Run zizmor (blocking)
+      #   uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d  # v0.5.6
+      #   with:
+      #     # Private repo without GHAS: disable SARIF upload, surface findings
+      #     # as inline annotations. Flip to true once the repo is public.
+      #     advanced-security: false
+      #     annotations: true
+      #     min-severity: medium   # medium+ blocks; informational nudges don't

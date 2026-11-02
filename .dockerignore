@@ -1,0 +1,26 @@
+# Keep the build context tiny + the image free of repo cruft and anything secret-ish.
+.git
+.github
+# Never let a local .env (or the compose/HA helper files, which the image doesn't COPY) into the
+# build context — secrets stay out of the image, builds stay fast.
+.env
+*.env
+!*.env.example
+certs/
+docker-compose*.yml
+docker/
+.gitignore
+.gitleaks.toml
+.pre-commit-config.yaml
+.yamllint
+docs
+tests
+examples
+*.md
+pyproject.toml
+**/__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv

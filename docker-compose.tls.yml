@@ -1,0 +1,130 @@
+# br0kr — OPTIONAL built-in TLS termination (Caddy). This is the DEPLOY-TIME GATE between accepting plain
+# HTTP (a trusted network, or your OWN reverse proxy / TLS terminator in front) and running br0kr's built-in
+# TLS. It is purely additive — the base stack is unchanged unless you opt in:
+#
+#   Plain HTTP (default — BYO proxy / trusted-net / accept-risk):
+#       docker compose up -d
+#         → the gateway (and, with --profile dashboard, the dashboard) publish PLAIN HTTP host ports.
+#           The bearer token travels in cleartext — keep on a trusted network or front it yourself.
+#
+#   Built-in TLS — enable via the VERSION-GATED WRAPPER (the un-publish below needs Compose >= 2.24; the
+#   wrapper refuses an older Compose rather than silently leak the plain port — see docker-deploy.md §10):
+#       bash scripts/tls-up.sh up -d
+#   (Equivalent raw command, ONLY if your `docker compose version` is >= 2.24:
+#       docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d )
+#         → a Caddy container terminates TLS on :443 (gateway) and :8443 (dashboard) and the gateway's
+#           (and dashboard's) PLAIN host ports are UN-PUBLISHED (`ports: !reset []`) — so ONLY the TLS
+#           front door is reachable from the host/LAN. The services still listen on their plain ports
+#           INSIDE the compose network (Caddy reaches gateway:8080 / dashboard:8051), and their container
+#           healthchecks (localhost:PORT) are unaffected.
+#         → with --profile dashboard too, the dashboard is served over TLS on :8443.
+#
+# Default cert = Caddy's internal self-signed CA (docker/Caddyfile); set BR0KR_TLS_SITE to a real domain +
+# BR0KR_TLS_ISSUER to your ACME email for a public Let's Encrypt cert. See docs/runbooks/docker-deploy.md §10.
+
+services:
+  # ── OAuth 2.1 shim (br0kr/oauth.py) — OPT-IN via `--profile oauth`. ──────────────────────────────────
+  # Lets OAuth-only MCP hosts (Claude Desktop / claude.ai custom connectors) connect: it mints a project
+  # api_token via a browser consent flow (paste a project token). Only meaningful WITH TLS (OAuth requires
+  # https), so it lives here; profile-gated so plain `tls-up.sh up -d` keeps the TLS-only behavior unchanged.
+  # Enable with:  bash scripts/tls-up.sh --profile oauth up -d   (see docs/runbooks/oauth-connector.md).
+  # The issuer (every discovery URL) is resolved by br0kr/oauth.py `issuer()` from the vars below:
+  # BR0KR_PUBLIC_URL (the public https URL a reverse-proxy / tunnel serves — set it for a tunnel, see
+  # docs/runbooks/public-tunnel.md) wins; otherwise it derives https://<BR0KR_TLS_SITE> (the direct LAN case).
+  # This is the tunnel-friendly decoupling: the PUBLIC hostname is independent of the internal Caddy origin.
+  oauth:
+    build: .
+    image: br0kr:local
+    restart: unless-stopped
+    command: ["python", "-m", "br0kr.oauth"]
+    profiles: ["oauth"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+      # Precedence in issuer(): BR0KR_OAUTH_ISSUER (override) → BR0KR_PUBLIC_URL (tunnel) →
+      # https://<BR0KR_TLS_SITE> (direct TLS). All three DEFAULT EMPTY so that if NONE is set the resolved
+      # issuer is "" and main() REFUSES to boot (fail-loud) — rather than silently serving a bogus
+      # https://localhost issuer the connector can't use. A LAN deploy sets BR0KR_TLS_SITE; a tunnel sets
+      # BR0KR_PUBLIC_URL. (Empty here is why oauth uses `:-`, NOT the caddy service's localhost default.)
+      BR0KR_OAUTH_ISSUER: ${BR0KR_OAUTH_ISSUER:-}
+      BR0KR_PUBLIC_URL: ${BR0KR_PUBLIC_URL:-}
+      BR0KR_TLS_SITE: ${BR0KR_TLS_SITE:-}
+      BR0KR_OAUTH_HOST: 0.0.0.0
+      BR0KR_OAUTH_PORT: "9100"
+      # Authorization-code lifetime (s) and minted-token lifetime (days). Passed through from .env if set.
+      BR0KR_OAUTH_CODE_TTL: ${BR0KR_OAUTH_CODE_TTL:-120}
+      BR0KR_OAUTH_TOKEN_TTL_DAYS: ${BR0KR_OAUTH_TOKEN_TTL_DAYS:-30}
+    expose:
+      - "9100"   # compose-network only; Caddy reaches oauth:9100. Never a host port.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    # Host TLS ports. Default 443 (gateway) / 8443 (dashboard); override if the host already uses them.
+    ports:
+      - "${TLS_GATEWAY_PORT:-443}:443"
+      - "${TLS_DASHBOARD_PORT:-8443}:8443"
+    expose:
+      - "8081"   # host-agnostic plain-HTTP tunnel origin (Caddyfile `http://:8081` site). NOT a published
+                 # host port — reachable only inside the compose network (cloudflared → http://caddy:8081). C17.
+    environment:
+      BR0KR_TLS_SITE: ${BR0KR_TLS_SITE:-localhost}
+      BR0KR_TLS_DASHBOARD_SITE: ${BR0KR_TLS_DASHBOARD_SITE:-localhost:8443}
+      # The public https URL a reverse-proxy / tunnel serves — drives the WWW-Authenticate resource_metadata
+      # URL on the host-agnostic :8081 origin (Caddyfile). DEFAULT https://localhost because compose ALWAYS
+      # sets this var and Caddy's {$VAR:default} applies ONLY when UNSET — a set-empty value would blank the
+      # snippet arg and emit a literal placeholder. The :8081 site is inert without a tunnel; a real tunnel
+      # deploy sets BR0KR_PUBLIC_URL to its public URL in .env (which then wins here AND in the oauth issuer).
+      BR0KR_PUBLIC_URL: ${BR0KR_PUBLIC_URL:-https://localhost}
+      # 'internal' = self-signed CA (default); set to your ACME email for a public cert (needs a real
+      # BR0KR_TLS_SITE domain reachable for the ACME challenge).
+      BR0KR_TLS_ISSUER: ${BR0KR_TLS_ISSUER:-internal}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # persists the internal CA + any ACME certs across restarts
+      - caddy-config:/config
+    depends_on:
+      # start once the gateway container has started (not waiting for healthy — Caddy retries the upstream).
+      gateway:
+        condition: service_started
+
+  # ── Cloudflare Tunnel (public front) — OPT-IN via `--profile tunnel`. ─────────────────────────────────
+  # Makes br0kr reachable from the PUBLIC internet so an OAuth-only MCP host works: Claude Desktop / claude.ai
+  # custom-connector OAuth discovery runs from ANTHROPIC'S CLOUD, which cannot reach a br0kr on a private LAN
+  # IP. cloudflared dials OUT to Cloudflare (no inbound port / firewall change) and forwards the tunnel's
+  # public hostname to the host-agnostic plain-HTTP origin (caddy:8081) over the compose network — the cleartext
+  # leg never leaves the docker bridge; Cloudflare terminates the PUBLIC TLS. Set BR0KR_PUBLIC_URL to the
+  # tunnel's https URL so the OAuth issuer / discovery / WWW-Authenticate advertise it. NAMED tunnel: create
+  # it in the Cloudflare Zero Trust dashboard, route the public hostname to service `http://caddy:8081`, copy
+  # the connector TOKEN into TUNNEL_TOKEN (.env). See docs/runbooks/public-tunnel.md. SECURITY.md C17.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    # `run` (no tunnel name) uses the remotely-managed config bound to TUNNEL_TOKEN — all ingress is set in
+    # the Cloudflare dashboard. For an ad-hoc QUICK tunnel instead, override the command to
+    # ["tunnel","--no-autoupdate","--url","http://caddy:8081"] (ephemeral *.trycloudflare.com — see the runbook).
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      # NOT `:?` — that would abort a non-tunnel bring-up (compose interpolates profile-excluded services too).
+      # Empty here → cloudflared exits with a clear "provide a tunnel token" error only when the profile is on.
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      caddy:
+        condition: service_started
+
+  # Un-publish the plain host ports so ONLY Caddy is the front door. `!reset []` clears the list the base
+  # file set (a plain override would MERGE/append, leaving the plain port published). REQUIRES Compose
+  # >= 2.24 — below that `!reset` is SILENTLY ignored and the plain port stays published (verified on
+  # v2.18/v2.17). Use scripts/tls-up.sh, which version-checks and refuses rather than leak.
+  gateway:
+    ports: !reset []
+
+  dashboard:
+    ports: !reset []
+
+volumes:
+  caddy-data:
+  caddy-config:

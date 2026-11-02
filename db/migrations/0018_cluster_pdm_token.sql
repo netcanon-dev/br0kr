@@ -1,0 +1,22 @@
+-- 0018_cluster_pdm_token — model the PDM API TOKEN for a cluster, so the cross-cluster lease-migration
+-- saga (br0kr/migration.py) can be CONSTRUCTED at runtime and driven by the daemon (live-wiring the
+-- previously-dormant PdmDriver). This is the schema half of the PDM pre-wire; the driver stays disabled
+-- by default (BR0KR_MIGRATE_LIMIT=0) until a real PDM exists and its contract is verified.
+--
+-- The cluster already owns its PDM ENDPOINT (`cluster.pdm_endpoint`, added optional in 0002_clusters.sql).
+-- What was missing is the credential. Mirror EXACTLY how the per-cluster PVE token works today
+-- (br0kr/nodes.py): the token id is config-as-data (`pdm_token_id`), and the SECRET is NEVER stored in the
+-- ledger — `pdm_token_secret_env` names the ENV VAR the daemon resolves it from at registry-build time
+-- (held only in the driver's in-memory auth header, redacted in logs). A ledger dump therefore never yields
+-- a working PDM credential, exactly as for PVE. See docs/pdm-api-contract.md ("Connection") and
+-- br0kr/remotes.py (the PdmRegistry that reads these three columns to build a Pdm per cluster).
+--
+-- All three PDM columns are NULLABLE and independent of the (NOT NULL) PVE connection: PDM is OPTIONAL
+-- per cluster. A cluster is migration-capable only when ALL THREE (pdm_endpoint + pdm_token_id +
+-- pdm_token_secret_env) are present and the secret env resolves; remotes.from_ledger SKIPS any cluster
+-- missing one (not an error — that cluster simply can't be a migration source), so this can never break
+-- provisioning, which uses only the PVE columns.
+--
+-- Idempotent: ADD COLUMN IF NOT EXISTS (a re-apply after the columns exist is a clean no-op).
+ALTER TABLE cluster ADD COLUMN IF NOT EXISTS pdm_token_id       text;
+ALTER TABLE cluster ADD COLUMN IF NOT EXISTS pdm_token_secret_env text;

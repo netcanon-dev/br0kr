@@ -1,0 +1,30 @@
+# gitleaks config — the secret-leak gate (pre-commit + CI full-history).
+# Catches plaintext secrets in committable files BEFORE they reach a commit.
+title = "br0kr secret-scan"
+
+[extend]
+useDefault = true   # built-in rules: private keys, cloud creds, tokens, high-entropy strings
+
+# OPTIONAL — a custom always-catch rule for your project's crown-jewel secret.
+# Example: an age private key. Replace/remove to match your highest-value secret.
+# [[rules]]
+# id = "age-secret-key"
+# description = "age private key"
+# regex = '''AGE-SECRET-KEY-1[0-9A-Z]+'''
+# keywords = ["AGE-SECRET-KEY"]
+
+[allowlist]
+description = "intentional / non-committable paths — real secrets live encrypted or gitignored"
+regexTarget = "match"
+regexes = [
+  # Test fixtures reference a secret-SHAPED string with a sentinel so the no-leak
+  # tests can run. A real secret is random and never carries the sentinel, so this
+  # exempts only obvious fakes while a genuine leak is still caught.
+  '''.*FAKE-FIXTURE.*''',
+]
+paths = [
+  '''^.*\.example$''',          # committed config TEMPLATES carry placeholder values
+  '''^.*\.sops\.ya?ml$''',      # SOPS CIPHERTEXT — intentionally high-entropy, encrypted
+  '''\.sops\.yaml$''',          # .sops.yaml holds PUBLIC keys (not secret)
+  '''^local/''',                # gitignored local-only tree
+]

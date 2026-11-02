@@ -1,0 +1,46 @@
+# Dependabot version updates.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates
+#
+# Update ONLY ecosystems you actually use — drop `docker` for a non-containerized
+# app, drop `npm` if there's no JS. The 7-day cooldown lets upstream yank/hotfix
+# windows close before adoption (and satisfies zizmor's dependabot-cooldown rule).
+version: 2
+updates:
+  # Python dependencies (requirements*.txt + pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies", "python"]
+
+  # GitHub Actions (.github/workflows/*.yml) — keep action pins fresh.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      actions-all:
+        patterns: ["*"]
+    labels: ["dependencies", "github-actions"]
+
+  # Container base image (the root Dockerfile's FROM) — br0kr ships an image.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "docker"]

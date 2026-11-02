@@ -1,0 +1,20 @@
+-- 0011_node_cordon — an operator "no new provisioning" flag on a node (a faithful cordon).
+--
+-- Until now there was NO true cordon. admit() reads only a node's existence + derived capacity, so a
+-- PINNED request_lease(node_id=X) admits against X regardless of any "drain this host" intent; the only
+-- pseudo-cordon was setting cluster_id=NULL (capacity-only), which the scheduler skips and the daemon
+-- can't actuate — but a pinned request STILL admits and then strands ADMITTED. That conflates "no driver /
+-- can't actuate" with "don't schedule here".
+--
+-- `cordoned` is the faithful, orthogonal flag: TRUE = the broker must place NO NEW lease on this node,
+-- enforced UNDER the admission scope lock (admission.admit / promote_pinned read it after taking the
+-- node:<id> advisory lock, so even a pinned request can't slip past) and skipped by the scheduler's
+-- candidate snapshot (scheduler.node_headroom adds `AND NOT cordoned`). It is NOT eviction: existing LIVE
+-- leases on the node keep running and the reaper / orphan-sweep / fenced_destroy stay node-agnostic, so
+-- teardown is unaffected. Orthogonal to cluster_id NULL (can't actuate) — a cordoned node CAN be
+-- provisioned, the operator has chosen it WON'T be.
+--
+-- Operator-managed config-as-data (br0kr/admin.set_node_cordon, the dashboard's token-gated per-node
+-- toggle). NOT NULL DEFAULT false so every existing node is uncordoned on upgrade (today's behaviour) and
+-- the admission read is never NULL. Idempotent (ADD COLUMN IF NOT EXISTS).
+ALTER TABLE node ADD COLUMN IF NOT EXISTS cordoned boolean NOT NULL DEFAULT false;

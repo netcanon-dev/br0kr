@@ -1,0 +1,34 @@
+# The STRETCHED DR standby — runs on a SEPARATE host (different cluster / network segment) that can
+# reach the primary over your mesh (Tailscale/Headscale). This is its own deployment, NOT layered
+# with docker-compose.yml. See docs/runbooks/docker-deploy.md §9.
+#
+#   # on the PRIMARY host: bash docker/gen-replication-certs.sh <primary-mesh-host>  → ./certs/ca.crt
+#   # copy ./certs/ca.crt to THIS host's ./certs/ca.crt, then:
+#   cp .env.standby.example .env.standby   # set PRIMARY_HOST + REPLICATION_PASSWORD (match the primary)
+#   docker compose -f docker-compose.standby.yml --env-file .env.standby up -d
+#
+# Reciprocal of docker-compose.primary-remote.yml: it streams as the scram `replicator` role over TLS
+# (sslmode verify-full, pinning ./certs/ca.crt), through slot br0kr_standby_dr. The broker re-homes to
+# whichever node is primary via a multi-host PGCONN — promotion here needs FENCING (see the runbook).
+name: br0kr-dr-standby
+services:
+  pg-standby-remote:
+    image: postgres:16
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "/pg-standby-remote-entrypoint.sh"]
+    environment:
+      PRIMARY_HOST: ${PRIMARY_HOST:?the primary's mesh hostname/IP — MUST match the cert SAN}
+      PRIMARY_PORT: ${PRIMARY_PORT:-5432}
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?must match the primary's REPLICATION_PASSWORD}
+      REPLICATION_SSLMODE: ${REPLICATION_SSLMODE:-verify-full}
+      REPLICATION_SLOT: ${REPLICATION_SLOT:-br0kr_standby_dr}
+    volumes:
+      - pg-standby-remote-data:/var/lib/postgresql/data
+      - ./docker/pg-standby-remote-entrypoint.sh:/pg-standby-remote-entrypoint.sh:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro   # the CA that signed the primary's server cert (verify-full)
+    # No host port published while it is a STANDBY (a replica needs no inbound). To FAIL OVER to it you
+    # must FIRST publish its port on the host mesh interface (like docker-compose.primary-remote.yml
+    # does for the primary) so the broker can re-home onto it — see docs/runbooks/docker-deploy.md §9.
+volumes:
+  pg-standby-remote-data:

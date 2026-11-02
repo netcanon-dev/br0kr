@@ -1,0 +1,20 @@
+# CODEOWNERS — who must review changes to which paths.
+#
+# CODEOWNERS alone does NOT block merges: it gates only while the default
+# branch's ruleset / branch protection has "Require review from Code Owners" +
+# "Require status checks to pass before merging" enabled. An owner that does not
+# exist in the repo/org silently makes a rule inert.
+
+# Default owner for everything in the repo.
+*                         @netcanon
+
+# Security-sensitive surfaces, called out explicitly so a future split of the
+# catch-all keeps them gated.
+/.github/workflows/       @netcanon   # CI is a supply-chain surface
+/.github/CODEOWNERS       @netcanon   # ownership itself
+SECURITY.md               @netcanon
+/br0kr/admission.py       @netcanon   # the double-allocation floor (admit())
+/br0kr/auth.py            @netcanon   # authn/authz, token hashing
+/br0kr/oauth.py           @netcanon   # OAuth 2.1 connector shim
+/br0kr/logging_setup.py   @netcanon   # secret redaction
+/db/migrations/           @netcanon   # the ledger schema

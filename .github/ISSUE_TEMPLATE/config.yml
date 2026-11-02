@@ -1,0 +1,10 @@
+# Issue chooser config. Forces use of the templates (no blank issues) and routes
+# security reports to the PRIVATE advisory channel — never a public issue.
+blank_issues_enabled: false
+contact_links:
+  - name: Security or privacy vulnerability
+    url: https://github.com/netcanon-dev/br0kr/security/advisories/new
+    about: Report security/privacy issues privately. Never open a public issue for a vulnerability, and never paste real secrets or PII.
+  - name: Question / usage help
+    url: https://github.com/netcanon-dev/br0kr/discussions
+    about: For setup and usage questions, start a discussion instead of filing a bug.
