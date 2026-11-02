@@ -8,4 +8,4 @@ requests>=2.32
 # and still ships `mcp.server.fastmcp`. Bump within 1.x by editing this line AND pyproject.toml.
 # Upgrading to 2.x means porting mcp_server.py to the new API: do that deliberately, behind the compose
 # smoke test, never as a side effect of a transitive resolve.
-mcp==1.30.0       # the agent gateway (br0kr/mcp_server.py) exposes the broker as MCP tools
+mcp==2.3.0       # the agent gateway (br0kr/mcp_server.py) exposes the broker as MCP tools

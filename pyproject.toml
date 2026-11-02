@@ -36,7 +36,7 @@ classifiers = [
 dependencies = [
     "psycopg[binary]>=3.2",
     "requests>=2.32",
-    "mcp==1.30.0",
+    "mcp==2.3.0",
 ]
 
 [project.urls]
