@@ -45,7 +45,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
-from br0kr import admin, auth, db, logging_setup, migrate
+from br0kr import admin, auth, db, logging_setup, migrate, ratelimit
 
 log = logging.getLogger(__name__)
 
@@ -277,6 +277,40 @@ def consent_html(*, client_name: str | None, redirect_uri: str, hidden: dict[str
     )
 
 
+# Pre-authentication bounds (review SEC-01, br0kr/ratelimit.py). Under --profile tunnel every route below is
+# reachable from the internet before any credential is checked, so: a body larger than any real registration or
+# consent form is refused unread; at most 8 requests hold a ledger connection at once (the rest get 503, never
+# touching the ledger); and open registration and consent submission are rate limited per client and overall,
+# so one client cannot fill the oauth_client table and a flood that forges a new key each time still hits the
+# ceiling. The /token exchange needs a live single-use code, so the gate alone bounds it.
+_MAX_BODY = 16 * 1024
+_LEDGER = ratelimit.LedgerGate("oauth shim", slots=8)
+_REGISTER_LIMIT = ratelimit.WindowLimiter("oauth /register", per_key=10, total=60)
+_CONSENT_LIMIT = ratelimit.WindowLimiter("oauth /authorize", per_key=20, total=240)
+
+
+class _BadBody(Exception):
+    """A request body refused before it is read: an oversized or unparseable Content-Length."""
+
+    def __init__(self, status: int, desc: str) -> None:
+        super().__init__(desc)
+        self.status, self.desc = status, desc
+
+
+def client_key(headers: Any, peer: str) -> str:
+    """The client identity to rate-limit on (never used for auth). The shim is reachable only through Caddy, so
+    the immediate peer is always the proxy: on the tunnel listener (`http://:8081`, plain HTTP, reachable only
+    by cloudflared inside the compose network) the internet client is in cloudflared's `Cf-Connecting-IP`; on the
+    direct TLS site Caddy sets `X-Forwarded-For` to the peer it saw (it trusts no client-sent value, since no
+    trusted proxies are configured). Falls back to the socket peer when neither is present (a direct run)."""
+    if (headers.get("X-Forwarded-Proto") or "").lower() == "http" and headers.get("Cf-Connecting-IP"):
+        return str(headers.get("Cf-Connecting-IP")).strip()[:64]
+    forwarded = headers.get("X-Forwarded-For")
+    if forwarded:
+        return str(forwarded).split(",")[0].strip()[:64]
+    return peer
+
+
 _SECURITY_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -289,6 +323,11 @@ _SECURITY_HEADERS: dict[str, str] = {
 def _make_handler() -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "br0kr-oauth"
+        # A per-read socket timeout: a connection idle for 30 s (a stalled body, or a short one behind a lying
+        # Content-Length) is dropped (review SEC-01; the dashboard does the same). It is not a total deadline, so a
+        # client trickling a byte every 29 s still holds its thread; the number of connections is bounded at the
+        # edge (the tunnel's rate-limiting rule), not here. No ledger slot is ever held while a body is read.
+        timeout = 30
 
         # ---- low-level response helpers (mirror dashboard.py) ----
         def log_message(self, *args: Any) -> None:  # route access logs through logging, not stderr
@@ -325,15 +364,41 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
         def _redirect(self, location: str) -> None:
             self._write(302, "text/plain", b"", {"Location": location})
 
+        def _read_body(self) -> bytes:
+            """The request body, at most `_MAX_BODY` bytes. A larger or unparseable Content-Length raises
+            `_BadBody` BEFORE anything is read, and the connection is closed so the unread bytes are never
+            parsed as a next request."""
+            raw_len = (self.headers.get("Content-Length") or "").strip()
+            if not raw_len:
+                return b""
+            # Digits only: int() would also accept "+5" or "1_0", which no HTTP client sends.
+            length = int(raw_len) if raw_len.isascii() and raw_len.isdigit() else -1
+            if length < 0 or length > _MAX_BODY:
+                self.close_connection = True
+                if length < 0:
+                    raise _BadBody(400, "Content-Length is not a valid length")
+                raise _BadBody(413, "request body too large")
+            return self.rfile.read(length) if length else b""
+
+        def _busy(self) -> None:
+            self._json(503, {"error": "temporarily_unavailable",
+                             "error_description": "the broker is busy; retry shortly"}, {"Retry-After": "1"})
+
+        def _too_many(self) -> None:
+            self._json(429, {"error": "too_many_requests",
+                             "error_description": "too many requests from this client; retry later"},
+                       {"Retry-After": "60"})
+
+        def _client(self) -> str:
+            return client_key(self.headers, self.client_address[0])
+
         def _body_form(self) -> dict[str, str]:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length > 0 else b""
+            raw = self._read_body()
             parsed = urllib.parse.parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
             return {k: v[0] for k, v in parsed.items()}
 
         def _body_json(self) -> dict[str, Any]:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length > 0 else b""
+            raw = self._read_body()
             try:
                 obj = json.loads(raw or b"{}")
             except (ValueError, TypeError):
@@ -354,6 +419,11 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
                     self._authorize_get()
                 else:
                     self._json(404, {"error": "not_found"})
+            except ratelimit.Busy:
+                self._busy()
+            except TimeoutError:   # the client stopped reading our response past `timeout`: drop it quietly
+                self.close_connection = True
+                log.info("oauth GET %s: client idle past %ss, connection dropped", path, self.timeout)
             except Exception:   # never leak a stack; log + generic 500
                 log.exception("oauth GET %s failed", path)
                 self._oauth_error(500, "server_error")
@@ -369,12 +439,22 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
                     self._token()
                 else:
                     self._json(404, {"error": "not_found"})
+            except _BadBody as e:
+                self._oauth_error(e.status, "invalid_request", e.desc)
+            except ratelimit.Busy:
+                self._busy()
+            except TimeoutError:   # the client went idle past `timeout` (mid-body, or not reading): drop it
+                self.close_connection = True
+                log.info("oauth POST %s: client idle past %ss, connection dropped", path, self.timeout)
             except Exception:   # never leak a stack; log + generic 500
                 log.exception("oauth POST %s failed", path)
                 self._oauth_error(500, "server_error")
 
         # ---- /register (RFC 7591 dynamic client registration) ----
         def _register(self) -> None:
+            if not _REGISTER_LIMIT.allow(self._client()):
+                self._too_many()
+                return
             body = self._body_json()
             uris = body.get("redirect_uris")
             if not isinstance(uris, list) or not uris or not all(isinstance(u, str) for u in uris):
@@ -391,7 +471,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
                 return
             name = body.get("client_name")
             client_name = name.strip()[:128] if isinstance(name, str) and name.strip() else None
-            with db.connect() as conn:
+            with _LEDGER.slot(), db.connect() as conn:
                 client_id = register_client(conn, client_name, list(uris))
                 conn.commit()
             log.info("oauth: registered client %s (%d redirect uri(s))", client_id, len(uris))
@@ -410,7 +490,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
                 urllib.parse.urlparse(self.path).query, keep_blank_values=True).items()}
             client_id = q.get("client_id", "")
             redirect_uri = q.get("redirect_uri", "")
-            with db.connect() as conn:
+            with _LEDGER.slot(), db.connect() as conn:
                 client = get_client(conn, client_id) if client_id else None
             err = _authorize_error(client, redirect_uri, q)
             if err is not None:
@@ -425,7 +505,16 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
 
         # ---- /authorize POST (consent submit → issue code) ----
         def _authorize_post(self) -> None:
+            if not _CONSENT_LIMIT.allow(self._client()):
+                self._too_many()
+                return
+            # Read the body BEFORE taking a ledger slot: a client trickling its body must hold only its own
+            # thread, never one of the slots every other request needs (review SEC-01, round 1).
             f = self._body_form()
+            with _LEDGER.slot():   # one slot for the whole consent, both of its ledger connections
+                self._authorize_post_locked(f)
+
+        def _authorize_post_locked(self, f: dict[str, str]) -> None:
             client_id = f.get("client_id", "")
             redirect_uri = f.get("redirect_uri", "")
             hidden = {k: f.get(k, "") for k in
@@ -474,7 +563,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
             if not code or not verifier:
                 self._oauth_error(400, "invalid_request", "code and code_verifier are required")
                 return
-            with db.connect() as conn:
+            with _LEDGER.slot(), db.connect() as conn:
                 bound = take_code(conn, code)          # single-use + expiry enforced in the DELETE…RETURNING
                 if bound is None:
                     conn.commit()

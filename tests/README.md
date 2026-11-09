@@ -26,7 +26,7 @@ pytest --cov=br0kr --cov-report=term-missing
 | Layer | Marker | What | Isolation |
 |---|---|---|---|
 | **unit** | `unit` | pure functions, no I/O | none needed |
-| **integration** | `integration` | several modules wired together (daemon tick, reconciler, gateway verbs) against hermetic fakes: a fake PVE driver, a fake connection, no network | the home-module seams |
+| **integration** | `integration` | several modules wired together (daemon tick, reconciler, gateway verbs) against hermetic fakes: a fake PVE driver, a fake connection, no external network (a test may serve the real handler on a loopback socket) | the home-module seams |
 | **e2e** | `e2e` | **reserved, empty today.** The end-to-end proofs are the real-Postgres harnesses below and the live `scripts/live_*.py` runs against a Proxmox node; see [e2e/README.md](e2e/README.md) | opt-in — never in the hermetic default |
 | *(orthogonal)* | `slow` | long-running; excluded from the fast subset | |
 

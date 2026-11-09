@@ -159,6 +159,18 @@ page**; paste a project token (see [oauth-connector.md](oauth-connector.md) §2)
   host-agnostic origin), setting `BR0KR_PUBLIC_URL` the same way.
 - A minted connector token is still a normal, revocable project `api_token` (SECURITY.md **C16**) — revoke
   it in the dashboard Agent-tokens panel to cut a connector off.
+- **Pre-authentication bounds.** `/register`, `/authorize`, `/token`, `/mcp` and the gateway's `/healthz` are
+  reachable before anyone authenticates. br0kr bounds them in process: the OAuth shim refuses a body over
+  16 KiB, drops a connection idle for 30 s, never holds a ledger slot while reading a body, lets at most 8
+  requests hold a ledger connection at once (503 otherwise), and rate-limits registration (10 per client, 60 in
+  all, a minute) and consent (20 and 240) with a 429; `/healthz` probes the ledger at most once per 2 s; the
+  gateway's token lookup is gated too (`{"error": "busy"}`). The client key is cloudflared's
+  `Cf-Connecting-IP`. The overall ceilings mean a sustained flood can also refuse a legitimate first-time
+  connector setup (existing connectors keep working); it clears a minute after the flood stops, or at once with
+  `docker compose restart oauth`.
+- **Add an edge rule too.** In-process bounds cannot cap how many connections reach the host. A Cloudflare
+  rate-limiting rule (Security → WAF → Rate limiting rules) matching `/register`, `/authorize`, `/token` and
+  `/healthz` on your hostname, for example 30 requests per minute per IP, stops a flood before it arrives.
 
 ## See also
 - [oauth-connector.md](oauth-connector.md) — the OAuth connector this tunnel exists to make reachable (§1 enable, §2 consent)

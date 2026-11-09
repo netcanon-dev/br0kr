@@ -172,7 +172,9 @@ every guest boots pre-provisioned, no first-boot step at all.
   `invalid_token` (the header/env token is missing, wrong, revoked, or expired) · `forbidden_scope` (the
   token's tier can't call that verb — e.g. a `read` token calling `request_lease`) · `project_forbidden` /
   `lease_forbidden` (a tenant token reaching outside its own project) · `template_forbidden` (a non-public
-  template the project wasn't granted). Repeated rejects are recorded as `denied` rows in the audit trail.
+  template the project wasn't granted) · `busy` (every token-lookup slot was taken, during a flood of bad
+  requests or while the ledger is briefly unreachable; nothing was done, so retry with backoff). Repeated rejects are recorded as
+  `denied` rows in the audit trail.
 - **Can't reach the endpoint at all** — hit `GET http://<broker-host>:${GATEWAY_PORT:-8080}/healthz` (a
   FastMCP custom route): `200` = gateway up + ledger reachable, `503` = ledger unreachable, connection refused
   = the gateway isn't running / wrong host:port.

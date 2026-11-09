@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from typing import Any, Literal, cast
@@ -69,6 +71,7 @@ from br0kr import (
     multidisk,
     nodes,
     placement,
+    ratelimit,
     replication,
     settings,
 )
@@ -152,9 +155,13 @@ def _client_ip(ctx: Context) -> str | None:
     return getattr(client, "host", None) if client is not None else None
 
 
+_AUTH_GATE = ratelimit.LedgerGate("gateway token lookup", slots=8)
+
+
 def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
     """Resolve + tier-check the caller for `verb`. Returns the `Principal` when allowed, else an error dict
-    {"error": "no_token" | "invalid_token" | "forbidden_scope"} the tool returns verbatim. The two are
+    {"error": "no_token" | "invalid_token" | "forbidden_scope" | "busy"} the tool returns verbatim (`busy`: every
+    token-lookup slot was taken, review SEC-01; the call may be retried). The two are
     distinguished by `isinstance(result, dict)` (a Principal is a frozen dataclass, never a dict), which
     also lets the type checker narrow the result to a Principal in the tool body. Resolution runs on a
     DEDICATED autocommit connection (auth.resolve's contract: the last_used_at bump must not hold a row
@@ -171,8 +178,15 @@ def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
         _denials.note(_denial_connect, surface="mcp", action=verb, reason="no_token",
                       source_ip=_client_ip(ctx))
         return {"error": "no_token"}
-    with closing(db.connect_with_retry(autocommit=True)) as ac:
-        principal = auth.resolve(ac, secret)
+    # Any bearer at all reaches this lookup, before it is known to be valid (review SEC-01). FastMCP 1.30 runs
+    # br0kr's sync tools on its event loop, so lookups are already one at a time today; the gate caps them at
+    # `_AUTH_GATE.slots` should that dispatch ever become concurrent (an SDK change, or async tools), and a caller
+    # that cannot get a slot within a second is told `busy` without touching the ledger.
+    try:
+        with _AUTH_GATE.slot(), closing(db.connect_with_retry(autocommit=True)) as ac:
+            principal = auth.resolve(ac, secret)
+    except ratelimit.Busy:
+        return {"error": "busy"}
     if principal is None:
         _denials.note(_denial_connect, surface="mcp", action=verb, reason="invalid_token",
                       source_ip=_client_ip(ctx))
@@ -1350,14 +1364,45 @@ def _ledger_reachable() -> bool:
         return False
 
 
+# /healthz is unauthenticated and, through the tunnel's catch-all route, internet-reachable, so it must not
+# open a ledger connection per request (review SEC-01): one probe runs at a time, and its answer is reused for
+# `_HEALTH_TTL_S`, so a flood of health checks costs at most one connection every couple of seconds. A caller
+# arriving while a probe is in flight gets the last answer instead of waiting, so only one worker thread ever
+# blocks on the ledger. A Docker healthcheck every 15 s always gets a fresh answer.
+_HEALTH_TTL_S = 2.0
+_health_lock = threading.Lock()
+_health_last: tuple[float, bool] | None = None
+
+
+def _ledger_reachable_cached(now: Callable[[], float] = time.monotonic) -> bool:
+    """`_ledger_reachable`, at most once per `_HEALTH_TTL_S`. A caller that finds a probe already in flight does
+    not wait for it: it gets the last answer (or False, unhealthy, before the first probe has finished)."""
+    global _health_last
+    last = _health_last
+    if last is not None and now() - last[0] < _HEALTH_TTL_S:
+        return last[1]
+    if not _health_lock.acquire(blocking=False):
+        return last[1] if last is not None else False
+    try:
+        last = _health_last   # another caller may have refreshed it while we checked
+        if last is not None and now() - last[0] < _HEALTH_TTL_S:
+            return last[1]
+        ok = _ledger_reachable()
+        _health_last = (now(), ok)
+        return ok
+    finally:
+        _health_lock.release()
+
+
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(_request: Request) -> JSONResponse:
     """Liveness/readiness for the gateway: can it reach the ledger it serves every tool call from? A
     cheap `SELECT 1` → 200 {"status":"ok"} if reachable, 503 {"status":"unhealthy"} otherwise — for a
     Docker healthcheck / load balancer. Only mounted on the HTTP transports (streamable-http/sse);
     stdio is launched per-client and needs none. Unauthenticated by design (liveness exposes no data);
-    the blocking probe runs in a worker thread so it never stalls the event loop."""
-    ok = await anyio.to_thread.run_sync(_ledger_reachable)
+    the blocking probe runs in a worker thread so it never stalls the event loop, and is shared across callers
+    for a couple of seconds (`_ledger_reachable_cached`) so a flood cannot open a ledger connection each."""
+    ok = await anyio.to_thread.run_sync(_ledger_reachable_cached)
     return JSONResponse(
         {"status": "ok" if ok else "unhealthy", "reason": None if ok else "ledger_unreachable"},
         status_code=200 if ok else 503,

@@ -157,3 +157,27 @@ def test_authorize_error_requires_s256_pkce() -> None:
         _CLIENT, "https://ok/cb", {**_GOOD_PARAMS, "code_challenge_method": "plain"}) == "pkce_required"
     assert oauth._authorize_error(
         _CLIENT, "https://ok/cb", {**_GOOD_PARAMS, "code_challenge": ""}) == "pkce_required"
+
+
+def test_client_key_prefers_the_tunnel_client_then_the_forwarded_peer() -> None:
+    """client_key (rate limiting only, never auth) takes cloudflared's Cf-Connecting-IP on the tunnel listener
+    (plain HTTP behind Caddy), Caddy's X-Forwarded-For on the direct TLS site, and the socket peer otherwise; a
+    Cf-Connecting-IP on the TLS path is ignored. Guards keying every internet client on the proxy's own address
+    (one shared bucket for the whole internet) and a LAN client choosing its own key on the TLS site (review
+    SEC-01)."""
+    tunnel = {"X-Forwarded-Proto": "http", "Cf-Connecting-IP": "203.0.113.7", "X-Forwarded-For": "172.18.0.5"}
+    assert oauth.client_key(tunnel, "172.18.0.9") == "203.0.113.7"
+    tls = {"X-Forwarded-Proto": "https", "Cf-Connecting-IP": "203.0.113.99", "X-Forwarded-For": "192.0.2.4, 10.0.0.1"}
+    assert oauth.client_key(tls, "172.18.0.9") == "192.0.2.4"
+    assert oauth.client_key({}, "127.0.0.1") == "127.0.0.1"
+
+
+def test_preauth_bounds_are_the_documented_values() -> None:
+    """The shim's pre-authentication bounds are the values SECURITY.md C16 and public-tunnel.md state (a
+    16 KiB body, 8 ledger slots, /register 10 per client and 60 overall a minute, consent 20 and 240). Guards
+    the docs drifting from the code: the handler tests swap these objects for test doubles, so nothing else
+    pins them."""
+    assert oauth._MAX_BODY == 16 * 1024
+    assert oauth._LEDGER.slots == 8
+    assert (oauth._REGISTER_LIMIT.per_key, oauth._REGISTER_LIMIT.total) == (10, 60)
+    assert (oauth._CONSENT_LIMIT.per_key, oauth._CONSENT_LIMIT.total) == (20, 240)

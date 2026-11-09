@@ -26,6 +26,19 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   install it with `--require-hashes`, so a yanked, replaced or unlisted wheel fails the build; pip-audit audits the
   lock as pinned. `requirements.txt` stays the manifest, `mcp` stays pinned exactly, and a unit test fails while
   manifest and lock disagree (review SEC-03).
+- **The tunnel-reachable pre-authentication paths are bounded (new `br0kr/ratelimit.py`, `br0kr/oauth.py`,
+  `br0kr/mcp_server.py`).** Why: under `--profile tunnel` the OAuth shim's `/register`, `/authorize` and
+  `/token` and the gateway's `/mcp` (with any bearer) are internet-reachable before authentication. The shim read
+  an attacker-chosen `Content-Length` into memory, had no socket timeout, and every request (shim and gateway)
+  opened a ledger connection before any credential was checked, so a modest flood could exhaust Postgres
+  `max_connections` and starve the daemon and every legitimate agent. Now the shim refuses a body over 16 KiB or a
+  malformed length unread (413/400), drops a connection idle for 30 s, never holds a ledger slot while reading a
+  body, lets at most 8 requests hold a ledger connection at once (503 `temporarily_unavailable` otherwise, without
+  touching the ledger) and rate-limits `/register` and the consent POST per client and overall (429). On the
+  gateway, the unauthenticated `/healthz` probes the ledger at most once per 2 s however many callers ask, and the
+  token lookup gets an 8-slot gate (`{"error": "busy"}`); FastMCP 1.30 already runs it one at a time on its event
+  loop, so the gate is the bound for when that changes. `public-tunnel.md` adds a Cloudflare rate-limiting rule
+  as the edge layer (review SEC-01).
 - **CI matches the netcanon baseline: a PII guard, a CVE-gated image, blocking zizmor.** Why: br0kr is
   public, and netcanon/netcanon is the reference every netcanon repository now follows.
   - `pii-guard.yml` (new; SECURITY.md C19) runs the shared `.github/scripts/pii_guard.py` over every tracked

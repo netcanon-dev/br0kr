@@ -11,12 +11,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from br0kr import auth, db, gateway, mcp_server, multidisk, settings
+from br0kr import auth, db, gateway, mcp_server, multidisk, ratelimit, settings
 
 pytestmark = pytest.mark.unit
 
@@ -1280,3 +1281,61 @@ def test_bulk_verb_returns_the_authorize_error_and_never_opens_a_connection(monk
     monkeypatch.setattr(gateway, "renew_lease", lambda *a, **k: called.append(1))
     assert mcp_server.renew_leases(object(), lease_ids=[1, 2]) == {"error": "forbidden_scope"}
     assert called == []
+
+
+def test_authorize_answers_busy_without_a_ledger_connection_when_every_slot_is_taken(monkeypatch):
+    """With every token-lookup slot held, `_authorize` returns {"error": "busy"} and never opens a ledger
+    connection. Guards the review SEC-01 failure: any bearer at all (valid or junk) reaches the token lookup
+    before it is known to be valid, so a flood of junk bearers through the tunnel opened one ledger connection
+    each and could exhaust Postgres max_connections."""
+    gate = ratelimit.LedgerGate("test", slots=1, wait_s=0.01)
+    monkeypatch.setattr(mcp_server, "_AUTH_GATE", gate)
+
+    def no_ledger(*_a, **_k):
+        raise AssertionError("the token lookup must not reach the ledger when no slot is free")
+
+    monkeypatch.setattr(mcp_server.db, "connect_with_retry", no_ledger)
+    with gate.slot():
+        assert mcp_server._authorize(_ctx_with_header("Bearer junk"), "lease_status") == {"error": "busy"}
+
+
+def test_healthz_probe_is_reused_within_its_window(monkeypatch):
+    """The unauthenticated /healthz probe touches the ledger at most once per `_HEALTH_TTL_S` of repeated
+    calls, and probes again once that has passed. Guards the round-1 review finding: the route is
+    internet-reachable through the tunnel's catch-all, and each request opened its own ledger connection outside
+    every gate. Also pins the documented 8-slot token-lookup gate and the 2 s window."""
+    probes: list[int] = []
+    monkeypatch.setattr(mcp_server, "_ledger_reachable", lambda: probes.append(1) or True)
+    monkeypatch.setattr(mcp_server, "_health_last", None)
+    clock = [100.0]
+    for _ in range(5):
+        assert mcp_server._ledger_reachable_cached(now=lambda: clock[0]) is True
+    assert len(probes) == 1
+    clock[0] += mcp_server._HEALTH_TTL_S
+    assert mcp_server._ledger_reachable_cached(now=lambda: clock[0]) is True
+    assert len(probes) == 2
+    assert mcp_server._HEALTH_TTL_S == 2.0 and mcp_server._AUTH_GATE.slots == 8
+
+
+def test_healthz_callers_never_queue_behind_a_slow_probe(monkeypatch):
+    """While one probe is stuck on a slow ledger, other /healthz callers return at once with the last answer
+    instead of each parking a worker thread, and only the one probe ever reaches the ledger. Guards a flood of
+    health checks during a ledger stall filling the gateway's worker threads."""
+    release, entered = threading.Event(), threading.Event()
+    probes: list[int] = []
+
+    def slow_probe() -> bool:
+        probes.append(1)
+        entered.set()
+        release.wait(5)
+        return True
+
+    monkeypatch.setattr(mcp_server, "_ledger_reachable", slow_probe)
+    monkeypatch.setattr(mcp_server, "_health_last", (0.0, False))   # stale: the next caller must probe
+    first = threading.Thread(target=mcp_server._ledger_reachable_cached)
+    first.start()
+    assert entered.wait(5)
+    answers = [mcp_server._ledger_reachable_cached() for _ in range(5)]   # all while the probe is stuck
+    release.set()
+    first.join(5)
+    assert answers == [False] * 5 and len(probes) == 1   # the stale last answer, and a single ledger probe

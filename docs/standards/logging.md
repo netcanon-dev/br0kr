@@ -21,7 +21,10 @@ once at process start. It is **idempotent** — re-calling it replaces handlers
 cleanly (tests, supervised restarts).
 
 - **Default = plain text**, human-readable: `TS [LEVEL] logger: message`.
-- **`LOG_FORMAT=json` = JSON lines**, one object per record, newline-delimited. The bundled compose stack passes
+- **`LOG_FORMAT=json` = JSON lines**, one object per record, newline-delimited.
+- **Pre-authentication refusals** (`br0kr.ratelimit`) are WARNING lines, throttled so a flood leaves a trace
+  without flooding the log: a full ledger gate at most once a minute (fields `gate`, `slots`, `refused`), and a
+  rate limiter's refusals once per window (`limiter`, `refused`). The bundled compose stack passes
   `LOG_LEVEL`/`LOG_FORMAT`/`BR0KR_LOG_FILE` to every broker process (`x-broker-env`). *Known gap:* the
   gateway's HTTP server (uvicorn, started by the MCP SDK) installs its own handlers, so its startup and
   access lines (`Uvicorn running on …`, `"GET /healthz" 200`) stay plain text; a JSON consumer should skip
