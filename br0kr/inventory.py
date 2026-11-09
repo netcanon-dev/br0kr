@@ -45,6 +45,10 @@ _ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
 # Per-node derived usage: Σ active leases on the node (cpu/mem/count). The LEFT JOIN keeps a node with
 # no leases (its sums COALESCE to 0); the FILTER counts only capacity-holding rows, so a node-with-only-
 # PENDING-or-terminal leases reads 0 used. Reused as a CTE by the cluster roll-up.
+# As in admission's capacity reads, the capacity-state test is in the lease JOIN so the partial
+# lease_*_active indexes apply (review PERF-01); the FILTERs stay. _LIST_PROJECTS reads its PENDING
+# queue_depth in a sub-select, because the capacity join now excludes PENDING rows; that scans the PENDING
+# partition once per project, bounded by queue_max and far cheaper than the old full-history join.
 _NODE_USAGE = f"""
   SELECT n.id, n.cluster_id, n.cpu_total, n.mem_total_mb,
          COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS cpu_used,
@@ -52,7 +56,7 @@ _NODE_USAGE = f"""
          COUNT(*)                   FILTER (WHERE l.state IN {_ACTIVE_SQL})     AS lease_count,
          n.cordoned                                                            AS cordoned,
          n.pve_node                                                            AS pve_node
-  FROM node n LEFT JOIN lease l ON l.node_id = n.id
+  FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL}
   GROUP BY n.id
 """
 
@@ -100,7 +104,7 @@ _LIST_STORAGE = f"""
                     'quarantined', sn.quarantined_at IS NOT NULL) ORDER BY sn.node_id)
            FROM storage_node sn WHERE sn.storage_id = s.id
          ), '[]'::jsonb) AS reachable_nodes
-  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id
+  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id AND l.state IN {_ACTIVE_SQL}
   GROUP BY s.id ORDER BY s.id
 """
 
@@ -115,7 +119,7 @@ _LIST_PROJECTS_TMPL = f"""
          COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS cpu_used,
          COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS mem_used,
          COUNT(*)                   FILTER (WHERE l.state IN {_ACTIVE_SQL})     AS lease_count,
-         COUNT(*)                   FILTER (WHERE l.state = 'PENDING')          AS queue_depth,
+         (SELECT count(*) FROM lease q WHERE q.project_id = p.id AND q.state = 'PENDING') AS queue_depth,
          p.cpu_limit_max, p.mem_limit_mb_max, p.max_leases_max, p.max_template_disk_gb,
          COALESCE((SELECT sum(t.size_gb) FROM template t WHERE t.owner_project_id = p.id), 0)
          + COALESCE((SELECT sum(b.size_gb) FROM template_build b
@@ -125,7 +129,7 @@ _LIST_PROJECTS_TMPL = f"""
          + COALESCE((SELECT sum(ti.size_gb) FROM template_instance ti
                      JOIN template_replication tr ON tr.id = ti.replication_id
                      WHERE tr.project_id = p.id AND ti.instance_state = 'READY'), 0) AS template_disk_used
-  FROM project p LEFT JOIN lease l ON l.project_id = p.id
+  FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {_ACTIVE_SQL}
   {{where}}
   GROUP BY p.id ORDER BY p.id
 """

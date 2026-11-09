@@ -241,7 +241,9 @@ def node_headroom(conn: psycopg.Connection[Any], cluster_id: str | None) -> list
         f"SELECT n.id, "
         f"n.cpu_total    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0), "
         f"n.mem_total_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) "
-        f"FROM node n LEFT JOIN lease l ON l.node_id = n.id WHERE {where} GROUP BY n.id",
+        # the state test is in the JOIN so the partial lease_node_active index applies (review PERF-01)
+        f"FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL} "
+        f"WHERE {where} GROUP BY n.id",
         params,
     ).fetchall()
     conn.commit()

@@ -70,11 +70,16 @@ QUEUEABLE_REJECTS = frozenset({
 _LOOKUP = ("SELECT id, state, node_id, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id, template_id "
            "FROM lease WHERE idem_key = %s")
 
+# The capacity reads below (and inventory's and scheduler's twins) put the capacity-state test in the
+# lease JOIN, not only in the FILTERs, so the partial lease_{node,storage,project}_active indexes apply
+# and admit() never scans the whole (never-pruned) lease history under its advisory locks (review
+# PERF-01). The FILTERs stay, so the sums are provably unchanged; harness_admission checks the plans.
 _NODE_AVAIL = f"""
   SELECT n.cpu_total    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
          n.mem_total_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
          n.cordoned, n.cluster_id
-  FROM node n LEFT JOIN lease l ON l.node_id = n.id WHERE n.id = %s GROUP BY n.id
+  FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL}
+  WHERE n.id = %s GROUP BY n.id
 """
 # A template's catalog id — read under the node lock to confirm it still EXISTS (unknown_template). Since the
 # PR-5 cross-cluster widening it NO LONGER gates on the template's home cluster: resolve_placement picks a
@@ -113,7 +118,8 @@ _STORAGE_AVAIL = f"""
                      WHERE ti.storage_id = s.id AND ti.instance_state = 'READY'), 0)
          - COALESCE((SELECT sum(d.req_disk_gb) FROM lease_data_disk d JOIN lease l2 ON l2.id = d.lease_id
                      WHERE d.storage_id = s.id AND l2.state IN {_ACTIVE_SQL}), 0)
-  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id WHERE s.id = %s GROUP BY s.id
+  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id AND l.state IN {_ACTIVE_SQL}
+  WHERE s.id = %s GROUP BY s.id
 """
 # Cluster headroom = Σ(node limits in the cluster) − Σ(active leases on those nodes). The two
 # aggregations are SEPARATE subqueries: a single LEFT JOIN would multiply each node's capacity
@@ -137,7 +143,8 @@ _PROJECT_AVAIL = f"""
          p.mem_limit_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
          p.max_leases   - COALESCE(COUNT(*)          FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
          p.cpu_limit_max, p.mem_limit_mb_max, p.max_leases_max
-  FROM project p LEFT JOIN lease l ON l.project_id = p.id WHERE p.id = %s GROUP BY p.id
+  FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {_ACTIVE_SQL}
+  WHERE p.id = %s GROUP BY p.id
 """
 _INSERT = """
   INSERT INTO lease (idem_key, node_id, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id,

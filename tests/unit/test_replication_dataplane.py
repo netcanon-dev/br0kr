@@ -217,7 +217,17 @@ def test_publish_replication_enabled_writes_the_leader_fact():
     honest. Guards the writer that makes replication_enabled() truthful once the engine is on."""
     rc = _ScriptConn()
     replication.publish_replication_enabled(rc, True)
-    assert "UPDATE operator_setting SET replication_enabled = %s" in rc.sqls[0] and rc.params[0] == (True,)
+    assert "UPDATE operator_setting SET replication_enabled = %s" in rc.sqls[0] and rc.params[0] == (True, True)
+
+
+def test_publish_replication_enabled_writes_only_on_a_change():
+    """The per-tick publish is conditional (IS DISTINCT FROM): the UPDATE matches no row when the stored value
+    already equals the leader's, so an idle tick writes nothing (review PERF-06). Guards the unconditional
+    UPDATE coming back: a dead tuple + a WAL record every 5 s on the row every gateway call reads. The
+    no-write-on-idle effect itself is proven against real Postgres in scripts/harness_admission.py."""
+    rc = _ScriptConn()
+    replication.publish_replication_enabled(rc, False)
+    assert "replication_enabled IS DISTINCT FROM %s" in rc.sqls[0] and rc.params[0] == (False, False)
 
 
 def test_stale_reclaim_query_covers_idle_and_wall_capped_on_copy_start():

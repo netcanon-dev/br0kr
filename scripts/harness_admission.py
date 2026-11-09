@@ -16,6 +16,15 @@ so the proof covers the shipped code path, not a hand-inlined copy.
                          on a retry storm).
   rejections             malformed / over-capacity / unknown-scope asks return the right
                          reason and create no lease.
+  capacity_reads_use_partial_indexes
+                         with 50k terminal leases on the scopes, the node/storage/project capacity reads
+                         admit() runs under its advisory locks plan an index scan on the partial
+                         lease_*_active indexes (never a Seq Scan on lease) and still return the exact sums
+                         (review PERF-01).
+  replication_publish_is_conditional
+                         the leader's per-tick replication_enabled publish rewrites the operator_setting row
+                         only when the value changes: the row version (xmin, ctid) is unchanged after a
+                         repeated publish (review PERF-06).
 
 A threading.Barrier starts the racers together. Exit 0 + GO iff every invariant holds.
 """
@@ -29,7 +38,7 @@ from pathlib import Path
 import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import admission, lease, migrate  # noqa: E402
+from br0kr import admission, lease, migrate, replication  # noqa: E402
 from br0kr.admission import AdmissionRequest  # noqa: E402
 
 CONN = os.environ["PGCONN"]
@@ -212,6 +221,87 @@ def check_rejections() -> bool:
     return ok
 
 
+def _plan_nodes(plan: dict) -> list[dict]:
+    """Every node of an EXPLAIN (FORMAT JSON) plan tree, flattened."""
+    out = [plan]
+    for child in plan.get("Plans", []):
+        out.extend(_plan_nodes(child))
+    return out
+
+
+def check_capacity_reads_use_partial_indexes(terminal: int = 50_000) -> bool:
+    """The capacity reads admit()/promote_pinned() run UNDER their scope advisory locks must not scan the whole
+    lease history: lease rows are never deleted (the sweep watermark relies on it), so a Seq Scan there grows
+    without bound inside the serialised section. With the capacity-state test in the JOIN the partial
+    lease_*_active indexes apply (review PERF-01). Seeds 50k RELEASED leases + 3 live ones on one node/pool/
+    project, ANALYZEs, then checks each read's plan and that its numbers still match a direct sum."""
+    reset()
+    seed_node("n1", cpu=1000, mem=1_000_000)
+    seed_storage("s1", gb=100_000)
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO project(id,cpu_limit,mem_limit_mb,max_leases) VALUES ('p1',1000,1000000,1000) "
+                  "ON CONFLICT (id) DO NOTHING")
+        c.execute("""INSERT INTO lease(node_id, storage_id, project_id, req_cpu, req_mem_mb, req_disk_gb, state,
+                                       ttl_seconds, expires_at)
+                     SELECT 'n1', 's1', 'p1', 1, 64, 1, 'RELEASED', 900, now() FROM generate_series(1, %s)""",
+                  (terminal,))
+        for st in ("ADMITTED", "ACTIVE", "RELEASING"):
+            c.execute("""INSERT INTO lease(node_id, storage_id, project_id, req_cpu, req_mem_mb, req_disk_gb,
+                                           state, ttl_seconds, expires_at)
+                         VALUES ('n1','s1','p1', 2, 128, 3, %s::lease_state, 900, now() + interval '1 hour')""",
+                      (st,))
+        c.execute("ANALYZE lease")
+        reads = {"node": (admission._NODE_AVAIL, ("n1",), "lease_node_active"),
+                 "storage": (admission._STORAGE_AVAIL, ("s1",), "lease_storage_active"),
+                 "project": (admission._PROJECT_AVAIL, ("p1",), "lease_project_active")}
+        problems = []
+        for name, (sql, params, index) in reads.items():
+            plan = c.execute("EXPLAIN (FORMAT JSON) " + sql, params).fetchone()[0][0]["Plan"]
+            nodes = _plan_nodes(plan)
+            # Only the capacity join's own scan (alias "l"); the data-disk sub-select joins lease as "l2".
+            if any(nd.get("Node Type") == "Seq Scan" and nd.get("Relation Name") == "lease"
+                   and nd.get("Alias") == "l" for nd in nodes):
+                problems.append(f"{name}:seq_scan")
+            if not any(nd.get("Index Name") == index for nd in nodes):
+                problems.append(f"{name}:no_{index}")
+        node_row = c.execute(admission._NODE_AVAIL, ("n1",)).fetchone()
+        storage_row = c.execute(admission._STORAGE_AVAIL, ("s1",)).fetchone()
+        if int(storage_row[0]) != 100_000 - 9:                 # three live leases x 3 GB
+            problems.append(f"storage_sum:{storage_row[0]}")
+        proj_row = c.execute(admission._PROJECT_AVAIL, ("p1",)).fetchone()
+        if (float(node_row[0]), int(node_row[1])) != (1000 - 6, 1_000_000 - 384):
+            problems.append(f"node_sums:{node_row[:2]}")
+        if (float(proj_row[0]), int(proj_row[1]), int(proj_row[2])) != (1000 - 6, 1_000_000 - 384, 1000 - 3):
+            problems.append(f"project_sums:{proj_row[:3]}")
+    ok = not problems
+    print(f"[capacity_reads_use_partial_indexes] {terminal} terminal + 3 live leases: problems={problems or 'none'}"
+          f"  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_replication_publish_is_conditional() -> bool:
+    """The leader calls publish_replication_enabled every tick; it must rewrite the operator_setting row only when
+    the value changes (review PERF-06). An UPDATE always writes a new row version even when the value is the
+    same, so an unchanged (xmin, ctid) after a repeated publish proves no write happened; a real change must
+    still land."""
+    with psycopg.connect(CONN, autocommit=True) as c:
+        def version() -> tuple:
+            return c.execute("SELECT xmin::text, ctid::text, replication_enabled FROM operator_setting "
+                             "WHERE id = 1").fetchone()
+        replication.publish_replication_enabled(c, False)
+        before = version()
+        for _ in range(5):
+            replication.publish_replication_enabled(c, False)        # idle ticks: same value
+        idle = version()
+        replication.publish_replication_enabled(c, True)              # a real change
+        changed = version()
+        replication.publish_replication_enabled(c, False)              # restore
+    ok = idle == before and changed[:2] != before[:2] and changed[2] is True
+    print(f"[replication_publish_is_conditional] idle_rewrites={'none' if idle == before else 'YES'} "
+          f"change_lands={changed[2] is True}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main() -> int:
     load_schema()
     print("=== admission concurrency gate (migrations) ===\n")
@@ -224,6 +314,8 @@ def main() -> int:
         check_idem_terminal_replay,
         check_idem_conflict,
         check_rejections,
+        check_capacity_reads_use_partial_indexes,
+        check_replication_publish_is_conditional,
     ]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))

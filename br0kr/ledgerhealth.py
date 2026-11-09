@@ -15,6 +15,12 @@ primary's own catalogs.
                            resume without a re-clone), and how much WAL the primary is pinning for it
     pg_stat_replication    per connected standby: `state`, `sync_state`, and replay distance
 
+Replay distance is measured in WAL BYTES (`pg_current_wal_lsn() - replay_lsn`), so it only grows while the
+primary writes. An idle broker writes almost nothing (the leader's per-tick `replication_enabled` publish is
+conditional since review PERF-06), so a standby that is connected but has stopped replaying reads lag 0
+until real activity resumes; nothing is waiting to replay in that window, and the lag shows as soon as
+work arrives. A disconnected standby (the incident below) is unaffected: `standbys_streaming` drops at once.
+
 Three states, deliberately — because "no standby" and "broken standby" are NOT the same thing and a
 signal that conflates them gets muted:
 

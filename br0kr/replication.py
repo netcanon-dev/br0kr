@@ -690,9 +690,14 @@ def replication_cooldown_remaining(
 # ── the leader-published data-plane fact + the waiter coupling (§5.4) ─────────────────────────────────
 def publish_replication_enabled(conn: psycopg.Connection[Any], enabled: bool) -> None:
     """The leader PUBLISHES whether the engine is advancing jobs (its effective BR0KR_REPLICATE_LIMIT > 0), so
-    `replication_enabled()` — read by the gateway's request surface — tells a requester the truth. Written each
-    tick. NOT a settings Knob (it is a published fact). Caller commits (the daemon's autocommit work conn)."""
-    conn.execute("UPDATE operator_setting SET replication_enabled = %s WHERE id = 1", (bool(enabled),))
+    `replication_enabled()` — read by the gateway's request surface — tells a requester the truth. Called each
+    tick, but the row is WRITTEN only when the value differs (`IS DISTINCT FROM`, review PERF-06): an
+    unconditional UPDATE left a dead tuple and a WAL record (shipped to the standby) per tick, and autovacuum
+    churn on the one row every gateway call reads. Calling it every tick still self-heals a
+    hand-edited column. NOT a settings Knob (it is a published fact). Caller commits (the autocommit work conn)."""
+    flag = bool(enabled)
+    conn.execute("UPDATE operator_setting SET replication_enabled = %s "
+                 "WHERE id = 1 AND replication_enabled IS DISTINCT FROM %s", (flag, flag))
 
 
 def sweep_waiters(conn: psycopg.Connection[Any]) -> int:
