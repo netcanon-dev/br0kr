@@ -18,6 +18,14 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   executable in an otherwise hash-pinned pipeline. Each now downloads to a file, checks it with `sha256sum -c`
   against a SHA-256 recorded in the workflow, and only then unpacks it; a replaced release asset fails the job.
   A hygiene test refuses a piped download in any workflow and keeps the two pins in step (review SEC-04).
+- **The image and CI install Python dependencies from a hashed lock (`requirements.lock.txt`, `Dockerfile`,
+  `.github/workflows/`).** Why: `psycopg`/`requests` were floors and `mcp==1.30.0` pulled about twenty unpinned
+  transitives, so the image held whatever PyPI resolved on build day, and pip-audit audited a fresh resolution
+  rather than what runs. Now `requirements.lock.txt` (compiled from `requirements.txt` by `uv pip compile
+  --universal --generate-hashes`) pins every distribution with its SHA-256; the Dockerfile and every CI job
+  install it with `--require-hashes`, so a yanked, replaced or unlisted wheel fails the build; pip-audit audits the
+  lock as pinned. `requirements.txt` stays the manifest, `mcp` stays pinned exactly, and a unit test fails while
+  manifest and lock disagree (review SEC-03).
 - **CI matches the netcanon baseline: a PII guard, a CVE-gated image, blocking zizmor.** Why: br0kr is
   public, and netcanon/netcanon is the reference every netcanon repository now follows.
   - `pii-guard.yml` (new; SECURITY.md C19) runs the shared `.github/scripts/pii_guard.py` over every tracked

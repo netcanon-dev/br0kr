@@ -10,8 +10,11 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Dependencies first for layer caching.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Install from the hashed lock, not the human manifest (review SEC-03): every distribution, transitives
+# included, must match a recorded SHA-256, so a yanked, replaced or newly published wheel fails the build
+# instead of shipping. requirements.txt stays the manifest the lock is compiled from.
+COPY requirements.txt requirements.lock.txt ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock.txt
 
 # The broker: the importable package, the schema, and the runnable proofs.
 COPY br0kr/ ./br0kr/

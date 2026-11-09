@@ -27,6 +27,17 @@ capacity or a real guest, so the contribution shape is opinionated.
 - A `CHANGELOG.md` `[Unreleased]` entry for anything behaviour-affecting, and
   a `SECURITY.md` row update for any change to a control or trust boundary.
 
+## Dependencies
+
+`requirements.txt` is the manifest; the image and CI install `requirements.lock.txt` (exact versions plus
+SHA-256 hashes, transitives included). After changing the manifest, regenerate the lock and commit both:
+
+```bash
+uv pip compile requirements.txt --universal --generate-hashes --python-version 3.11 -o requirements.lock.txt
+```
+
+`tests/unit/test_dependency_lock.py` fails until they agree.
+
 ## Identifier hygiene
 
 No real hostname, domain, LAN address, token or personal identifier belongs in

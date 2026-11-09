@@ -64,6 +64,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
+          # The runtime dependencies from the hashed lock first (review SEC-03), then the dev tools on top;
+          # requirements-dev.txt's `-r ../requirements.txt` is then already satisfied by the locked versions.
+          pip install --require-hashes -r requirements.lock.txt
           pip install -r tests/requirements-dev.txt
           # gitleaks: a pinned release, checked against the SHA-256 recorded HERE before it is unpacked (review
           # SEC-04), so a replaced release asset fails the job instead of running. Dependabot cannot see a curl
@@ -111,7 +114,10 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r tests/requirements-dev.txt
+          # The runtime dependencies from the hashed lock first (review SEC-03), then the dev tools on top;
+          # requirements-dev.txt's `-r ../requirements.txt` is then already satisfied by the locked versions.
+          pip install --require-hashes -r requirements.lock.txt
+          pip install -r tests/requirements-dev.txt
 
       - name: pytest (offline — e2e/slow excluded; the hermetic default)
         # The PR gate runs the fast, hermetic tiers. Slow/e2e tiers (real
@@ -161,7 +167,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --require-hashes -r requirements.lock.txt   # the hashed lock (review SEC-03)
 
       - name: Run the real-Postgres harnesses (each on a fresh database)
         run: bash scripts/run_ci_harnesses.sh

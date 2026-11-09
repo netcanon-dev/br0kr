@@ -5,7 +5,9 @@ pytest>=8
 pytest-cov>=5
 
 # Import-time deps of the package (psycopg, requests, the MCP SDK) come from the
-# RUNTIME manifest, never restated here. A restated copy drifts: this file once
+# RUNTIME manifest, never restated here. CI installs them from the hashed
+# requirements.lock.txt FIRST, so the `-r` below is already satisfied by the
+# locked versions (review SEC-03). A restated copy drifts: this file once
 # carried an unpinned `mcp>=1.2` beside requirements.txt's exact `mcp==` pin, so a CLEAN
 # environment that installed only this file (the CI validate job on a fresh
 # hosted runner) resolved mcp 2.x, which removed `mcp.server.fastmcp`. The `-r`

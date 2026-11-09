@@ -1,3 +1,7 @@
+# The human manifest. The image and CI install requirements.lock.txt (exact versions + SHA-256 hashes,
+# transitives included), compiled from THIS file. After editing it, regenerate the lock:
+#   uv pip compile requirements.txt --universal --generate-hashes --python-version 3.11 -o requirements.lock.txt
+# tests/unit/test_dependency_lock.py fails while the two disagree.
 psycopg[binary]>=3.2
 requests>=2.32
 # PINNED EXACTLY, not `>=`. mcp 2.0.0 REMOVED `mcp.server.fastmcp`, which br0kr/mcp_server.py imports,

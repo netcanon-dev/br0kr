@@ -64,6 +64,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install --quiet pip-audit
-      # requirements.txt — your dependency manifest. Dependabot proposes the
-      # upgrades; pip-audit is the fail-the-build backstop if a CVE lands.
-      - run: pip-audit -r requirements.txt
+      # requirements.lock.txt — the exact, hashed set the image and CI install (review SEC-03), audited as
+      # pinned (--disable-pip: no fresh resolution, so what is audited is what runs). Dependabot proposes
+      # the upgrades; pip-audit is the fail-the-build backstop if a CVE lands.
+      - run: pip-audit --disable-pip -r requirements.lock.txt
