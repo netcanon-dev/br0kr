@@ -43,4 +43,28 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 2
+    # A new Python minor is a deliberate move (requirements.lock.txt and the pinned mcp SDK are resolved for it),
+    # not a weekly bump; new 3.13-slim digests still arrive.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    labels: ["dependencies", "docker"]
+  # The compose files pin postgres, caddy and cloudflared by digest (review SEC-02); this proposes the bumps.
+  # Merging these is the ONLY way those binaries get patched now, so treat them as routine weekly merges.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    # Never a postgres major: the ledger's data directory is in the old major's format and the new server
+    # refuses to start on it, so a merged bump would crash-loop the ledger (a real major upgrade is a by-hand
+    # pg_upgrade or dump and restore). New digests of the same major still arrive. Caddy stays on 2.x likewise.
+    ignore:
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "caddy"
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies", "docker"]

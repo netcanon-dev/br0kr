@@ -39,6 +39,26 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   token lookup gets an 8-slot gate (`{"error": "busy"}`); FastMCP 1.30 already runs it one at a time on its event
   loop, so the gate is the bound for when that changes. `public-tunnel.md` adds a Cloudflare rate-limiting rule
   as the edge layer (review SEC-01).
+- **Every image is pinned by digest and the containers run hardened (`Dockerfile`, `docker-compose*.yml`,
+  `.github/dependabot.yml`).** Why: nothing was pinned: the python base was a floating tag, postgres and caddy
+  major tags, and `cloudflared:latest` floated on the one container that dials the internet while holding
+  `TUNNEL_TOKEN`, so a bad upstream push would redeploy silently under `restart: unless-stopped`. The broker
+  services also ran with default capabilities and a writable root filesystem. Now the python base, postgres,
+  caddy and cloudflared are pinned by digest (the runtime images at exactly the digests the reference deployment
+  already ran, so the pin changes no binary), with a Dependabot docker-compose entry to propose bumps. The broker
+  services (and the OAuth shim) run with `cap_drop: ALL`, `no-new-privileges`, a read-only root filesystem with a
+  64 MB private `/tmp`, `pids_limit` and `mem_limit`; the ledger keeps only CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID
+  for its root-run entrypoint, Caddy only NET_BIND_SERVICE, and cloudflared none, read-only.
+  - **Patching is now a Dependabot merge.** A pinned image never changes on its own, so the weekly Dependabot
+    docker and docker-compose PRs are the only way postgres, caddy, cloudflared and the python base get their
+    fixes; merge them as routine. They never propose a postgres or caddy major, or a new Python minor: a postgres
+    major would not start on the existing data directory.
+  - A `BR0KR_LOG_FILE` that cannot be written (it must now be on a mounted volume) is logged as a WARNING and
+    skipped, instead of stopping the service at start.
+  - **Rollout:** the first `scripts/deploy.sh` after this recreates every container (their config changed): about
+    a minute without the ledger, the gateway and the tunnel while pg-primary restarts, migrate reruns and the
+    daemon re-takes the leader lock. Watch the first tunnel start for a read-only-filesystem error from
+    cloudflared (review SEC-02).
 - **CI matches the netcanon baseline: a PII guard, a CVE-gated image, blocking zizmor.** Why: br0kr is
   public, and netcanon/netcanon is the reference every netcanon repository now follows.
   - `pii-guard.yml` (new; SECURITY.md C19) runs the shared `.github/scripts/pii_guard.py` over every tracked

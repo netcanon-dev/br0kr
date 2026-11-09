@@ -411,10 +411,16 @@ This starter stack trades rigour for one-command bring-up. Before relying on it:
   and adds no trust line.
 - **Secrets.** `.env` is plaintext on the host. Use Docker/Swarm secrets, a secrets manager, or
   file-based secrets for `PGPASSWORD` and the PVE token secrets in a real deployment.
-- **TLS + auth on the gateway.** The MCP gateway is published as plain HTTP and is unauthenticated;
-  put it behind a reverse proxy with TLS and access control, or keep it on a trusted network only.
-- **Pin the image.** The image is built locally and unpublished; for a fleet, build once and push to a
-  private registry, then pin a digest.
+- **TLS on the gateway.** The MCP gateway checks a bearer token on every tool call but is published as plain
+  HTTP, so the token travels in cleartext; put it behind the bundled Caddy (§10) or your own TLS proxy, or keep
+  it on a trusted network only.
+- **Images are pinned and the containers hardened (already done).** Every third-party image (postgres, caddy,
+  cloudflared, and the Dockerfile's python base) is pinned by digest, so a re-pushed tag cannot change what runs;
+  Dependabot proposes the bumps. The broker services run with no Linux capabilities, `no-new-privileges`, a
+  read-only root filesystem (a private `/tmp`), and pid / memory ceilings; the ledger and Caddy keep only the
+  capabilities their entrypoints need. A `BR0KR_LOG_FILE` must therefore point at a mounted volume. The br0kr
+  image itself is built locally and unpublished; for a fleet, build once, push to a private registry and pin
+  that digest too.
 
 ## 9. Stretched / DR standby (remote host over the mesh)
 

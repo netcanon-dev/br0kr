@@ -356,7 +356,9 @@ def configure_logging(
         level             root log level (logging.DEBUG / INFO / ...).
         json_output       True -> JSON on stream + file. None (default) reads
                           LOG_FORMAT env ("json" -> True, else False).
-        log_file          if given, also attach a RotatingFileHandler here.
+        log_file          if given, also attach a RotatingFileHandler here. A path
+                          that cannot be created or opened logs a WARNING and is
+                          skipped (stderr still gets everything).
         file_max_bytes    per-file ceiling before rotation (default 5 MB).
         file_backup_count number of rotated files kept (default 3).
         stream            where the StreamHandler writes (default sys.stderr).
@@ -386,19 +388,28 @@ def configure_logging(
     root.addHandler(stream_handler)
 
     if log_file:
-        # RotatingFileHandler does not create the dir; make it (CI/clean checkout).
-        log_dir = os.path.dirname(log_file)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file,
-            maxBytes=file_max_bytes,
-            backupCount=file_backup_count,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(redactor)
-        root.addHandler(file_handler)
+        # A log file is a convenience on top of stderr, so an unwritable path is a WARNING, not a crash: the
+        # containers' root filesystem is read-only (review SEC-02), and a BR0KR_LOG_FILE left pointing into it
+        # would otherwise stop every service at start, crash-looping under `restart: unless-stopped`.
+        try:
+            # RotatingFileHandler does not create the dir; make it (CI/clean checkout).
+            log_dir = os.path.dirname(log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_file,
+                maxBytes=file_max_bytes,
+                backupCount=file_backup_count,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "log file %s is not writable (%s); logging to stderr only", log_file, exc,
+                extra={"log_file": log_file})
+        else:
+            file_handler.setFormatter(formatter)
+            file_handler.addFilter(redactor)
+            root.addHandler(file_handler)
 
     # Pin noisy third-party loggers so INFO stays signal (sec 3).
     for name in _NOISY_LOGGERS:

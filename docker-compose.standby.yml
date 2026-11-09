@@ -13,8 +13,13 @@
 name: br0kr-dr-standby
 services:
   pg-standby-remote:
-    image: postgres:16
+    # The same digest pin and hardening as docker-compose.yml's ledger services (review SEC-02); a standby must
+    # run the primary's build. Only the capabilities the root-run entrypoint needs before it drops to postgres.
+    image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     entrypoint: ["/bin/bash", "/pg-standby-remote-entrypoint.sh"]
     environment:
       PRIMARY_HOST: ${PRIMARY_HOST:?the primary's mesh hostname/IP — MUST match the cert SAN}

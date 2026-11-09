@@ -129,6 +129,12 @@ license to log secrets — it is a backstop, not a permission.
 
 - The file handler is a **rotating** handler: ≈**5 MB × 3–5 files**. A crash-loop
   must not churn the evidence off disk before you can read it.
+- A log file path that cannot be created or opened is a **WARNING, not a crash**
+  (`log file … is not writable …; logging to stderr only`): the file is a
+  convenience on top of stderr, and the containers' root filesystem is read-only
+  (review SEC-02), so a stale `BR0KR_LOG_FILE` would otherwise stop every broker
+  service at start. In a container, point it at a mounted volume the broker user
+  (uid 10001) can write.
 - If you run containers, set log rotation as a **global daemon default**
   (e.g. `/etc/docker/daemon.json`: `json-file`, `max-size 10m` × `max-file 5`)
   so every container — current and future — inherits it, rather than a

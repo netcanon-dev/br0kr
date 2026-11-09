@@ -40,6 +40,13 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "br0kr.oauth"]
     profiles: ["oauth"]
+    # The broker runtime hardening from docker-compose.yml's x-broker (YAML anchors do not cross files).
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    pids_limit: 256
+    mem_limit: 512m
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -68,8 +75,14 @@ services:
       - "9100"   # compose-network only; Caddy reaches oauth:9100. Never a host port.
 
   caddy:
-    image: caddy:2
+    # Pinned by digest (review SEC-02). Dependabot (docker-compose) proposes the bumps.
+    image: caddy:2.11.4@sha256:af5fdcd76f2db5e4e974ee92f96ee8c0fc3edb55bd4ba5032547cbf3f65e486d
     restart: unless-stopped
+    # Caddy runs as root in its image to bind :443; that one capability is all it keeps (review SEC-02). Its
+    # state is on the caddy-data / caddy-config volumes, which it owns.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
     # Host TLS ports. Default 443 (gateway) / 8443 (dashboard); override if the host already uses them.
     ports:
       - "${TLS_GATEWAY_PORT:-443}:443"
@@ -108,8 +121,14 @@ services:
   # it in the Cloudflare Zero Trust dashboard, route the public hostname to service `http://caddy:8081`, copy
   # the connector TOKEN into TUNNEL_TOKEN (.env). See docs/runbooks/public-tunnel.md. SECURITY.md C17.
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Pinned by digest, never `latest` (review SEC-02): this is the one container that dials the internet while
+    # holding TUNNEL_TOKEN. It runs as an unprivileged user and writes nothing, so: no capabilities, no
+    # escalation, a read-only root filesystem. Dependabot (docker-compose) proposes the bumps.
+    image: cloudflare/cloudflared:2026.6.1@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
     profiles: ["tunnel"]
     # `run` (no tunnel name) uses the remotely-managed config bound to TUNNEL_TOKEN — all ingress is set in
     # the Cloudflare dashboard. For an ad-hoc QUICK tunnel instead, override the command to

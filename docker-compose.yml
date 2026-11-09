@@ -25,6 +25,23 @@ x-broker: &broker
   image: br0kr:local
   pull_policy: never
   restart: unless-stopped
+  # Runtime hardening (review SEC-02). The broker processes need no Linux capability, never write to their
+  # image (PYTHONDONTWRITEBYTECODE; logs go to stderr, or to BR0KR_LOG_FILE on a mounted volume), use tens of
+  # MiB and a few threads. So: no capabilities, no privilege escalation, a read-only root filesystem with a
+  # private /tmp, and pid / memory ceilings well above what they use, so a runaway cannot take the host.
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: ["/tmp:size=64m"]
+  pids_limit: 256
+  mem_limit: 512m
+
+# Ledger hardening (review SEC-02): no privilege escalation, and only the capabilities the official image's
+# root-run entrypoint needs before it drops to the postgres user (chown/chmod the data directory, then gosu).
+x-pg-hardening: &pg-hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
 
 # Env that EVERY broker process reads (review OPS-02): extra libpq session options, the logging switches, and
 # the seed of every operator
@@ -60,7 +77,10 @@ x-broker-env: &broker-env
 services:
   # ── Ledger: primary ────────────────────────────────────────────────────────────
   pg-primary:
-    image: postgres:16
+    <<: *pg-hardening
+    # Pinned by digest (review SEC-02; 16.14 when pinned): a re-pushed tag cannot swap the ledger's binary under
+    # `restart: unless-stopped`. Dependabot (docker-compose) proposes the bumps.
+    image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54
     # Bring the ledger back after a host reboot / dockerd restart / crash (the broker services
     # restart too, so the ledger must as well or the deployment comes back half-up).
     restart: unless-stopped
@@ -108,7 +128,8 @@ services:
 
   # ── Ledger: hot standby (clones from the primary on first boot, then streams) ───
   pg-standby:
-    image: postgres:16
+    <<: *pg-hardening
+    image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54   # the same pin as pg-primary: a standby must run the primary's major + build
     restart: unless-stopped
     entrypoint: ["/bin/bash", "/pg-standby-entrypoint.sh"]
     environment:
