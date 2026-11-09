@@ -32,6 +32,10 @@ data/
 *.sqlite3
 uploads/
 local/
+# Ledger dumps carry deployment identifiers (cluster URLs, node names, audit actors). backup_ledger.sh
+# refuses to write inside a checkout; this is the second line of defence for one made by hand.
+backups/
+*.dump
 
 # --- Python -----------------------------------------------------------------
 __pycache__/

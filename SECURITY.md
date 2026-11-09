@@ -683,7 +683,11 @@ Name the residual, why it's accepted, and what would close it.
   killed + `pg_promote`d mid-lifecycle, **single-writer holds under two contending daemons** (a burst
   of leases each land on a DISTINCT unreserved vmid — no collision) and a **real VM's lease survives
   the failover** while the daemon re-homes — `scripts/harness_ha_failover.py` (hermetic, 2 daemons) +
-  `scripts/harness_ha_failover_live.py` (live on a real PVE node). Backups have a tool (`scripts/backup_ledger.sh`).
+  `scripts/harness_ha_failover_live.py` (live on a real PVE node). Backups have a tool (`scripts/backup_ledger.sh`)
+  and a restore twin (`scripts/restore_ledger.sh`). A dump holds no usable credential but does carry deployment
+  identifiers, so the backup refuses to write inside a checkout or any git work tree, writes 0600, and keeps the DSN
+  password out of `pg_dump`'s argv (`scripts/_pgconn.sh` moves it to `PGPASSWORD`); the restore refuses a ledger
+  with non-terminal leases unless `--force` (review OPS-05; `tests/unit/test_backup_scripts.py`).
   *Residual:* if the operator runs replication WITHOUT guaranteeing a single primary, a split-brain
   defeats single-writer (see the C9 note above — the harness proves the CLEAN fence-then-promote case,
   not split-brain, which is by construction out of scope); and a ledger with no backups can still be

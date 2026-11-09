@@ -259,12 +259,21 @@ operator `DELETE`, or corruption — those replicate. Keep independent backups.
 **Logical dump (baseline safety net):**
 
 ```
-PGCONN="host=… dbname=broker user=… password=…" scripts/backup_ledger.sh /var/backups/br0kr
+PGCONN="host=… dbname=broker user=… password=…" scripts/backup_ledger.sh [OUTDIR]
 ```
 
-Writes a timestamped custom-format dump. Run it on a schedule (cron/systemd-timer), ship the
-files **off the database host**, and set a retention window. Suggested starting point: hourly
-dumps kept 48h + daily kept 30d — tune to your RPO and disk.
+- Writes `br0kr-ledger-<UTC stamp>.dump` (custom format, mode 0600) into `OUTDIR`, which defaults
+  to `$BR0KR_BACKUP_DIR`, else `/var/backups/br0kr`. The dump is written as a `.partial` and renamed
+  only once `pg_dump` succeeds, so a failed run leaves nothing that looks like a backup.
+- **Never inside the checkout.** A dump carries deployment identifiers (cluster API URLs, node names,
+  audit actors). The script refuses a directory inside this checkout or any git work tree, and
+  `.gitignore` excludes `backups/` and `*.dump` as a second line of defence.
+- **Retention:** after a successful dump it deletes its own dumps older than `BACKUP_RETAIN_DAYS`
+  (default 2; 0 keeps everything). A suggested starting point is hourly dumps kept 2 days plus a daily
+  run into a second directory with `BACKUP_RETAIN_DAYS=30`. Tune to your RPO and disk.
+- **The password stays out of `ps`.** The script moves it from `PGCONN` into `PGPASSWORD` before
+  calling `pg_dump`, so it is never in a process's argv. `~/.pgpass` works too.
+- Run it on a schedule (cron/systemd timer) and ship the files **off the database host**.
 
 **WAL archiving / PITR (low RPO):** for the ability to restore to *any* point in time (not just
 the last dump), enable continuous WAL archiving (`archive_mode=on`, `archive_command` to durable
@@ -278,13 +287,20 @@ logical dump is the floor.
 A backup you have never restored is a hope, not a backup. Periodically:
 
 1. Provision a fresh, empty Postgres (NOT the production primary).
-2. Restore the latest dump:
-   `pg_restore --clean --if-exists --no-owner --dbname "$PGCONN_TARGET" <dump>`
-3. Apply migrations (a restore + a newer code deploy may need them):
+2. Restore the latest dump, in one command:
+   `PGCONN_TARGET="host=… dbname=broker user=… password=…" scripts/restore_ledger.sh <dump>`
+   - It refuses a target with non-terminal leases (a ledger in use) unless `--force`, because the
+     restore drops and recreates every table in the dump. Stop the broker services before a `--force`
+     restore: it gives up (changing nothing) if a table stays locked for 30 s.
+   - It restores in one transaction (all or nothing), then prints the schema version and the
+     lease, node and cluster counts: the sanity check. Exit codes are listed in the script's header
+     (3 = refused as in use, 6 = `pg_restore` failed and nothing changed).
+3. Apply migrations if the code is newer than the dump (the services refuse an older schema at boot):
    `PGCONN="$PGCONN_TARGET" python -m br0kr.migrate`
-4. Sanity-check: `SELECT count(*) FROM lease;`, the latest `schema_migrations.version`, and that
-   `node`/`cluster` rows are present.
-5. Record the restore time — that is your real **RTO** input.
+4. Record the restore time — that is your real **RTO** input.
+
+For a REAL restore that a daemon will run against, add `--lease-id-floor <N>` (step 1 of the warning
+below) and do the sweep dry-run before resuming teardown.
 
 > **⚠️ After a restore or a failover to a lagging standby, the ledger is BEHIND the real fleet — do these two
 > steps BEFORE resuming the reconcile daemon, or the orphan sweep can destroy live guests:**
@@ -300,7 +316,8 @@ A backup you have never restored is a hope, not a backup. Periodically:
 >    all nodes (`qm config`/the tags on each guest), then:
 >    `ALTER TABLE lease ALTER COLUMN id RESTART WITH <max_fence_id + 1>;`
 >    This stops re-minting into the spared range and restores the "ids are monotonic, never reused" invariant the
->    sweep (and admission) rely on.
+>    sweep (and admission) rely on. `scripts/restore_ledger.sh --lease-id-floor <max_fence_id + 1>` does this as
+>    part of the restore, and refuses an N at or below the restored `max(lease.id)`.
 > 2. **Dry-run the sweep first.** Point the daemon at the restored ledger with `sweep_dry_run=true` (or call
 >    `orphan_sweep(..., dry_run=True)`) and confirm the destroy list is empty / expected before allowing real
 >    teardown. Only set `allow_mass_absent` after you have confirmed a genuine teardown.
@@ -352,3 +369,4 @@ A backup you have never restored is a hope, not a backup. Periodically:
 - [../architecture.md](../architecture.md) — roadmap item #9 (ledger HA)
 - `br0kr/db.py` — the connection seam (keepalives in both directions, retry, classifier)
 - `scripts/backup_ledger.sh` — the logical-backup tool this runbook drives
+- `scripts/restore_ledger.sh` — the restore drill as one command

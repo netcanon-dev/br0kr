@@ -393,8 +393,10 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   (they reconnect with retry), and a leader re-election. The standby entrypoints are bind-mounted scripts, not
   part of the compose config, so a change to one takes effect only when that standby restarts: run
   `docker compose restart pg-standby` (and on a DR host, its `pg-standby-remote`) after deploying one.
-- **Back up the ledger**: [`scripts/backup_ledger.sh`](../../scripts/backup_ledger.sh) (secret-safe
-  logical dump). Replication is not a backup — see [ledger-ha.md](ledger-ha.md).
+- **Back up the ledger**: [`scripts/backup_ledger.sh`](../../scripts/backup_ledger.sh) (a logical dump
+  into `/var/backups/br0kr` by default, never inside this checkout, with retention; restore with
+  [`scripts/restore_ledger.sh`](../../scripts/restore_ledger.sh)). Replication is not a backup — see
+  [ledger-ha.md](ledger-ha.md).
 - **Tear down**: `docker compose down` (keep data) or `docker compose down -v` (drop the ledger volumes too).
 
 ## 8. Production hardening
