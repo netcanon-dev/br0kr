@@ -83,6 +83,7 @@ from br0kr import (
     leader,
     lease,
     ledgerhealth,
+    migrate,
     migration,
     nodes,
     observability,
@@ -1782,6 +1783,9 @@ def main() -> None:
         # daemon's promote/migrate paths admit() under advisory locks that only serialize under
         # READ COMMITTED. Fail LOUD at boot rather than silently double-allocate in production.
         db.assert_read_committed(c)
+        # Refuse to serve on a ledger older than this build (review ARCH-02): one loud boot error instead of a
+        # missing-column error swallowed every tick.
+        migrate.assert_schema(c, "daemon")
         registry = nodes.from_ledger(c)   # one daemon serves every node it has credentials for
         pdm_registry = remotes.from_ledger(c)   # per-cluster PDM drivers — empty unless a cluster has PDM config
     # BR0KR_VM_CLONE_STORAGE is RETIRED (0033 §4.5): a clone's disk pool is now RESOLVED per-lease by the

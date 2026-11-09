@@ -65,6 +65,7 @@ from br0kr import (
     gateway,
     inventory,
     logging_setup,
+    migrate,
     multidisk,
     nodes,
     placement,
@@ -1406,6 +1407,7 @@ def main() -> None:
     # misconfigured ledger fails fast, which is correct — a gateway with no ledger can't serve.
     with closing(db.connect_with_retry()) as c:
         db.assert_read_committed(c)
+        migrate.assert_schema(c, "gateway")   # a ledger older than this build would fail inside tool calls
     mcp.run(transport=cast(Literal["stdio", "sse", "streamable-http"], transport))
 
 

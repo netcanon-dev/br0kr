@@ -1625,6 +1625,9 @@ def main() -> None:
     port = int(os.environ.get("BR0KR_DASHBOARD_PORT", "8051"))
     token = os.environ.get("BR0KR_DASHBOARD_TOKEN", "")
     read_token = os.environ.get("BR0KR_DASHBOARD_READ_TOKEN", "")
+    # Refuse to serve on a ledger older than this build (review ARCH-02); a boot-time blip is ridden through.
+    with contextlib.closing(db.connect_with_retry()) as c:
+        migrate.assert_schema(c, "dashboard")
     httpd = _build(host, port, db.connect_with_retry, lambda: db.connect(autocommit=True), token, read_token)
     log.info("dashboard listening on %s:%d (reads %s; actions %s — keep on a trusted network)",
              host, port, "token-gated" if read_token else "open",

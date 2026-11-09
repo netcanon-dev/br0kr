@@ -45,7 +45,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Json
 
-from br0kr import admin, auth, db, logging_setup
+from br0kr import admin, auth, db, logging_setup, migrate
 
 log = logging.getLogger(__name__)
 
@@ -522,6 +522,9 @@ def main() -> None:
         raise SystemExit(
             "OAuth issuer must be an https URL — set BR0KR_PUBLIC_URL (the public tunnel/proxy URL) or "
             "BR0KR_TLS_SITE (the direct Caddy TLS host), or BR0KR_OAUTH_ISSUER to override. See issuer().")
+    # Refuse to serve on a ledger older than this build (review ARCH-02); a boot-time blip is ridden through.
+    with contextlib.closing(db.connect_with_retry()) as c:
+        migrate.assert_schema(c, "oauth")
     host = os.environ.get("BR0KR_OAUTH_HOST", "0.0.0.0")   # in-cluster bind, fronted by Caddy TLS
     port = int(os.environ.get("BR0KR_OAUTH_PORT", "9100") or "9100")
     httpd = ThreadingHTTPServer((host, port), _make_handler())

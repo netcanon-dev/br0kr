@@ -381,6 +381,13 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
 - **Re-run migrations** after upgrading: `bash scripts/deploy.sh` does it (its `up -d` re-runs the one-shot
   `migrate` on the new image). By hand, build first, since `run` uses whatever image already exists:
   `docker compose build daemon && docker compose run --rm migrate` (idempotent).
+- **Schema gate and rollback contract.** The daemon, gateway, dashboard and OAuth shim each check at boot that
+  the ledger's schema is at least the newest migration their image ships, and refuse to start otherwise with
+  `ledger schema is N, but this <service> build needs M: run the migrate step first`. Migrations only ever
+  move forward, so **the schema never rolls back**, and the gate never refuses an older image. **Rolling back
+  one release is supported**: the previous image runs on the newer schema. Going further back is not
+  guaranteed, because some migrations drop columns or add CHECK constraints an older build does not know
+  about. To roll back, retag the previous image as `br0kr:local` and run `bash scripts/deploy.sh --no-build`.
 - **Back up the ledger**: [`scripts/backup_ledger.sh`](../../scripts/backup_ledger.sh) (secret-safe
   logical dump). Replication is not a backup — see [ledger-ha.md](ledger-ha.md).
 - **Tear down**: `docker compose down` (keep data) or `docker compose down -v` (drop the ledger volumes too).

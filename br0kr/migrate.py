@@ -118,6 +118,48 @@ def applied_versions(conn: psycopg.Connection[Any]) -> set[int]:
     return {r[0] for r in rows}
 
 
+def required_schema(directory: Path = MIGRATIONS_DIR) -> int:
+    """The schema version THIS build needs: the newest migration it ships (0 if it ships none). Derived from the
+    bundled files rather than a hand-kept constant, so it cannot drift from the code that needs those columns."""
+    return max((m.version for m in discover(directory)), default=0)
+
+
+def assert_schema(conn: psycopg.Connection[Any], service: str, directory: Path = MIGRATIONS_DIR) -> int:
+    """Refuse to serve on a ledger older than this build (review ARCH-02). Returns the ledger's version.
+
+    Migrations are forward-only. A NEWER build on a ledger whose migrate step was skipped or failed is not safe:
+    its SQL names columns that do not exist yet, so instead of one clear refusal it fails as a stream of
+    per-request errors (a gateway raising inside tool calls, a daemon swallowing a missing column every tick).
+    The broker processes call this once at boot, beside `db.assert_read_committed`, and exit with one message
+    naming the fix. The gate never refuses an OLDER build on a newer ledger: that is the rollback path, and
+    whether an old build can actually use the newer schema is the rollback contract's question (one release back
+    is supported, see docs/runbooks/docker-deploy.md), not this check's. A ledger with no `schema_migrations`
+    table at all reads as version 0.
+
+    Non-destructive like `db.assert_read_committed` on the success path: it commits only a transaction its own
+    read opened, and leaves a caller's open transaction alone. On a ledger with no `schema_migrations` table the
+    failed read has already aborted whatever transaction it ran in, so it rolls that back (boot callers pass a
+    fresh connection, where that is only its own read). Raises RuntimeError on an older ledger."""
+    need = required_schema(directory)
+    idle = not conn.autocommit and conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+    try:
+        have = current_version(conn)
+    except psycopg.errors.UndefinedTable:
+        conn.rollback()
+        have = 0
+    else:
+        if idle:
+            conn.commit()
+    if have < need:
+        raise RuntimeError(
+            f"ledger schema is {have}, but this {service} build needs {need}: run the migrate step first "
+            f"(`python -m br0kr.migrate`, the compose `migrate` service, or scripts/deploy.sh). Refusing to serve."
+        )
+    log.info("ledger schema %d (this build needs >= %d)", have, need,
+             extra={"schema_version": have, "schema_required": need, "service": service})
+    return have
+
+
 def current_version(conn: psycopg.Connection[Any]) -> int:
     """The highest applied migration version, or 0 if none — a PURE READ (no `_ensure_migrations_table`, no
     commit, no side effect, unlike `applied_versions` which bootstraps the table on the apply path). For an

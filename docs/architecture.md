@@ -29,7 +29,8 @@ that didn't exist when a competitor took its snapshot, so plain row-locking can'
 mutual exclusion over each contended resource; READ COMMITTED re-reads fresh capacity *after* the lock
 wait. Result: exactly one winner, zero serialization aborts. **READ COMMITTED is enforced, not inherited:**
 it is pinned at the connection seam (`br0kr/db.py` `_READ_COMMITTED_OPT`, folded into every `connect()`) and
-asserted at daemon/gateway boot (`db.assert_read_committed`, which refuses to serve on a mismatch), so the
+asserted at daemon/gateway boot (`db.assert_read_committed`, which refuses to serve on a mismatch; beside it,
+`migrate.assert_schema` refuses a ledger older than the build's newest migration), so the
 guarantee never silently depends on the ledger's `default_transaction_isolation` — a `repeatable read` default
 would otherwise reopen the last-slot race (the snapshot freezes before the lock wait). See SECURITY.md C14. **Built in `br0kr/admission.py`**
 (`admit()`), which also makes the grant **idempotent**: a required caller-supplied `idem_key` +
