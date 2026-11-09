@@ -10,6 +10,9 @@ free capacity — never over-admit a node, the very fear the broker exists to cl
 
   no_overadmit_on_promote  8 PENDING requests pinned to a 1-slot node, 8 concurrent promoters → EXACTLY
                            one is ADMITTED, seven stay PENDING, ZERO over-admit (the promote write-skew).
+  admit_vs_promote_lock_order  admit() and promote_pinned() racing on the SAME node + pool + project
+                           never deadlock: both take the scope locks in the one canonical order (a path
+                           that inverted it would surface here as DeadlockDetected).
   fifo_order               oldest-first: with one slot, promote → release → promote drains A, then B,
                            then C in arrival order (strict FIFO across passes).
   idempotent_enqueue       enqueuing the SAME idem_key twice yields ONE PENDING lease (a retry re-queues
@@ -149,6 +152,86 @@ def check_no_overadmit_on_promote() -> bool:
     ok = promoted == 1 and admitted == 1 and pending == 7
     print(f"[no_overadmit_on_promote] 8 PENDING/1-slot node, 8 concurrent promoters: promoted={promoted} "
           f"admitted={admitted} still_pending={pending}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+_LOCK_ORDER_SCOPE = {"node_id": "n1", "storage_id": "s1", "req_disk_gb": 1, "project_id": "p1"}
+
+
+def _lock_order_round(r: int, admitters: int, promoters: int, errors: list[str], refused: list[str]) -> None:
+    """One barrier-started round: `promoters` freshly queued leases promoted while `admitters` new asks
+    admit, all on the same three scopes. Exceptions and refusals are collected, never raised."""
+    pend = []
+    for i in range(promoters):
+        with connect() as c:
+            pend.append(admission.enqueue(c, idem_key=f"lo-q-{r}-{i}", req_cpu=1, req_mem_mb=1,
+                                          max_wait_seconds=3600, **_LOCK_ORDER_SCOPE).lease_id)
+    # A timeout so a racer that fails to connect (and so never reaches the barrier) breaks the round
+    # with BrokenBarrierError, recorded below, instead of hanging every other racer until the CI timeout.
+    barrier = threading.Barrier(admitters + promoters, timeout=60)
+    lock = threading.Lock()
+
+    def admit_one(i: int) -> None:
+        try:
+            with connect() as c:
+                barrier.wait()
+                res = admission.admit(c, AdmissionRequest(idem_key=f"lo-a-{r}-{i}", req_cpu=1,
+                                                          req_mem_mb=1, **_LOCK_ORDER_SCOPE))
+            if not res.admitted:
+                with lock:
+                    refused.append(f"admit:{res.reason}")
+        except Exception as exc:  # noqa: BLE001 - the deadlock is exactly what this check looks for
+            with lock:
+                errors.append(type(exc).__name__)
+
+    def promote_one(i: int) -> None:
+        try:
+            with connect() as c:
+                barrier.wait()
+                res = admission.promote_pinned(c, pend[i])
+            if not res.promoted:
+                with lock:
+                    refused.append(f"promote:{res.reason}")
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                errors.append(type(exc).__name__)
+
+    ts = [threading.Thread(target=admit_one, args=(i,)) for i in range(admitters)]
+    ts += [threading.Thread(target=promote_one, args=(i,)) for i in range(promoters)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+
+def check_admit_vs_promote_lock_order(rounds: int = 20, admitters: int = 4, promoters: int = 4) -> bool:
+    """admit() and promote_pinned() lock the same scopes (node, storage pool, project). Racing them on
+    one node + pool + project proves their two lock loops acquire in the same order: if either loop ever
+    locked differently, two transactions would each hold a lock the other waits on, Postgres would abort
+    one with DeadlockDetected, and that exception lands here. Capacity is sized so every ask fits, so any
+    failure is the lock order, not a capacity verdict.
+
+    Both loops take their order from scope_keys(), so a change to scope_keys itself (say, dropping the
+    sort) stays consistent inside one process and would deadlock only across processes (the gateway's
+    admit() vs the daemon's promoter). The first assertion pins that half: the order is the sorted one."""
+    keys = admission.scope_keys(_LOCK_ORDER_SCOPE["node_id"], _LOCK_ORDER_SCOPE["storage_id"],
+                                _LOCK_ORDER_SCOPE["project_id"])
+    if keys != sorted(keys) or len(keys) != 3:
+        print(f"[admit_vs_promote_lock_order] scope_keys not canonical: {keys}  | FAIL")
+        return False
+    reset()
+    seed_node("n1", cpu=100_000, mem=100_000_000)
+    seed_project("p1", cpu=100_000, mem=100_000_000, max_leases=100_000)
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO storage(id,total_gb) VALUES ('s1', 100000000)")
+    errors: list[str] = []
+    refused: list[str] = []
+    for r in range(rounds):
+        _lock_order_round(r, admitters, promoters, errors, refused)
+    ok = not errors and not refused
+    print(f"[admit_vs_promote_lock_order] {rounds} rounds x ({admitters} admit + {promoters} promote) on one "
+          f"node+pool+project: errors={sorted(set(errors)) or 'none'} refused={sorted(set(refused)) or 'none'}"
+          f"  | {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -351,6 +434,7 @@ def main() -> int:
     print("=== admission-queue gate (migrations) ===\n")
     checks = [
         check_no_overadmit_on_promote,
+        check_admit_vs_promote_lock_order,
         check_fifo_order,
         check_idempotent_enqueue,
         check_depth_cap,

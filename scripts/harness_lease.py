@@ -9,6 +9,10 @@ Deterministic checks:
   heartbeat_saves      a heartbeat pushes the deadline out, so the reaper skips it.
   provision_guard      begin_provisioning/mark_active are guarded; mark_active refuses
                        to resurrect a RELEASING lease.
+  begin_provisioning_only_from_admitted
+                       begin_provisioning refuses EVERY non-ADMITTED state and leaves the row
+                       untouched (no vmid stamped), so a reaped or released lease is never
+                       re-provisioned.
   full_release_path    release → RELEASING → mark_released → RELEASED, capacity freed.
   reaper_end_to_end    reap_once expires + destroys (mixed vmid / null-vmid leases) and
                        frees all the capacity; a null-vmid lease is settled WITHOUT a destroy.
@@ -21,7 +25,8 @@ Concurrent invariants (barrier-synchronized, thousands of rounds):
   provision_vs_expire  1 mark_active vs N reapers on a due PROVISIONING lease → ACTIVE
                        XOR RELEASING, never a resurrected-after-RELEASING lease.
   expired_no_double    M due leases, C reapers (claim_expired) → each claimed once.
-  releasing_no_double  M RELEASING leases, C reapers (claim_releasing) → each claimed once.
+  releasing_no_double  M RELEASING leases, C reapers (claim_releasing) → each claimed once
+                       within the grace window.
   backlog_drains       limit << due-count, reapers loop → every lease claimed exactly once
                        across passes (bounded-LIMIT multi-pass drain, no loss, no dupes).
 
@@ -137,6 +142,28 @@ def check_provision_guard() -> bool:
     ok = (won_prov and s1 == "PROVISIONING" and won_active and s2 == "ACTIVE"
           and not resurrect and s3 == "RELEASING")
     print(f"[provision_guard]      ADMITTED->{s1}->{s2}; resurrect RELEASING={resurrect} ({s3})  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_begin_provisioning_only_from_admitted() -> bool:
+    """begin_provisioning is the CAS that starts a guest build; it must win ONLY from ADMITTED. From any
+    other state (a queued PENDING lease, one already PROVISIONING/ACTIVE, or one the reaper or a release
+    moved toward teardown) it must return False and change nothing, else the reconciler would build a
+    guest for a lease that is already being torn down, or stamp a second vmid on a live one."""
+    reset()
+    others = ["PENDING", "PROVISIONING", "ACTIVE", "RELEASING", "RELEASED", "REJECTED", "RELEASE_FAILED"]
+    wrong = []
+    for i, st in enumerate(others):
+        lid = insert_lease(st, expires_offset_s=3600)
+        with connect() as c:
+            won = lease.begin_provisioning(c, lid, vmid=960 + i, name="g")
+        with psycopg.connect(CONN, autocommit=True) as c:
+            after, vmid = c.execute("SELECT state, vmid FROM lease WHERE id = %s", (lid,)).fetchone()
+        if won or after != st or vmid is not None:
+            wrong.append(f"{st}->won={won},state={after},vmid={vmid}")
+    ok = not wrong
+    print(f"[begin_prov_admitted]  {len(others)} non-ADMITTED states refused, row untouched: "
+          f"{wrong or 'all'}  | {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -297,7 +324,11 @@ def check_expired_no_double() -> bool:
 
 
 def check_releasing_no_double() -> bool:
-    ok = _concurrent_claim("RELEASING", lambda c: lease.claim_releasing(c, grace_seconds=0, limit=50))
+    # A real grace window (an hour, far longer than the race): claim_releasing's guarantee is ONE claimant
+    # per grace window, and a re-claim after the window is its documented crash recovery. With grace 0 a
+    # reaper whose transaction starts after another's commit legitimately re-claims, so the check only
+    # passed when every racer happened to start before the first commit (it flaked on a 4-vCPU host).
+    ok = _concurrent_claim("RELEASING", lambda c: lease.claim_releasing(c, grace_seconds=3600, limit=50))
     print(f"[releasing_no_double]  50 RELEASING leases, {REAPERS} reapers (claim_releasing): each once = {ok}  | {'PASS' if ok else 'FAIL'}")
     return ok
 
@@ -341,6 +372,7 @@ def main() -> int:
         check_forgotten_expires,
         check_heartbeat_saves,
         check_provision_guard,
+        check_begin_provisioning_only_from_admitted,
         check_full_release_path,
         check_reaper_end_to_end,
         check_reaper_release_failed,

@@ -1,10 +1,12 @@
 # CI — the OFFLINE correctness gate.
 #
-# Runs the SAME validate gate contributors run locally (tests/validate.sh) plus
-# the test matrix, hermetically: nothing here touches live infrastructure,
-# credentials, or a real database. Anything that needs those stays out of CI
-# (run it on the deploy host / a dedicated environment). Keeping CI offline is
-# what makes "green in CI" a trustworthy signal and keeps every PR fast.
+# Runs the SAME validate gate contributors run locally (tests/validate.sh), the
+# test matrix, and the real-Postgres harnesses. Nothing here touches live
+# infrastructure or credentials: the only database is a throwaway postgres
+# service container that dies with the job. Anything that needs live
+# infrastructure stays out of CI (run it on the deploy host / a dedicated
+# environment). Keeping CI offline is what makes "green in CI" a trustworthy
+# signal and keeps every PR fast.
 #
 # RUNNERS: GitHub-hosted (ubuntu-latest), deliberately — in every workflow. This
 # repo is public and CI runs on `pull_request`, so a FORK's PR executes here. On
@@ -106,3 +108,50 @@ jobs:
         # browser, live service) run in a dedicated job or out-of-band so the
         # gate stays fast. Coverage targets your package(s).
         run: pytest -m "not e2e and not slow" --cov=br0kr --cov-report=term-missing
+
+  harness:
+    # The race and saga proofs need a real Postgres: the unit suite stubs the
+    # advisory locks and the CAS predicates, so a refactor that breaks them would
+    # otherwise go green here. scripts/run_ci_harnesses.sh holds and describes
+    # the set, and caps each harness's wall clock.
+    name: harness — real Postgres
+    runs-on: ubuntu-latest
+    # The set takes about 3 minutes on a 4-vCPU host; this is the backstop.
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # A throwaway service container on a hosted runner, gone when the job
+          # ends. Not a credential: nothing else can reach it.
+          POSTGRES_PASSWORD: broker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h localhost -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: broker
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install runtime deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the real-Postgres harnesses (each on a fresh database)
+        run: bash scripts/run_ci_harnesses.sh

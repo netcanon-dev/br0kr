@@ -2,15 +2,17 @@
 
 How this repo proves it's green and ships safely. The gate is the **GitHub
 Actions workflows** below plus Dependabot. CI proves **offline correctness only** —
-anything that needs live infrastructure, real credentials, or a real database
-stays out of CI (run it on the deploy host or a dedicated environment). Keeping
-CI hermetic is what makes "green in CI" trustworthy and keeps every PR fast.
+anything that needs live infrastructure or real credentials stays out of CI (run
+it on the deploy host or a dedicated environment). The one database CI touches is
+a throwaway postgres service container that lives and dies with the `harness`
+job. Keeping CI offline is what makes "green in CI" trustworthy and keeps every
+PR fast.
 
 ## The workflows
 
 | Workflow | Trigger | What it gates |
 |---|---|---|
-| `ci.yml` | PR + push to `main` | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (Python matrix) |
+| `ci.yml` | PR + push to `main` | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (Python matrix) + `harness` (real-Postgres race and saga proofs) |
 | `security.yml` | PR + push + weekly | gitleaks full-history secret scan + pip-audit dependency CVEs |
 | `pii-guard.yml` | PR + push to `main` | no maintainer identifier in a tracked file or in a merged commit's identity or message |
 | `zizmor.yml` | `.github/**` changes + weekly | GitHub-Actions-specific supply-chain audit (blocking; SARIF to Code scanning) |
@@ -70,6 +72,15 @@ enforces most of them, and a PR that drops one should be rejected in review.
   - The PR gate runs `pytest -m "not e2e and not slow"` — fast, hermetic tiers
     only. Slow/e2e tiers (real browser, live service) run in a dedicated job or
     out-of-band so the gate stays quick.
+- **`harness` job** runs `scripts/run_ci_harnesses.sh` against a `postgres:16`
+  service container: the real-Postgres race and saga proofs. The unit suite stubs
+  the advisory locks and CAS predicates, so this job is what turns a broken lock
+  or a weakened CAS red. Each harness gets a fresh database and a wall-clock cap.
+  The set and what each harness proves are in the script (its header and its
+  `HARNESSES=(...)` line), and `tests/unit/test_repo_hygiene.py` checks every
+  entry names a real harness. Run it locally against any throwaway server (the
+  script header shows how); never point it at a real ledger, since every harness
+  truncates tables.
 
 ## security.yml — secret + dependency hygiene
 

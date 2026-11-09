@@ -4,7 +4,10 @@ policy in .gitattributes and its wiring into the gate.
 These are the dependency-free backstop for tests/check_line_endings.py — that helper needs a git
 work tree (and self-skips without one), so these pure file reads are what always run, in the same
 way the backtick-parity test in tests/unit/test_dashboard.py backstops check_dashboard_js.py.
-They guard the *policy*, not the bytes; the checker guards the bytes."""
+They guard the *policy*, not the bytes; the checker guards the bytes.
+
+The CI harness tests at the bottom guard the wiring of the real-Postgres harness job the same way:
+pure file reads, so they run everywhere, while the job itself is the only place the harnesses run."""
 from __future__ import annotations
 
 import importlib.util
@@ -132,3 +135,36 @@ def test_archive_scan_passes_a_clean_lf_tree():
                                     text_paths={"docker/ok.sh", "br0kr/mod.py"})
     assert cr == []
     assert unknown == []
+
+
+def _ci_harness_set() -> list[str]:
+    """The HARNESSES=(...) array in scripts/run_ci_harnesses.sh, the one place the CI set is declared."""
+    text = (_ROOT / "scripts" / "run_ci_harnesses.sh").read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.startswith("HARNESSES=(")]
+    assert len(lines) == 1, "run_ci_harnesses.sh must declare HARNESSES=(...) exactly once"
+    return lines[0][len("HARNESSES=("):].rstrip(")").split()
+
+
+def test_every_ci_harness_names_a_real_harness_script():
+    """Each name in the CI harness set resolves to an existing scripts/harness_<name>.py.
+
+    Guards a rename or deletion of a harness that leaves the CI entry dangling: the job would then die
+    on a missing file, or worse, a typo'd name would be read as "that proof is covered" when nothing ran.
+    """
+    names = _ci_harness_set()
+    assert names, "the CI harness set is empty"
+    missing = [n for n in names if not (_ROOT / "scripts" / f"harness_{n}.py").is_file()]
+    assert missing == []
+
+
+def test_ci_workflow_runs_the_harness_set_against_a_postgres_service():
+    """ci.yml's harness job starts a postgres service container and runs scripts/run_ci_harnesses.sh.
+
+    Guards the job being dropped or rewired to something else during a workflow cleanup: the real-Postgres
+    proofs (lock order, CAS predicates) are exactly what the stubbed unit suite cannot catch, so losing the
+    job would make CI green on the regressions it exists for."""
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "\n  harness:\n" in ci
+    job = ci.split("\n  harness:\n", 1)[1]
+    assert "image: postgres:" in job
+    assert "bash scripts/run_ci_harnesses.sh" in job

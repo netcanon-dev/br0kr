@@ -35,6 +35,23 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   its old image until it is rebuilt and redeployed.
 
 ### Added
+- **CI runs the real-Postgres harnesses on every PR (`ci.yml` `harness` job, `scripts/run_ci_harnesses.sh`
+  NEW).** Why: the race-free admission proof, the queue promoter, the VMID fence race, the lease lifecycle
+  CASes, the migration saga and multi-disk admission only ran when someone remembered `run_*.sh` by hand,
+  and the unit suite stubs the advisory locks and CAS predicates, so a refactor that broke them went green.
+  The job runs the set against a throwaway `postgres:16` service container, one fresh database per harness.
+  `tests/unit/test_repo_hygiene.py` checks every name in the set is a real harness and that the job stays
+  wired (review TEST-01). Proven by mutation before landing; three gaps that turned up are closed here:
+  - `harness_lease` `begin_prov_admitted` (new): `begin_provisioning` must refuse every non-ADMITTED state
+    and leave the row untouched. Dropping its `state = 'ADMITTED'` predicate previously went green.
+  - `harness_queue` `admit_vs_promote_lock_order` (new): `admit()` and `promote_pinned()` race on one node,
+    pool and project. Reversing the lock loop in either function previously went green; now it fails with
+    `DeadlockDetected` (verified for each function). Both loops take their order from `scope_keys()`, so
+    the check also asserts that order is the sorted one: a change to `scope_keys` itself stays consistent
+    inside one process and would only deadlock across processes.
+  - `harness_lease` `releasing_no_double` called `claim_releasing` with a 0 s grace window, where a re-claim
+    by a reaper that starts after another's commit is the documented behaviour, so it passed or failed on
+    timing alone. It now uses a real window and checks the actual guarantee: one claimant per window.
 - **br0kr is now an installable Python package under the Apache-2.0 license (`LICENSE` NEW,
   `pyproject.toml`).** Why: the repo had no license, which legally means "all rights reserved" (nobody
   could use it), and no package metadata, so it could not be built or installed as `br0kr`.

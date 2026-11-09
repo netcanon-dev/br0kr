@@ -63,6 +63,11 @@ pytest -m "not e2e and not slow"
 It touches **no network, no real database, no browser, no live external service.** Every test in the
 default set runs identically on a laptop, in CI with no credentials, and offline.
 
+What the default set cannot prove (the advisory-lock order, the lease CAS predicates under real
+concurrency) is proven by the real-Postgres `scripts/harness_*.py` gates. CI's `harness` job runs the
+core set on every PR against a throwaway service container; see
+[ci-cd.md](ci-cd.md#ciyml--the-correctness-gate) and [tests/README.md](../../tests/README.md).
+
 **The single mock seam.** Each external boundary is mocked **in its home module**, and tests patch
 *there* — never the caller, never below the seam:
 

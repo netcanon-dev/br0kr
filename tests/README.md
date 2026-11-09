@@ -32,6 +32,15 @@ pytest --cov=br0kr --cov-report=term-missing
 
 Markers are declared in `pyproject.toml` (`--strict-markers` — a typo is an error).
 
+## Real-Postgres harnesses (`scripts/harness_*.py`)
+
+The race and saga invariants (the advisory-lock order, the lease CAS predicates) can only be proven
+against a real Postgres, so they live outside pytest as `scripts/harness_*.py` gates that print GO and
+exit 0. The CI set runs on every PR in `ci.yml`'s `harness` job via
+[`scripts/run_ci_harnesses.sh`](../scripts/run_ci_harnesses.sh), each on a fresh database in a
+throwaway `postgres:16` service container. The other harnesses still run by hand through their
+`scripts/run_*.sh` wrappers. To add one to CI, append its name to the script's `HARNESSES=(...)` line.
+
 ## Hermetic by default — the single mock seam
 
 The default suite touches no network, no real DB, no live service. Each boundary is mocked **in its
