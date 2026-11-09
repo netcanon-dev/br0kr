@@ -64,9 +64,15 @@ DNS).
    # BR0KR_TLS_SITE stays your LAN name/IP — the direct TLS site is unaffected
    ```
 
-4. **Bring it up** with the oauth **and** tunnel profiles:
+4. **Bring it up** with the oauth **and** tunnel profiles. Record them in `.env` (plus any profile you
+   already run, e.g. `dashboard`), then deploy:
    ```bash
-   bash scripts/tls-up.sh --profile oauth --profile tunnel up -d
+   # .env
+   COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml
+   COMPOSE_PROFILES=oauth,tunnel
+   ```
+   ```bash
+   bash scripts/deploy.sh
    ```
    `cloudflared` connects out to Cloudflare; the `oauth` shim now advertises `https://br0kr.example.com` as
    its issuer, and Caddy's `:8081` origin emits the public `WWW-Authenticate` URL.
@@ -77,19 +83,22 @@ No account/domain needed, good for a first end-to-end proof — but the hostname
 (you'd re-add the connector each time), so it's not for a lasting connector.
 
 1. Bring the stack up first (so the origin + shim exist), then start a quick tunnel (no token). `run` starts
-   only cloudflared + its deps (caddy/gateway/pg), **not** the `oauth` shim — so bring `--profile oauth` up too:
+   only cloudflared + its deps (caddy/gateway/pg), **not** the `oauth` shim, so the stack must already run
+   the `oauth` profile. Leave `tunnel` OUT of `COMPOSE_PROFILES` for a quick tunnel (the bundled service
+   expects a `TUNNEL_TOKEN`):
    ```bash
-   bash scripts/tls-up.sh --profile oauth up -d
-   docker compose -f docker-compose.yml -f docker-compose.tls.yml --profile oauth --profile tunnel \
-     run --rm cloudflared tunnel --no-autoupdate --url http://caddy:8081
+   # .env: COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml  COMPOSE_PROFILES=oauth (+ dashboard, …)
+   bash scripts/deploy.sh
+   docker compose --profile tunnel run --rm cloudflared tunnel --no-autoupdate --url http://caddy:8081
    ```
+   (`--profile tunnel` here only lets `run` see the cloudflared service; `run` never stops other services.)
    It prints a URL like `https://<random-words>.trycloudflare.com`. (If `.env` has neither `BR0KR_TLS_SITE`
    nor `BR0KR_PUBLIC_URL` set yet, the `oauth` service restart-loops with an "https URL" refusal until step 2
    sets `BR0KR_PUBLIC_URL` — that's expected, it's the fail-loud issuer guard.)
 2. Set `BR0KR_PUBLIC_URL=https://<random-words>.trycloudflare.com` in `.env` and **recreate** the `oauth`
    and `caddy` services so they pick it up:
    ```bash
-   bash scripts/tls-up.sh --profile oauth up -d --force-recreate oauth caddy
+   docker compose up -d --force-recreate oauth caddy    # files + profiles come from .env
    ```
    (`--force-recreate` because a bind-mounted config / env change is only re-read on recreate — see the
    docker-deploy inode note.)
@@ -117,8 +126,8 @@ page**; paste a project token (see [oauth-connector.md](oauth-connector.md) §2)
   the container: `docker compose … exec oauth env | grep BR0KR_PUBLIC_URL`.
 - **`502 Bad Gateway` from the public URL** — cloudflared can't reach the origin. The public-hostname
   **Service** must be `http://caddy:8081` (not `:443`, not the gateway directly), and `cloudflared` must be in
-  the **same compose project** as `caddy` (it is, via `--profile tunnel`). Check `docker compose … logs
-  cloudflared`.
+  the **same compose project** as `caddy` (it is, via the `tunnel` profile in `COMPOSE_PROFILES`). Check
+  `docker compose logs cloudflared`.
 - **The connector still says "couldn't register"** — the public URL isn't actually reachable from the
   internet (test the two `curl`s above from **off** your LAN), or `BR0KR_PUBLIC_URL` isn't `https://`. The
   shim refuses to boot on a non-https issuer.

@@ -96,10 +96,17 @@ The whole stack — an **HA Postgres ledger** (primary + hot standby), `migrate`
 and the reconciler `daemon` — is wired in [`docker-compose.yml`](docker-compose.yml):
 
 ```bash
-cp .env.example .env            # set a strong PGPASSWORD (match it inside PGCONN); set PVE token secret(s)
-docker compose up -d            # pg-primary (healthy) → {pg-standby ∥ migrate} → gateway + daemon
-docker compose up -d --scale daemon=2   # optional hot-standby daemon (the leader lock admits one writer)
+cp .env.example .env            # set a strong PGPASSWORD (match it inside PGCONN); set PVE token secret(s);
+                                # COMPOSE_FILE / COMPOSE_PROFILES name the files and profiles you run
+bash scripts/deploy.sh          # one image build, then pg-primary (healthy) → {pg-standby ∥ migrate} → gateway + daemon
+bash scripts/deploy.sh -- --scale daemon=2   # optional hot-standby daemon (the leader lock admits one writer)
 ```
+
+`scripts/deploy.sh` is also the way to **redeploy**: it refuses if a service of the stack, running or
+stopped, is missing from
+`COMPOSE_FILE`/`COMPOSE_PROFILES` (a compose command that cannot see a service treats it as an orphan),
+builds the one image target, and runs `up -d` without `--build`. Both are how a redeploy has taken the
+stack down before; see [docker-deploy.md](docs/runbooks/docker-deploy.md#redeploying-an-existing-stack--two-ways-to-take-it-down-by-accident).
 
 `PGCONN` lists both Postgres hosts with `target_session_attrs=read-write`, so the broker re-homes onto
 the promoted primary after a failover with no code change. The bundled ledger pair is a homelab

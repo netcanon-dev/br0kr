@@ -37,9 +37,17 @@ stack up with the `oauth` profile:
 # the host (unless you set BR0KR_PUBLIC_URL for a tunnel — see the callout below):
 BR0KR_TLS_SITE=192.168.1.50          # your host's LAN name/IP (or a real domain for a public cert)
 # optional: BR0KR_OAUTH_CODE_TTL / BR0KR_OAUTH_TOKEN_TTL_DAYS (see .env.example)
+# Record the stack so every later command sees it (docker-deploy.md §3): the TLS override + the oauth
+# profile, plus any profile you already run (e.g. dashboard,oauth).
+COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml
+COMPOSE_PROFILES=oauth
 
-bash scripts/tls-up.sh --profile oauth up -d
+bash scripts/deploy.sh               # runs the Compose >= 2.24 gate (tls-up.sh --check) for you
 ```
+
+Do not pass `--profile` by hand once `COMPOSE_PROFILES` is in `.env`: a `--profile` flag replaces the
+`.env` list for that command, so `--profile oauth` alone would treat `dashboard` and `cloudflared` as
+orphans.
 
 > 🌐 **Is your br0kr on a private LAN IP?** Then this alone is **not enough for Claude Desktop / claude.ai.**
 > That connector runs its OAuth discovery from **Anthropic's cloud**, which **cannot reach a private IP**
@@ -48,8 +56,9 @@ bash scripts/tls-up.sh --profile oauth up -d
 > your LAN origin. Follow **[public-tunnel.md](public-tunnel.md)** (a named Cloudflare Tunnel), then come
 > back to step 2 using your public URL. (A `claude` CLI on the LAN with a static bearer needs none of this.)
 
-`tls-up.sh` version-gates Compose (the plain-port un-publish needs ≥ 2.24) and layers Caddy + the `oauth`
-service. Without `--profile oauth` you get TLS with no shim (unchanged behavior).
+`deploy.sh` version-gates Compose (the plain-port un-publish needs ≥ 2.24, via `tls-up.sh --check`) and the
+TLS override layers Caddy + the `oauth` service. Without `oauth` in `COMPOSE_PROFILES` you get TLS with no
+shim (unchanged behavior).
 
 **Self-signed cert note.** With the default internal CA, the desktop's TLS stack must trust Caddy's root, or
 the OAuth calls fail before auth even starts — export Caddy's root
@@ -90,11 +99,11 @@ project api_token) and the tools appear. Repeat per project you want as its own 
 
 - **The browser page never opens / discovery fails** — almost always the **cert isn't trusted** by the
   desktop (self-signed CA). Trust Caddy's root or use a public cert (step 1). Confirm the shim is up:
-  `docker compose -f docker-compose.yml -f docker-compose.tls.yml --profile oauth ps oauth`.
+  `docker compose ps oauth` (files + profiles come from `.env`).
 - **The `oauth` container exits / restart-loops with "OAuth issuer must be an https URL"** — no addressing
   var reached the shim, so it refuses to boot (fail-loud) and the OAuth paths 502 through Caddy. Set
-  `BR0KR_TLS_SITE` (LAN) or `BR0KR_PUBLIC_URL` (tunnel) in `.env` and recreate; check `docker compose
-  -f docker-compose.yml -f docker-compose.tls.yml --profile oauth logs oauth`.
+  `BR0KR_TLS_SITE` (LAN) or `BR0KR_PUBLIC_URL` (tunnel) in `.env` and recreate
+  (`docker compose up -d --force-recreate oauth`); check `docker compose logs oauth`.
 - **Consent says the token is invalid** — paste a **live** `read`/`consume`/`provision` token for the project
   (not revoked, not expired, not an operator token).
 - **It worked but you want to cut it off** — revoke the `oauth:<client>` token in the dashboard Agent-tokens

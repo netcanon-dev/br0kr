@@ -70,6 +70,31 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **Name-coincidence bridge SUGGESTIONS in `discover_reachability` — the LAST PR-D-backlog feature of the storage/network auto-discovery arc, the one the design deferred as "a footgun with a label" (design §6; `br0kr/placement.py`, `br0kr/mcp_server.py`).** Why: an operator extending a `logical_network` across the fleet had to hand-type each node's PVE bridge into `set_network_node`; the discovery report surfaced only a raw per-node `bridge_menu`, no help. Now `discover_reachability` gains a `bridge_suggestions` bucket: for a served node that has NO `network_node` row for a logical net L which IS declared (un-quarantined) elsewhere, if the node PRESENTS a bridge whose NAME matches one already mapped to L, it emits a `{node_id, logical_network_id, bridge, basis:"name_coincidence", also_declared_on:[nodes]}` HINT — a prefill for the operator's `set_network_node` confirm. **Built WITH the label ON: it is NEVER a mapping proposal.** Which L2 a bridge realises is UNOBSERVABLE from PVE, so same-name ≠ same-L2 — the exact wrong-L2 footgun 0039 closed by keying placement on the logical IDENTITY, not the raw name. So each entry is tagged `basis:"name_coincidence"` (+ `cross_cluster` when the evidence spans clusters), and the operator VERIFIES the L2 OUT OF BAND before confirming (the trust boundary — discovery never writes). **That verification is the ONLY defense against a wrong suggestion: the post-clone net0 assertion does NOT catch a same-name/wrong-L2 confirm — it fails only on bridge ABSENCE, and a name-coincidence bridge is present by construction.** The name basis is further restricted to a declaration that is un-quarantined AND live-present on its declaring node (an un-quarantined-but-PVE-absent declaration is `declared_missing_bridge`, a mapping PVE contradicts — not evidence). **REPORT-ONLY and NOT a drift bucket:** it is excluded from the 0043 cadence `discovery_drift` gauge and the PR-H dismissal roster (a suggestion is a hint, not drift; it vanishes the moment the operator declares or the coincidence goes away). A QUARANTINED declaration is NEVER a name basis (a known-broken mapping), and a node already holding a row for L (even a different bridge) is excluded (a re-point, not a widen). Computed from the per-node declarations discovery already reads — **no new query, NO migration.** Dismissability is deferred (mirroring the cadence-sidecar restraint — added only if re-proposal noise is demonstrated). Proven: `tests/unit/test_placement.py` (a name-coincidence hint fires report-only + excludes the already-declared node; no basis / no name-match → no hint; a quarantined declaration is not a basis) + `scripts/harness_discovery.py` §L (real-PG: n2 presents a `vmbr0` matching n1's declared `lan=vmbr0` → one `basis:"name_coincidence"` hint, `also_declared_on:[n1]`, writing nothing). This closes the storage/network auto-discovery arc's PR-D backlog.
 
 ### Fixed
+- **A routine redeploy can no longer take the stack down (`scripts/deploy.sh` NEW, `docker-compose.yml`,
+  `docker-compose.tls.yml`, `.env.example`).** Why: both recorded outages of the reference deployment came
+  from a hand-typed redeploy, and the only guard was a runbook paragraph. A command that named fewer
+  files/profiles than the stack ran with treated oauth/caddy/cloudflared/dashboard as orphans and killed
+  them; `up -d --build` baked the same image once per service, in parallel, killed buildkit on the 6 GB
+  host, and left the stack down.
+  - `.env` now carries the stack definition: `COMPOSE_FILE` (and `COMPOSE_PROFILES`), which Compose itself
+    reads, so bare commands see the whole stack too. **Existing deployments: add both to `.env`**; for
+    the TLS reference deployment, `COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml` and
+    `COMPOSE_PROFILES=dashboard,oauth,tunnel`. Once set, do not pass `-f` or `--profile` by hand: either
+    flag replaces the `.env` value for that command (`--profile oauth` alone drops dashboard and
+    cloudflared). The OAuth, tunnel and TLS runbooks now enable components by editing `.env`.
+  - Only `daemon` carries `build:`; every other br0kr service runs `br0kr:local` with `pull_policy: never`,
+    so even `up -d --build` bakes one target and a fresh host never tries to pull the local image. **A
+    `docker compose run … migrate` on a host without the image now needs `docker compose build daemon`
+    first** (docker-deploy.md §6 and §9 show it).
+  - `scripts/deploy.sh` runs the TLS Compose-version gate when the override is named; refuses if any
+    container of the project, running or stopped, is missing from the configured set (stopped ones count
+    because the `--no-build` recovery path runs with the stack down), if another compose project runs the
+    br0kr image, or if the set is a DR primary (it would also start the bundled standby); builds the one
+    target; runs `up -d` without `--build`; and waits for every service to settle. `--check` runs only the
+    checks, `--no-build` is the recovery path, and arguments after `--` go to `up -d` (keep
+    `--scale daemon=2` that way; a plain `up -d` scales back to one).
+  - `tests/unit/test_deploy_script.py` drives the script against a fake `docker` and pins the single
+    `build:` key and the pull policy (review OPS-01).
 - **The CI `validate` job resolved `mcp` 2.x and failed mypy + test collection on its first clean run
   (`tests/requirements-dev.txt`).** Why: the dev requirements restated the package's import-time deps,
   with an unpinned `mcp>=1.2` beside `requirements.txt`'s `mcp==1.28.1`. The `test` job installs both

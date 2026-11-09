@@ -14,6 +14,12 @@
 #   bash scripts/tls-up.sh --profile dashboard up -d
 #   bash scripts/tls-up.sh down -v
 #   bash scripts/tls-up.sh --check          # only run the Compose-version gate (no bring-up); exit 0/1
+#
+# For a deployment you redeploy, prefer recording the stack in .env (COMPOSE_FILE including
+# docker-compose.tls.yml, plus COMPOSE_PROFILES) and running scripts/deploy.sh, which calls this
+# script's --check gate. The -f this wrapper adds, and any --profile you pass, REPLACE the .env values
+# for that command, so with COMPOSE_PROFILES set, `tls-up.sh --profile oauth up -d` would orphan the
+# other profiles' services.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"

@@ -1,8 +1,11 @@
 # br0kr — full deployment stack: an HA Postgres ledger (primary + hot standby) + the three
 # broker processes (migrate one-shot, MCP gateway, reconciler daemon). One image, three
-# entrypoints (see the Dockerfile). Config is `.env` (copy from .env.example).
+# entrypoints (see the Dockerfile). Config is `.env` (copy from .env.example), including
+# COMPOSE_FILE / COMPOSE_PROFILES: which files and profiles make up THIS deployment, so every
+# compose command (scripts/deploy.sh, or one typed by hand) sees the whole stack.
 #
-#   docker compose up -d              # bring up the whole HA stack
+#   bash scripts/deploy.sh            # build the one image, bring the stack up, wait for it to settle
+#   docker compose up -d              # bring up the whole stack (what deploy.sh runs, minus its checks)
 #   docker compose up -d --scale daemon=2   # run a hot-STANDBY daemon (leader lock picks one writer)
 #   docker compose logs -f daemon     # watch the reconciler
 #
@@ -12,11 +15,15 @@
 # operator-run cluster (Patroni / managed Postgres) and skip the pg-* services. See
 # docs/runbooks/docker-deploy.md and docs/runbooks/ledger-ha.md.
 
-# Shared base for the three broker services: same locally-built image, restart policy, and the
+# Shared base for the broker services: same locally-built image, restart policy, and the
 # bundled-ledger dependency. Per-service `command`/`environment`/`depends_on` refine it.
+# ONE service builds the image (daemon, below); the rest only run it. If every service carried
+# `build:`, an `up -d --build` would bake the same image once per service, in parallel, which killed
+# buildkit on a 6 GB host and left the stack down. `pull_policy: never`: br0kr:local exists only
+# locally, so a service that does not build it must never try to pull it from a registry.
 x-broker: &broker
-  build: .
   image: br0kr:local
+  pull_policy: never
   restart: unless-stopped
 
 services:
@@ -115,6 +122,7 @@ services:
   # ── Broker: reconciler daemon (SINGLE leader; a 2nd replica is a hot standby) ────
   daemon:
     <<: *broker
+    build: .   # the ONE service that builds br0kr:local (see x-broker); `docker compose build daemon`
     command: ["python", "-m", "br0kr.daemon"]
     environment:
       PGCONN: ${PGCONN:?set PGCONN in .env}

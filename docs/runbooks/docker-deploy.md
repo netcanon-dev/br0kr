@@ -38,10 +38,24 @@ reads `.env` to both interpolate `${VARS}` in `docker-compose.yml` and pass valu
 ## 3. Bring it up
 
 ```bash
-docker compose up -d            # builds the image, then: pg-primary (healthy) → {pg-standby ∥ migrate} → gateway + daemon
+bash scripts/deploy.sh          # builds the image, then: pg-primary (healthy) → {pg-standby ∥ migrate} → gateway + daemon
 docker compose ps               # all up; migrate shows Exited (0) — it is a one-shot
 docker compose logs -f daemon   # "leader: entering reconcile loop" = it won the single-writer lock
 ```
+
+`deploy.sh` reads which files and profiles make up the stack from `COMPOSE_FILE` / `COMPOSE_PROFILES`
+in `.env` (Compose reads the same two keys, so the bare `docker compose ps` / `logs` above see the same
+stack). It checks that no container of the project, running or stopped, is missing from that set (so the
+recovery path, run with the stack down, cannot bring it back from fewer files), builds the one image target
+(`docker compose build daemon`), runs `docker compose up -d` without `--build`, and waits until every
+service is running (healthy where it has a healthcheck) and `migrate` exited 0 (`DEPLOY_WAIT_SECONDS`,
+default 300). `--check` runs only the checks; `--no-build` brings the stack up on the image already
+present; anything after `--` is passed to `up -d` (for example `-- --scale daemon=2`). It needs bash,
+python3 and coreutils on the host. The raw equivalent is `docker compose build daemon && docker compose up -d`.
+
+Once `.env` carries `COMPOSE_FILE`/`COMPOSE_PROFILES`, **do not pass `-f` or `--profile` by hand**: either
+flag replaces the `.env` value for that one command, so `docker compose --profile oauth up -d` treats
+`dashboard` and `cloudflared` as orphans. To add or drop a component, edit `.env` and run `deploy.sh`.
 
 Startup order is enforced by `depends_on`: the standby and `migrate` each wait for the primary to be
 healthy (so they start **in parallel** once it is — `migrate` does not wait for the standby clone);
@@ -59,7 +73,8 @@ used-vs-total callouts, per-project allowances vs live usage, and the admission 
 opt-in profile (it doesn't start by default):
 
 ```bash
-docker compose --profile dashboard up -d dashboard   # publishes DASHBOARD_PORT (default 8051)
+# .env: add dashboard to COMPOSE_PROFILES (e.g. COMPOSE_PROFILES=dashboard), then:
+bash scripts/deploy.sh                               # publishes DASHBOARD_PORT (default 8051)
 ```
 
 Browse `http://<host>:8051/`. The **reads** are **unauthenticated plain HTTP by default** exposing only
@@ -84,8 +99,8 @@ deletes that would orphan a live lease are refused). **Cluster connection editin
 daemon sends its API token**, so holding the token is operator-level config access — guard it accordingly:
 
 ```bash
-BR0KR_DASHBOARD_TOKEN=$(openssl rand -hex 24)   # put this in .env, then:
-docker compose --profile dashboard up -d dashboard
+BR0KR_DASHBOARD_TOKEN=$(openssl rand -hex 24)   # put this in .env, then recreate it so it reads the token:
+docker compose up -d --force-recreate dashboard  # files + profiles come from .env
 ```
 
 In the page, click **unlock** and paste the token (the GUI shows the action controls only when actions are
@@ -138,6 +153,10 @@ docker compose up -d --scale gateway=3   # gateways are stateless; run as many a
 
 Only **one** daemon ever provisions at a time (the leader); the others poll to take over if it drops.
 
+A later `up -d` without `--scale` (including a plain `bash scripts/deploy.sh`) scales back to one replica
+per service. To keep the replicas across redeploys, pass the flag through:
+`bash scripts/deploy.sh -- --scale daemon=2 --scale gateway=3`.
+
 ## 6. Using an external / managed Postgres
 
 Skip the bundled ledger entirely. **Use `--no-deps`** — naming the broker services alone would still
@@ -148,9 +167,13 @@ primary's healthcheck instead of your external DB. `--no-deps` also drops the `m
 ```bash
 # In .env, set PGCONN to your DSN (single host, or a multi-host HA DSN with target_session_attrs=read-write):
 #   PGCONN=host=db.internal port=5432 dbname=broker user=broker password=… sslmode=require
+docker compose build daemon                        # the one image build (only daemon carries `build:`)
 docker compose run --rm --no-deps migrate          # apply migrations against your DB, to completion
 docker compose up -d --no-deps gateway daemon      # then the long-running services (no pg-* started)
 ```
+
+`scripts/deploy.sh` is for the bundled-ledger topology: its `up -d` starts every service in the set,
+pg-* included, so use the commands above here (and repeat them to redeploy).
 
 ## 7. Operating
 
@@ -348,7 +371,9 @@ docker compose up -d --no-deps gateway daemon      # then the long-running servi
   the same network; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
   as u; print(u.urlopen('http://localhost:9090/readyz').status)"`. The endpoints are unauthenticated plain HTTP
   exposing only counts/states (never a secret) — keep them on a trusted network ([/SECURITY.md](../../SECURITY.md) C3 (c2)).
-- **Re-run migrations** after upgrading: `docker compose run --rm migrate` (idempotent).
+- **Re-run migrations** after upgrading: `bash scripts/deploy.sh` does it (its `up -d` re-runs the one-shot
+  `migrate` on the new image). By hand, build first, since `run` uses whatever image already exists:
+  `docker compose build daemon && docker compose run --rm migrate` (idempotent).
 - **Back up the ledger**: [`scripts/backup_ledger.sh`](../../scripts/backup_ledger.sh) (secret-safe
   logical dump). Replication is not a backup — see [ledger-ha.md](ledger-ha.md).
 - **Tear down**: `docker compose down` (keep data) or `docker compose down -v` (drop the ledger volumes too).
@@ -402,10 +427,21 @@ bash docker/gen-replication-certs.sh 100.64.0.10        # → ./certs/{ca.crt,se
 #    REPLICATION_CIDR=100.64.0.0/10   # your mesh CIDR (narrow it)
 #    PRIMARY_BIND=100.64.0.10         # this host's MESH interface IP (never 0.0.0.0)
 
-# 3. Bring up the primary in DR mode — NOT the bundled pg-standby (it's trust/same-host only):
-docker compose -f docker-compose.yml -f docker-compose.primary-remote.yml up -d \
-  pg-primary migrate gateway daemon
+# 3. Record the override in .env, so every later compose command on this host keeps it (a command that
+#    dropped it would recreate pg-primary without its TLS entrypoint and mesh port):
+#    COMPOSE_FILE=docker-compose.yml:docker-compose.primary-remote.yml
+# 4. Build the image, then bring up the primary in DR mode — NOT the bundled pg-standby (it's trust/same-host only):
+docker compose build daemon
+docker compose up -d pg-primary migrate gateway daemon
 ```
+
+With built-in TLS on this host too, append `:docker-compose.tls.yml` to `COMPOSE_FILE`, run
+`bash scripts/tls-up.sh --check` first (nothing else runs the Compose ≥ 2.24 gate for this topology), and
+add `caddy` (plus `oauth` / `cloudflared` if you run them) to the `up -d` list: the override un-publishes
+the gateway's plain port, so without `caddy` the gateway is unreachable.
+
+`scripts/deploy.sh` refuses this topology (it would also start the bundled `pg-standby`); redeploy a DR
+primary with the two commands above.
 
 DR mode (set by `REPLICATION_PASSWORD`) makes `pg-primary-init.sh` create a scram `replicator` role +
 the `br0kr_standby_dr` slot and add a `hostssl … scram-sha-256` rule with **no trust line**, so the
@@ -483,9 +519,14 @@ Enabling TLS adds the `docker-compose.tls.yml` override, which:
 > ≥ 2.24**. On an older Compose `!reset` is **silently ignored** (verified on v2.18 / v2.17) — the plain
 > cleartext ports would stay published *alongside* Caddy, with no warning, silently defeating the point.
 > `scripts/tls-up.sh` version-checks and **refuses rather than leak**, then runs the bring-up:
-> `tls-up.sh up -d`, `tls-up.sh --profile dashboard up -d`, `tls-up.sh down -v`, `tls-up.sh --check`
-> (gate only). If you must use the raw command, FIRST confirm `docker compose version` is ≥ 2.24, and
+> `tls-up.sh up -d`, `tls-up.sh down -v`, `tls-up.sh --check` (gate only). (`tls-up.sh --profile …` works
+> only while `.env` has no `COMPOSE_PROFILES`; see the callout below.) If you must use the raw command, FIRST confirm `docker compose version` is ≥ 2.24, and
 > verify with `bash scripts/run_tls_smoke.sh` that the plain port is actually un-published.
+>
+> **Once TLS is on, record it in `.env`** so every later command sees the whole stack:
+> `COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml` plus the profiles you enabled in
+> `COMPOSE_PROFILES` (e.g. `dashboard,oauth,tunnel`). From then on redeploy with `bash scripts/deploy.sh`,
+> which runs the same Compose version gate before it does anything.
 
 **Certificate.** The default is Caddy's **internal self-signed CA** (`BR0KR_TLS_ISSUER=internal`) — it
 works offline with no domain/DNS, right for a homelab. Clients either trust Caddy's root once (export it
@@ -532,7 +573,8 @@ end to end:
 
 ```bash
 # .env: BR0KR_PUBLIC_URL=https://br0kr.example.com  +  TUNNEL_TOKEN=<cloudflare connector token>
-bash scripts/tls-up.sh --profile oauth --profile tunnel up -d
+#       COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml  +  COMPOSE_PROFILES=oauth,tunnel (+ dashboard, …)
+bash scripts/deploy.sh
 ```
 
 Full walkthrough (named + quick tunnel, verification, troubleshooting): **[public-tunnel.md](public-tunnel.md)**.
@@ -672,40 +714,38 @@ Both of these were learned by doing them on 2026-07-29. A redeploy is riskier th
 for a non-obvious reason: **`docker compose` only knows about the services in the files and profiles you
 name on THAT invocation.** Everything else in the project is, to compose, an orphan.
 
-**1. Name every file and profile, every time.** If the stack was brought up with the TLS override and
-profiles, a bare `docker compose up -d --build` does not "leave the rest alone" — it recreates the five
-default services and treats `oauth` / `caddy` / `cloudflared` / `dashboard` as not-in-project, so they can
-be stopped or SIGKILLed (exit 137) out from under you. The full-stack command for the reference
-deployment is:
+**`bash scripts/deploy.sh` handles both for you.** What it guards against, and the manual equivalents:
+
+**1. Every compose command must see every file and profile.** If the stack runs with the TLS override and
+profiles, a command that names fewer does not "leave the rest alone": it treats `oauth` / `caddy` /
+`cloudflared` / `dashboard` as not-in-project, so they can be stopped or SIGKILLed (exit 137) out from
+under you. Put the stack definition in `.env` once, and every command (bare ones included) sees it. The
+reference deployment's:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.tls.yml \
-  --profile dashboard --profile oauth --profile tunnel up -d
+COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml
+COMPOSE_PROFILES=dashboard,oauth,tunnel
 ```
 
-`docker compose config --services` lists only what the CURRENT invocation can see — run it first if you
-are unsure which files/profiles a running stack was created with, and compare against `docker ps`.
+`deploy.sh` refuses when a container of the project, running or stopped, is not in that set. By hand,
+`docker compose config --services` lists what the current settings can see; compare it with `docker ps`.
 
-**2. Build ONE target, then bring up.** `up -d --build` bakes every buildable service in parallel. On a
-small deploy host (the reference VM has 6 GB) that can kill the builder mid-flight:
+**2. One image build, never `up -d --build`.** Every br0kr service runs the same `br0kr:local` image and
+only `daemon` carries the `build:` key, so even `up -d --build` bakes one target. When every service
+carried `build:` it baked them all in parallel, and on the 6 GB reference VM that killed the builder
+mid-flight:
 
 ```
 target migrate: failed to receive status: rpc error: code = Unavailable desc = error reading from server: EOF
 ```
 
-That is buildkit dying, not a code error — but compose has already stopped the containers it was about to
-recreate, so a failed build leaves the stack **down**. All the Python services share one image, so build
-it once, alone, and only then bring the stack up:
+That is buildkit dying, not a code error, but compose had already stopped the containers it was about to
+recreate, so the failed build left the stack **down**. `deploy.sh` builds first (`docker compose build
+daemon`) and only then runs `up -d`, so a failed build leaves the running stack alone.
 
-```bash
-docker compose build daemon      # one target; produces br0kr:local for every service
-docker compose -f docker-compose.yml -f docker-compose.tls.yml \
-  --profile dashboard --profile oauth --profile tunnel up -d
-```
-
-If a build does fail with the stack down, `up -d` (no `--build`) restores service immediately on the
-previous image — do that first, then fix the build. Volumes are untouched by any of this: the ledger and
-the standby's clone survive, and the standby resumes streaming from its slot.
+If a build does fail with the stack down, `bash scripts/deploy.sh --no-build` (or `docker compose up -d`)
+restores service on the previous image. Do that first, then fix the build. Volumes are untouched by any
+of this: the ledger and the standby's clone survive, and the standby resumes streaming from its slot.
 
 If you inherit a host that already has a CRLF tree, normalise the executed scripts in place and restart the affected
 service — a standby with its clone sentinel intact resumes streaming from its replication slot, no re-`pg_basebackup`:
