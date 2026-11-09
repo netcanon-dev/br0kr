@@ -1,6 +1,6 @@
 # Runbook — Ledger high availability (single cluster)
 
-**Status:** 🟡 client-side resilience shipped & proven; replication + failover is operator-owned.
+**Status:** ◐ client-side resilience shipped & proven; replication + failover is operator-owned.
 **Scope:** keeping the Postgres **ledger** available and durable for a single-cluster br0kr
 deployment. Cross-cluster ledger topology is out of scope (later roadmap).
 

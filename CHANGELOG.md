@@ -227,6 +227,13 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **The operator build subsystem was un-runnable on any deployment: `BR0KR_BUILD_LIMIT` (and `BR0KR_BUILD_STALE_SECONDS`/`BR0KR_BUILD_CORES`/`BR0KR_BUILD_MEMORY_MB`) were read by `daemon.main()` but never passed through the daemon service in `docker-compose.yml`** — so setting them in `.env` was the silent no-op the `.env.example` header explicitly warns about, and template builds stayed disabled regardless. Wired all four into `docker-compose.yml` (`daemon.environment`, int defaults so an empty inject can't crash `int("")`); behaviour-neutral by default (`BUILD_LIMIT` still `0`). This also unblocks `rebuild_source` replication, which requires a BUILT (source-provenanced) template. `.env.example` build block corrected to match.
 
 ### Changed
+- **Stale docs fixed (`tests/README.md`, new `tests/e2e/README.md`, `.github/ISSUE_TEMPLATE/`, `docs/`,
+  `README.md`).** Why: a spot-check of ten doc claims found five wrong, and stale docs are a bug here. The test
+  pyramid no longer describes scaffold wording ("the app/CLI/API as a black box") or a dedicated e2e CI job:
+  the e2e layer is marked reserved, with a README saying where the end-to-end proofs actually live. The issue
+  chooser no longer links to Discussions, which are disabled; questions get a `question`-labelled template.
+  One status legend (✅ · ◐ · ⏳) now applies repo-wide, the standard included. README no longer presents six
+  gateway verbs as the whole MCP surface (review DOCS-02).
 - **Scope statement: the PDM arc is dormant, and the cut features are written down as Non-goals
   (`docs/architecture.md`, `README.md`, `docs/pdm-api-contract.md`).** Why: the only ⏳ "Next" item was to
   live-verify PDM migration, against an API contract that is assumed, with no PDM hardware in the fleet;

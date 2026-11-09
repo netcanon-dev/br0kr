@@ -17,7 +17,7 @@ pwsh tests/validate.ps1          # Windows mirror (-Strict for CI)
 # Just the tests
 pip install -r tests/requirements-dev.txt
 pytest -m "not e2e and not slow"                 # the hermetic default (what the gate runs)
-pytest -m e2e                                    # opt-in, dedicated CI job
+pytest -m e2e                                    # reserved: no e2e tests yet (see the pyramid below)
 pytest --cov=br0kr --cov-report=term-missing
 ```
 
@@ -26,8 +26,8 @@ pytest --cov=br0kr --cov-report=term-missing
 | Layer | Marker | What | Isolation |
 |---|---|---|---|
 | **unit** | `unit` | pure functions, no I/O | none needed |
-| **integration** | `integration` | the app/CLI/API as a black box, shell-outs + network mocked | the home-module seams |
-| **e2e** | `e2e` | the real booted app (browser/subprocess/live deps) | opt-in — never in the hermetic default |
+| **integration** | `integration` | several modules wired together (daemon tick, reconciler, gateway verbs) against hermetic fakes: a fake PVE driver, a fake connection, no network | the home-module seams |
+| **e2e** | `e2e` | **reserved, empty today.** The end-to-end proofs are the real-Postgres harnesses below and the live `scripts/live_*.py` runs against a Proxmox node; see [e2e/README.md](e2e/README.md) | opt-in — never in the hermetic default |
 | *(orthogonal)* | `slow` | long-running; excluded from the fast subset | |
 
 Markers are declared in `pyproject.toml` (`--strict-markers` — a typo is an error).

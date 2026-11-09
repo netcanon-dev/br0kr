@@ -86,7 +86,10 @@ lets a stranger extend the subsystem without reverse-engineering it.
 - **`docs/<topic>.md`** plan-of-record docs describe a subsystem's design and
   rollout. They carry a **status legend** so a reader knows what is real:
 
-  > Status legend: ⬜ todo · 🟡 partial · ✅ done.
+  > Status legend: ✅ done · ◐ partial, or built but disabled · ⏳ next.
+
+  One legend for the whole repository (README, `architecture.md`, designs, runbooks), so a reader never
+  has to learn two.
 
   Annotate sections/rows with their status and the date they shipped. "Honest
   calibration" beats aspirational prose — say "~80% done, here's the gap."

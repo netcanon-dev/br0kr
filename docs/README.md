@@ -28,7 +28,7 @@ docs/
 | Tier | Lifecycle | Contents |
 |------|-----------|----------|
 | **`standards/`** | Stable — changes are deliberate | Binding rules every contributor follows. The "law" of the repo. |
-| **`architecture.md`, `designs/*.md`** | Living — tracks reality | Plan-of-record for the broker or one feature: the design, the *why*, the rollout. Carries a status legend (⬜ todo · 🟡 partial · ✅ done) and a `## See also` footer. |
+| **`architecture.md`, `designs/*.md`** | Living — tracks reality | Plan-of-record for the broker or one feature: the design, the *why*, the rollout. Carries the repo-wide status legend (✅ done · ◐ partial, or built but disabled · ⏳ next) and a `## See also` footer. |
 | **`reviews/<date>-<slug>.md`** | **Frozen** | The dated, reproducible record of a review/audit run. **EXPECTED-STALE:** a later audit must never flag a past run's evidence as drift — it is a historical record, not a live doc. |
 | **`runbooks/`** | Living — operational | Step-by-step operator procedures (HA, failover, restore). Practiced, not aspirational. e.g. [runbooks/ledger-ha.md](runbooks/ledger-ha.md). |
 

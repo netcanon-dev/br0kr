@@ -1,4 +1,0 @@
-# e2e tests live here — the real booted app (browser / subprocess / live deps).
-# They are OPT-IN: marked @pytest.mark.e2e and excluded from the hermetic default
-# (`pytest -m "not e2e and not slow"`). They run in a dedicated CI job, not the
-# pre-commit gate. See docs/standards/testing.md §3.
