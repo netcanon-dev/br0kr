@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 import tarfile
 from pathlib import Path
 
@@ -168,3 +169,23 @@ def test_ci_workflow_runs_the_harness_set_against_a_postgres_service():
     job = ci.split("\n  harness:\n", 1)[1]
     assert "image: postgres:" in job
     assert "bash scripts/run_ci_harnesses.sh" in job
+
+
+def test_workflows_verify_what_they_download():
+    """No workflow pipes a download straight into tar or a shell, every release download is checked with
+    `sha256sum -c` against a hash recorded in the workflow, and the gitleaks version and hash agree across
+    workflows (review SEC-04). Guards the one unverified executable in an otherwise hash-pinned pipeline coming
+    back, and a hand bump that updates the version in one workflow but not the other (or not the hash)."""
+    workflows = sorted((_ROOT / ".github" / "workflows").glob("*.yml"))
+    pins = set()
+    for path in workflows:
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"curl[^\n]*\|\s*(sudo\s+)?(tar|sh|bash)\b", text), f"{path.name} pipes a download"
+        if "releases/download" in text:
+            assert "sha256sum -c" in text, f"{path.name} downloads a release without checking its hash"
+        version = re.search(r"GITLEAKS_VERSION=(\S+)", text)
+        digest = re.search(r"GITLEAKS_SHA256=([0-9a-f]{64})\b", text)
+        if version or digest:
+            assert version and digest, f"{path.name} pins the gitleaks version or hash without the other"
+            pins.add((version.group(1), digest.group(1)))
+    assert len(pins) == 1, f"the workflows disagree on the gitleaks pin: {sorted(pins)}"

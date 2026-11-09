@@ -13,6 +13,11 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 ## [Unreleased]
 
 ### Security
+- **CI verifies the gitleaks binary it downloads (`.github/workflows/ci.yml`, `.github/workflows/security.yml`).**
+  Why: both workflows ran `curl … | sudo tar` on a release tarball with no checksum, the one unverified
+  executable in an otherwise hash-pinned pipeline. Each now downloads to a file, checks it with `sha256sum -c`
+  against a SHA-256 recorded in the workflow, and only then unpacks it; a replaced release asset fails the job.
+  A hygiene test refuses a piped download in any workflow and keeps the two pins in step (review SEC-04).
 - **CI matches the netcanon baseline: a PII guard, a CVE-gated image, blocking zizmor.** Why: br0kr is
   public, and netcanon/netcanon is the reference every netcanon repository now follows.
   - `pii-guard.yml` (new; SECURITY.md C19) runs the shared `.github/scripts/pii_guard.py` over every tracked

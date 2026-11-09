@@ -65,7 +65,17 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r tests/requirements-dev.txt
-          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | sudo tar -xz -C /usr/local/bin gitleaks
+          # gitleaks: a pinned release, checked against the SHA-256 recorded HERE before it is unpacked (review
+          # SEC-04), so a replaced release asset fails the job instead of running. Dependabot cannot see a curl
+          # URL: bump by hand, version AND hash together, in lockstep with the other workflow (the hash is the
+          # linux_x64 line of that release's gitleaks_<ver>_checksums.txt). tests/unit/test_repo_hygiene.py
+          # keeps the two in step.
+          GITLEAKS_VERSION=8.18.4
+          GITLEAKS_SHA256=ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
 
       - name: validate (the same gate as local + the deploy host)
         # tests/validate.sh is the single source of truth for "is it green":
