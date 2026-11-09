@@ -55,7 +55,7 @@ class _FakeDriver:
     def list_fenced(self) -> list[tuple[int, int]]:
         return self._fenced
 
-    def fenced_destroy(self, vmid: int, lease_id: int) -> str:
+    def fenced_destroy(self, vmid: int, lease_id: int, on_progress=None) -> str:
         self.destroyed.append((vmid, lease_id))
         return "destroyed"
 

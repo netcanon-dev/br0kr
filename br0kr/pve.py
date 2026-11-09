@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -39,6 +40,25 @@ import requests
 from br0kr import imgbuild  # the driver refuses to reap-DELETE anything but a broker-owned import artifact (below)
 
 log = logging.getLogger(__name__)
+
+# Process-wide count of pre-DELETE guest stops that FAILED (a guest not reported stopped whose stop was refused
+# or did not complete; rarely, a guest that vanished between the fence re-check and the stop also counts). Every
+# teardown path shares `_stop_best_effort`, so one counter covers the reaper, the sweep and the build/replica
+# destroyers; the daemon publishes its per-tick increase as `stop_errors` (review REL-04).
+_stop_failures = 0
+_stop_failures_lock = threading.Lock()
+
+
+def stop_failures_total() -> int:
+    """How many pre-DELETE guest stops have failed in this process so far (monotonic)."""
+    with _stop_failures_lock:
+        return _stop_failures
+
+
+def _count_stop_failure() -> None:
+    global _stop_failures
+    with _stop_failures_lock:
+        _stop_failures += 1
 
 # A bare PVE storage id, SAFE to interpolate into a storage-API request PATH — no `/`, `?`, `#`, `:`, whitespace,
 # or control char that could rewrite the reap DELETE URL into an arbitrary-volume delete. Mirrors nodes._STORAGE_RE
@@ -488,11 +508,24 @@ class Pve:
         poll iteration — the daemon threads its liveness heartbeat through here so a LONG
         task (e.g. a multi-minute image download) keeps the worker's health probe fresh
         instead of looking wedged."""
+        warned_acl = False
         for _ in range(secs):
             if on_progress is not None:
                 on_progress()
             try:
                 status = self._get(f"/nodes/{self.node}/tasks/{upid}/status")
+            except requests.HTTPError as exc:
+                # Still retried (a token can be re-granted mid-task), but a refusal is named ONCE: without
+                # Sys.Audit on /nodes/<node> every task poll is refused and the task would otherwise surface only
+                # as a TIMEOUT, never as the ACL gap it is (review UX-06 follow-up).
+                code = exc.response.status_code if exc.response is not None else None
+                if code in (401, 403) and not warned_acl:
+                    warned_acl = True
+                    log.warning("polling PVE task %s was refused (HTTP %s): the br0kr token needs Sys.Audit on "
+                                "/nodes/%s (the PVEAuditor role, docker-deploy.md §7); retrying until the wait "
+                                "budget", upid, code, self.node, extra={"http_status": code})
+                time.sleep(1)
+                continue
             except requests.RequestException:
                 time.sleep(1)
                 continue
@@ -534,18 +567,21 @@ class Pve:
         cores: int = 1,
         memory: int = 512,
         extra_config: dict[str, Any] | None = None,
+        on_progress: Callable[[], None] | None = None,
     ) -> str:
         """Create a guest and stamp its fence tag in the SAME create call, so it is
         fenced from the moment it exists. `extra_config` carries the provisioning
         recipe (disk, net, cloud-init, e.g. {"scsi0": "local-zfs:8", "net0": "..."});
         the identity/fence keys below always win, so a recipe can't unset the fence.
+        `on_progress` (when given) is called once per poll of the create task, so the
+        daemon's liveness heartbeat keeps beating through a slow create (review REL-02).
         Returns the create task's exitstatus."""
         body: dict[str, Any] = dict(extra_config or {})
         body.update({"vmid": vmid, "name": name, "cores": cores, "memory": memory, "tags": fence_tag(lease_id)})
         upid = self._post(f"/nodes/{self.node}/qemu", body)
-        return self.wait(upid)
+        return self.wait(upid, on_progress=on_progress)
 
-    def fenced_destroy(self, vmid: int, lease_id: int) -> str:
+    def fenced_destroy(self, vmid: int, lease_id: int, on_progress: Callable[[], None] | None = None) -> str:
         """Destroy a guest ONLY if its fence matches `lease_id`. Returns 'destroyed',
         'gone', or 'fence_mismatch' (refused — vmid belongs to another lease now).
         Raises on a transient API error or a failed/timed-out DELETE task (review S08), which the caller retries.
@@ -558,7 +594,8 @@ class Pve:
         stop (up to 60s) + any process stall can span a failover in which this guest was torn down by a
         promoted standby and its vmid REUSED by a new lease, so authorizing the stop or the delete on the
         stale check would hit the wrong guest — the re-read refuses ('fence_mismatch'/'gone') if the vmid
-        changed hands (review finding S02)."""
+        changed hands (review finding S02). `on_progress` (when given) is threaded into the stop and DELETE task
+        waits, so a slow teardown on the reaper path keeps the daemon's liveness heartbeat beating (review REL-02)."""
         def _recheck() -> str:
             # Re-derive the fence verdict from a FRESH read — _stop_then_fenced_delete calls this both before
             # the stop and again before the DELETE, so a vmid torn down + reused during the window is refused.
@@ -568,12 +605,12 @@ class Pve:
         # purge=True: the lease teardown is the ONLY destroyer whose guest can carry tenant DATA disks (PR-4), so
         # it reclaims the unusedN orphan a partial multi-pool attach can leave; the other destroyers don't.
         return self._stop_then_fenced_delete(vmid, _recheck, f"fenced_destroy(lease={lease_id})",
-                                             {"lease_id": lease_id}, purge=True)
+                                             {"lease_id": lease_id}, on_progress=on_progress, purge=True)
 
     # ── cloud-init clone provisioning (br0kr/cloudinit.py + reconciler clone flow) ───────────────────
     def clone(self, template_vmid: int, new_vmid: int, name: str, *,
               full: bool = True, storage: str | None = None, target: str | None = None,
-              secs: int = 300) -> str:
+              secs: int = 300, on_progress: Callable[[], None] | None = None) -> str:
         """Clone a TEMPLATE VM to ``new_vmid`` (the cloud-init provisioning path). Returns the clone task's
         exitstatus ('OK' on success, 'TIMEOUT' if still running past the budget). ``full`` controls a full
         (independent disk) vs linked (copy-on-write, faster/lighter — needs a compatible storage) clone;
@@ -588,15 +625,16 @@ class Pve:
         placement gate guarantees that before we get here; omit it for a same-node clone. The clone INHERITS
         the template's tags — so a template stamped ``TEMPLATE_TAG`` yields a marked clone before the broker
         sets the per-lease fence (the fence + cloud-init are applied next, by `configure`). Clone is generous
-        on the wait budget (a full clone of a cloud image is slow). NOTE: a TIMEOUT leaves the clone unfenced —
-        the orphan sweep's marker reclaim is the backstop (see br0kr/sweeper.py)."""
+        on the wait budget (a full clone of a cloud image is slow), and ``on_progress`` (when given) is called once
+        per poll so the daemon's liveness heartbeat outlives that budget (review REL-02). NOTE: a TIMEOUT leaves the
+        clone unfenced — the orphan sweep's marker reclaim is the backstop (see br0kr/sweeper.py)."""
         body: dict[str, Any] = {"newid": new_vmid, "name": name, "full": 1 if full else 0}
         if storage and full:   # `and storage` (not `is not None`): an empty "" must NOT send storage= (PVE 400)
             body["storage"] = storage
         if target:             # cross-node clone: place the copy on a different node (shared storage only)
             body["target"] = target
         upid = self._post(f"/nodes/{self.node}/qemu/{template_vmid}/clone", body)
-        return self.wait(upid, secs=secs)
+        return self.wait(upid, secs=secs, on_progress=on_progress)
 
     def clone_start(self, template_vmid: int, new_vmid: int, name: str, *,
                     full: bool = True, storage: str | None = None) -> str:
@@ -617,11 +655,11 @@ class Pve:
         reaper on failure, so the half-configured guest is torn down."""
         self._post(f"/nodes/{self.node}/qemu/{vmid}/config", config)
 
-    def start(self, vmid: int, secs: int = 120) -> str:
+    def start(self, vmid: int, secs: int = 120, on_progress: Callable[[], None] | None = None) -> str:
         """Start a guest (POST .../status/start) so it boots, runs cloud-init, and the guest agent comes up.
-        Returns the start task's exitstatus ('OK'/'TIMEOUT'/…)."""
+        Returns the start task's exitstatus ('OK'/'TIMEOUT'/…). `on_progress` is called once per poll."""
         upid = self._post(f"/nodes/{self.node}/qemu/{vmid}/status/start", {})
-        return self.wait(upid, secs=secs)
+        return self.wait(upid, secs=secs, on_progress=on_progress)
 
     def resize_disk(self, vmid: int, disk: str, size_gb: int, *, secs: int = 120,
                     on_progress: Callable[[], None] | None = None) -> str:
@@ -638,7 +676,7 @@ class Pve:
             return self.wait(data, secs=secs, on_progress=on_progress)
         return "OK"
 
-    def grow_boot_disk(self, vmid: int, req_gb: int) -> str | None:
+    def grow_boot_disk(self, vmid: int, req_gb: int, on_progress: Callable[[], None] | None = None) -> str | None:
         """GROW the guest's boot disk to ``req_gb`` WHOLE GB iff the request EXCEEDS its current provisioned
         size. The reconciler calls this after cloning a template so the agent gets the disk it RESERVED, not the
         template's baked size: a clone inherits the template's (small) boot disk, but the disk-quota debit at
@@ -650,7 +688,8 @@ class Pve:
         ``scsi0``), or None when nothing was done — the request already fits, or no boot disk could be
         identified (logged; the guest keeps the template size rather than the provision bricking on a config we
         don't recognise). RAISES if the resize task returns non-OK, so the reconciler releases the lease to the
-        reaper rather than silently booting a guest that is the wrong (smaller) size."""
+        reaper rather than silently booting a guest that is the wrong (smaller) size. ``on_progress`` is passed to
+        the resize task wait (when PVE runs it as a worker)."""
         cfg = self._get(f"/nodes/{self.node}/qemu/{vmid}/config")
         dev = pick_boot_disk(cfg)
         if dev is None:
@@ -674,7 +713,7 @@ class Pve:
             log.debug("vmid %s boot disk %s already ~%.1fGB >= requested %sGB — no grow", vmid, dev, raw,
                       req_gb, extra={"vmid": vmid})
             return None
-        rc = self.resize_disk(vmid, dev, req_gb)
+        rc = self.resize_disk(vmid, dev, req_gb, on_progress=on_progress)
         if rc != "OK":
             raise RuntimeError(f"resize of vmid {vmid} disk {dev} to {req_gb}G did not succeed (task={rc})")
         log.info("grew vmid %s boot disk %s to %sGB (was ~%.1fGB)", vmid, dev, req_gb, raw,
@@ -755,18 +794,56 @@ class Pve:
         val = cfg.get(dev)
         return val if isinstance(val, str) else None
 
-    def _stop_best_effort(self, vmid: int, on_progress: Callable[[], None] | None = None) -> None:
-        """Stop a guest before a DELETE, swallowing any error. A stop on an already-stopped guest is a
-        no-op; a transient error here must not block the destroy (the DELETE will surface a real problem).
-        Used by fenced_destroy + destroy_clone_orphan so teardown works on a RUNNING (started) guest.
-        `on_progress` (when given) is threaded into the stop task wait so a caller on the daemon's single tick
-        thread keeps its liveness heartbeat fresh across the up-to-60s stop."""
+    def power_state(self, vmid: int) -> str | None:
+        """The guest's power state from ``/status/current`` ('running', 'stopped', ...), or None if PVE reports
+        none. RAISES on an API error (the caller decides what an unknown state means)."""
+        return (self._get(f"/nodes/{self.node}/qemu/{vmid}/status/current") or {}).get("status")
+
+    def _stop_best_effort(self, vmid: int, on_progress: Callable[[], None] | None = None) -> bool:
+        """Stop a guest before a DELETE without ever raising: the DELETE that follows surfaces a real problem,
+        so a stop error must not block it. Used by every teardown path (fenced_destroy, the clone-orphan, build
+        and replica destroyers) so teardown works on a RUNNING (started) guest. `on_progress` (when given) is
+        threaded into the stop task wait so a caller on the daemon's single tick thread keeps its liveness
+        heartbeat fresh across the up-to-60s stop.
+
+        Reads the power state first: an already-stopped guest is skipped silently (no stop call, no warning).
+        A stop that genuinely fails on a running guest is logged at WARNING with the HTTP status or task rc
+        (naming the VM.PowerMgmt grant on a 401/403) and counted (`stop_failures_total`), because the DELETE
+        then fails too and the reaper retries towards RELEASE_FAILED while the guest keeps running (review
+        REL-04). Returns True when the guest is (or was already) stopped, False on a failed stop."""
+        try:
+            status = self.power_state(vmid)
+        except Exception as exc:
+            log.debug("power-state read for vmid %s failed (%s) — attempting the stop anyway", vmid,
+                      type(exc).__name__, extra={"vmid": vmid})
+            status = None   # unknown: attempt the stop anyway (the pre-REL-04 behaviour)
+        if status == "stopped":
+            return True
         try:
             upid = self._post(f"/nodes/{self.node}/qemu/{vmid}/status/stop", {})
-            self.wait(upid, secs=60, on_progress=on_progress)
-        except Exception:
-            log.debug("best-effort stop of vmid %s failed (likely already stopped) — proceeding", vmid,
-                      extra={"vmid": vmid})
+            rc = self.wait(upid, secs=60, on_progress=on_progress)
+        except requests.HTTPError as exc:
+            code = exc.response.status_code if exc.response is not None else None
+            if code in (401, 403):
+                log.warning("stop of vmid %s DENIED by PVE ACL (%s): the br0kr token needs VM.PowerMgmt on /vms "
+                            "(e.g. the PVEVMAdmin role); the DELETE will fail while the guest runs", vmid, code,
+                            extra={"vmid": vmid, "http_status": code})
+            else:
+                log.warning("stop of vmid %s failed (HTTP %s) — proceeding to the DELETE", vmid, code,
+                            extra={"vmid": vmid, "http_status": code})
+            _count_stop_failure()
+            return False
+        except Exception as exc:
+            log.warning("stop of vmid %s failed (%s) — proceeding to the DELETE", vmid, type(exc).__name__,
+                        extra={"vmid": vmid})
+            _count_stop_failure()
+            return False
+        if rc != "OK":
+            log.warning("stop of vmid %s did not complete (task=%s; a backup lock or a hung QEMU?) — proceeding "
+                        "to the DELETE", vmid, rc, extra={"vmid": vmid, "task_rc": rc})
+            _count_stop_failure()
+            return False
+        return True
 
     def _stop_then_fenced_delete(self, vmid: int, recheck: Callable[[], str], what: str,
                                  extra: dict[str, Any] | None = None,
@@ -946,7 +1023,7 @@ class Pve:
                 orphans.append((vmid, rid))
         return orphans
 
-    def destroy_clone_orphan(self, vmid: int) -> str:
+    def destroy_clone_orphan(self, vmid: int, on_progress: Callable[[], None] | None = None) -> str:
         """Reclaim an UNFENCED template-clone, RE-CHECKING provenance under a fresh config read so the
         decision can't go stale: returns 'destroyed' only if the guest STILL carries the template marker,
         STILL has no lease fence, and is NOT itself a template; else 'gone' (absent), 'is_template' (a
@@ -964,7 +1041,8 @@ class Pve:
                 return "is_template"
             return clone_orphan_decision(True, fresh.get("tags"))
 
-        return self._stop_then_fenced_delete(vmid, _recheck, f"destroy_clone_orphan(vmid={vmid})")
+        return self._stop_then_fenced_delete(vmid, _recheck, f"destroy_clone_orphan(vmid={vmid})",
+                                             on_progress=on_progress)
 
     # ── operator-driven template DOWNLOAD/BUILD (phase A4.1; br0kr/imgbuild.py + the reconciler build flow) ──
     def download_image(self, storage: str, url: str, sha256: str, filename: str, *,

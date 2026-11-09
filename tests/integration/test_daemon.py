@@ -62,8 +62,9 @@ def wired(monkeypatch):
     def fake_provision(conn, driver, lid, *, name, vmid=None, cores=1, memory=512, extra_config=None,
                        template_vmid=None, cloud_init=None, full_clone=True, clone_storage=None,
                        req_disk_gb=0, placement_assert=True, clone_driver=None, clone_target=None,
-                       target_bridge=None, data_disk_plan=()):
+                       target_bridge=None, data_disk_plan=(), on_progress=None):
         rec["provisioned"].append((lid, name, cores, memory, extra_config))
+        rec.setdefault("provision_on_progress", {})[lid] = on_progress   # REL-02: the daemon's heartbeat
         rec.setdefault("clone_args", {})[lid] = (template_vmid, cloud_init, full_clone, clone_storage)
         rec.setdefault("req_disk_gb", {})[lid] = req_disk_gb   # the daemon threads the lease's reserved disk
         rec.setdefault("clone_route", {})[lid] = (clone_driver, clone_target)   # 0037 cross-node routing
@@ -165,6 +166,31 @@ def test_tick_provisions_each_admitted_lease_then_reaps(wired):
     assert wired["reap_calls"] == 1 and wired["sweep_calls"] == 0   # tick 1 is not a sweep tick
     assert summary.admitted_seen == 2 and summary.provisioned == 2
     assert summary.expired == 1 and summary.reaped == 2
+
+
+def test_tick_threads_its_heartbeat_into_provisioning_and_teardown(wired):
+    """The daemon hands its own _beat to provision_lease and to the reaper's routing destroyer (review REL-02).
+
+    Guards the liveness gap: a healthy clone (up to its 300 s task budget) ran with no heartbeat, so /healthz
+    read a working daemon as wedged; the destroyer half covers a slow stop + DELETE on the reaper path."""
+    wired["admitted"] = [AdmittedLease(5, "n1", 1.0, 512)]
+    d = _daemon()
+    d.tick(_FakeConn())
+    assert wired["provision_on_progress"][5] == d._beat
+    destroy_cells = [c.cell_contents for c in (d._destroyer.__closure__ or ())]
+    assert d._beat in destroy_cells
+
+
+def test_tick_reports_the_increase_in_failed_guest_stops(wired, monkeypatch):
+    """summary.stop_errors is the number of pre-DELETE stops that failed DURING this tick, read from the
+    process-wide pve counter (review REL-04), so /metrics counts each failure once, not cumulatively per tick."""
+    total = {"n": 7}
+    monkeypatch.setattr(daemon_mod.pve, "stop_failures_total", lambda: total["n"])
+    d = _daemon()
+    assert d.tick(_FakeConn()).stop_errors == 0      # failures from before the daemon started are not this tick's
+    total["n"] = 10
+    assert d.tick(_FakeConn()).stop_errors == 3
+    assert d.tick(_FakeConn()).stop_errors == 0
 
 
 def _patch_repl(monkeypatch, rec):

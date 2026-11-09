@@ -77,12 +77,12 @@ class UnreservedFakeDriver:
                 nid += 1
             return nid   # UNRESERVED — not marked taken until provision() records it
 
-    def provision(self, vmid, name, lease_id, *, cores=1, memory=512, extra_config=None) -> str:
+    def provision(self, vmid, name, lease_id, *, cores=1, memory=512, extra_config=None, on_progress=None) -> str:
         with self._lock:
             self.provisions.append((vmid, lease_id))
         return "OK"
 
-    def fenced_destroy(self, vmid, lease_id) -> None:
+    def fenced_destroy(self, vmid, lease_id, on_progress=None) -> None:
         with self._lock:
             self.destroys.append((vmid, lease_id))
 

@@ -32,11 +32,13 @@ class _FakeDriver:
         self.destroyed: list[tuple[int, int]] = []
         self.clone_destroyed: list[int] = []
         self.repl_destroyed: list[tuple[int, int]] = []
+        self.hooks: dict[str, object] = {}   # the on_progress each teardown verb received (REL-02)
 
     def list_fenced(self):
         return self._fenced
 
-    def fenced_destroy(self, vmid, lease_id) -> str:
+    def fenced_destroy(self, vmid, lease_id, on_progress=None) -> str:
+        self.hooks["fenced_destroy"] = on_progress
         self.destroyed.append((vmid, lease_id))
         if self.destroy_exc:
             raise self.destroy_exc
@@ -45,7 +47,8 @@ class _FakeDriver:
     def list_clone_orphans(self):
         return self._clone_orphans
 
-    def destroy_clone_orphan(self, vmid) -> str:
+    def destroy_clone_orphan(self, vmid, on_progress=None) -> str:
+        self.hooks["destroy_clone_orphan"] = on_progress
         self.clone_destroyed.append(vmid)
         if self.clone_destroy_exc:
             raise self.clone_destroy_exc
@@ -444,3 +447,18 @@ def test_on_progress_forwards_to_every_node_in_orphan_sweep_all(states):
     sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)], on_progress=lambda: beats.append(1))
     # each node: 1 (post-list_fenced) + 1 (classify) + 1 (destroy) = 3; two nodes = 6
     assert len(beats) == 6
+
+
+def test_sweep_threads_its_heartbeat_into_both_destroy_verbs(states):
+    """The orphan sweep passes its on_progress into fenced_destroy AND destroy_clone_orphan (review REL-02), so
+    a stop + DELETE that runs to its wait budgets during a sweep keeps the daemon's liveness fresh, as the
+    reaper's teardown already does. Guards the sweep being the one teardown path left un-heartbeated."""
+    states.update({6: "RELEASED"})
+    beats: list[int] = []
+
+    def beat() -> None:
+        beats.append(1)
+
+    d = _FakeDriver([(101, 6)], clone_orphans=[9901])
+    sweeper.orphan_sweep(object(), d, on_progress=beat)
+    assert d.hooks["fenced_destroy"] is beat and d.hooks["destroy_clone_orphan"] is beat

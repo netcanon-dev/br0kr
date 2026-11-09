@@ -266,6 +266,9 @@ class _StubPve(pve.Pve):
             self.stopped.append(int(path.split("/")[-3]))
         return "UPID:stop"
 
+    def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+        return "running"
+
     def _delete(self, path: str) -> Any:
         self.deleted.append(path)
         return "UPID:stub"
@@ -348,6 +351,9 @@ class _SeqStub(pve.Pve):
             self.stopped.append(int(path.split("/")[-3]))
         return "UPID"
 
+    def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+        return "running"
+
     def _delete(self, path: str) -> Any:
         self.deleted.append(path)
         return "UPID"
@@ -423,6 +429,9 @@ class _RcStub(pve.Pve):
 
     def _post(self, path: str, data: Any) -> Any:
         return "UPID:stop"
+
+    def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+        return "running"
 
     def _delete(self, path: str) -> Any:
         self.deleted.append(path)
@@ -511,6 +520,9 @@ class _ActuatorStub(pve.Pve):
         self.posts.append((path, data))
         return "UPID:post"
 
+    def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+        return "running"
+
     def _delete(self, path: str) -> Any:
         self.deletes.append(path)
         return "UPID:del"
@@ -548,6 +560,9 @@ def test_free_import_volume_deletes_the_source_maps_404_and_reraises_403():
         def __init__(self, result=None, exc=None, wait_rc="OK"):
             super().__init__("h", "n", "id", "sec")
             self._result, self._exc, self._wait_rc, self.deleted = result, exc, wait_rc, []
+
+        def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+            return "running"
 
         def _delete(self, path):
             self.deleted.append(path)
@@ -702,6 +717,9 @@ class _BuildStub(pve.Pve):
         if path.endswith("/status/stop"):
             self.stopped.append(int(path.split("/")[-3]))
         return "UPID:x"
+
+    def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+        return "running"
 
     def _delete(self, path: str) -> Any:
         self.deleted.append(path)
@@ -965,6 +983,9 @@ class _ReapStubPve(pve.Pve):
         super().__init__("h", "n", "id", "sec")
         self.deleted: list[str] = []
 
+    def power_state(self, vmid: int) -> str | None:   # REL-04 status read: a running guest
+        return "running"
+
     def _delete(self, path: str) -> Any:
         self.deleted.append(path)
         return None                     # a synchronous (null) result → 'freed'
@@ -1003,3 +1024,128 @@ def test_free_import_volume_deletes_a_genuine_broker_artifact():
     p = _ReapStubPve()
     assert p.free_import_volume("omv", "br0kr-ubuntu-noble-verify.qcow2") == "freed"
     assert p.deleted == ["/nodes/n/storage/omv/content/omv:import/br0kr-ubuntu-noble-verify.qcow2"]
+
+
+class _StopStub(pve.Pve):
+    """A Pve for the REL-04 pre-DELETE stop: a chosen power state, a stop POST that raises or returns a task,
+    and a wait that returns a chosen rc for the stop task (OK for every other task). Records every POST and the
+    on_progress each wait received."""
+
+    def __init__(self, state: str | None = "running", stop_exc: Exception | None = None,
+                 stop_rc: str = "OK") -> None:
+        super().__init__("h", "n", "id", "sec")
+        self.state, self.stop_exc, self.stop_rc = state, stop_exc, stop_rc
+        self.posts: list[str] = []
+        self.deleted: list[str] = []
+        self.hooks: list[object] = []
+
+    def power_state(self, vmid: int) -> str | None:
+        return self.state
+
+    def exists(self, vmid: int) -> bool:
+        return True
+
+    def read_tags(self, vmid: int) -> str | None:
+        return "br0kr-lease-5"
+
+    def _post(self, path: str, data: Any) -> Any:
+        self.posts.append(path)
+        if path.endswith("/status/stop") and self.stop_exc is not None:
+            raise self.stop_exc
+        return "UPID:stop" if path.endswith("/status/stop") else "UPID:task"
+
+    def _delete(self, path: str) -> Any:
+        self.deleted.append(path)
+        return "UPID:del"
+
+    def wait(self, upid: str, secs: int = 60, on_progress=None) -> str:
+        self.hooks.append(on_progress)
+        return self.stop_rc if upid == "UPID:stop" else "OK"
+
+
+def _http(code: int, text: str = "") -> requests.HTTPError:
+    r = requests.Response()
+    r.status_code = code
+    r._content = text.encode()
+    return requests.HTTPError(response=r)
+
+
+def test_stop_is_skipped_silently_for_an_already_stopped_guest(caplog):
+    """An already-stopped guest gets no stop call, no WARNING and no stop-failure count (review REL-04).
+    Guards the new status read turning every teardown of a stopped shell into log noise."""
+    before = pve.stop_failures_total()
+    p = _StopStub(state="stopped")
+    with caplog.at_level("WARNING"):
+        assert p.fenced_destroy(100, 5) == "destroyed"
+    assert not any(x.endswith("/status/stop") for x in p.posts)
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    assert pve.stop_failures_total() == before
+
+
+def test_stop_denied_by_pve_acl_warns_naming_the_grant_and_is_counted(caplog):
+    """A 403 on the stop of a running guest logs ONE WARNING naming VM.PowerMgmt and bumps the stop-failure
+    counter; the DELETE is still attempted (review REL-04).
+
+    Guards the old behaviour: every stop error was swallowed at DEBUG, so a missing VM.PowerMgmt grant showed
+    up only as a DELETE failure, the reaper's retries ended RELEASE_FAILED with the guest still running, and
+    the only line naming the cause was invisible at the default log level."""
+    before = pve.stop_failures_total()
+    p = _StopStub(stop_exc=_http(403, "Permission check failed (/vms/100, VM.PowerMgmt)"))
+    with caplog.at_level("WARNING"):
+        p.fenced_destroy(100, 5)
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "VM.PowerMgmt" in warnings[0]
+    assert pve.stop_failures_total() == before + 1
+    assert p.deleted == ["/nodes/n/qemu/100?purge=1&destroy-unreferenced-disks=1"]
+
+
+@pytest.mark.parametrize("stop_exc, stop_rc", [(_http(500, "VM is locked (backup)"), "OK"),
+                                               (None, "TIMEOUT")])
+def test_stop_that_fails_or_does_not_complete_warns_and_is_counted(stop_exc, stop_rc, caplog):
+    """A non-ACL stop error, or a stop task that does not finish OK (a backup lock, a hung QEMU), is a WARNING
+    and a counted stop failure, not a silent DEBUG line (review REL-04)."""
+    before = pve.stop_failures_total()
+    p = _StopStub(stop_exc=stop_exc, stop_rc=stop_rc)
+    with caplog.at_level("WARNING"):
+        p.fenced_destroy(100, 5)
+    assert any("stop of vmid 100" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert pve.stop_failures_total() == before + 1
+
+
+def test_unknown_power_state_still_attempts_the_stop():
+    """If the status read fails, the stop is attempted anyway: the pre-REL-04 behaviour, so a status-read blip
+    can never leave a running guest un-stopped before its DELETE."""
+    class _NoStatus(_StopStub):
+        def power_state(self, vmid: int) -> str | None:
+            raise requests.ConnectionError("blip")
+    p = _NoStatus()
+    p.fenced_destroy(100, 5)
+    assert any(x.endswith("/status/stop") for x in p.posts)
+
+
+def test_task_waits_receive_the_progress_hook():
+    """clone, start, provision and fenced_destroy hand on_progress to their task waits (review REL-02). Guards a
+    driver verb dropping the hook, which would let one slow PVE task starve the daemon's liveness heartbeat."""
+    beat = object()
+    p = _StopStub()
+    p.clone(9000, 101, "g", on_progress=beat)
+    p.start(101, on_progress=beat)
+    p.provision(101, "g", 5, on_progress=beat)
+    p.fenced_destroy(101, 5, on_progress=beat)
+    # clone, start, provision, then fenced_destroy's stop + DELETE waits
+    assert p.hooks == [beat] * 5
+
+
+def test_task_poll_refused_by_acl_is_named_once_then_times_out(monkeypatch, caplog):
+    """A 401/403 on every task-status poll (the token lacks Sys.Audit on /nodes/<node>) logs ONE WARNING naming
+    the grant and still ends TIMEOUT after the budget (review UX-06 follow-up). Guards that gap surfacing only
+    as a 300 s clone timeout, the one ACL refusal the provision path could not otherwise name."""
+    class _Refused(pve.Pve):
+        def _get(self, path: str) -> Any:
+            raise _http(403, "Permission check failed (/nodes/n, Sys.Audit)")
+    monkeypatch.setattr(pve.time, "sleep", lambda _s: None)
+    p = _Refused("h", "n", "id", "sec")
+    with caplog.at_level("WARNING"):
+        assert p.wait("UPID:x", secs=4) == "TIMEOUT"
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "Sys.Audit" in warnings[0]

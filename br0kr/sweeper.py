@@ -239,7 +239,7 @@ def orphan_sweep(
             if dry_run:
                 continue
             try:
-                rc = driver.destroy_clone_orphan(vmid)
+                rc = driver.destroy_clone_orphan(vmid, on_progress=on_progress)
             except Exception:
                 summary.errors += 1
                 log.exception("clone-orphan reclaim failed for vmid %s — will retry next sweep", vmid,
@@ -322,7 +322,7 @@ def orphan_sweep(
             if dry_run:
                 continue
             try:
-                rc = driver.fenced_destroy(vmid, lease_id)
+                rc = driver.fenced_destroy(vmid, lease_id, on_progress=on_progress)
             except Exception:
                 summary.errors += 1
                 log.exception("orphan destroy failed for vmid %s (lease %s) — will retry next sweep",

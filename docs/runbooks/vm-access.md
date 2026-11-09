@@ -216,6 +216,8 @@ click. See SECURITY.md (dashboard write-surface control) and `br0kr/actas.py`.
 | a key request provisioned a keyless shell | `BR0KR_VM_TEMPLATE` is unset on the daemon (see the warning in its log) |
 | a stray VM left after a daemon crash mid-clone | the template wasn't tagged `br0kr-template`; reclaim it by hand, then add the tag |
 | clone fails immediately | linked clone (`BR0KR_VM_FULL_CLONE=0`) on a storage that can't linked-clone — use full, or a zfs/lvm-thin/qcow2 storage |
+| lease ends with `released_reason` `provision_acl_denied` | the broker's PVE token lacks a privilege for the clone (most often `Datastore.AllocateSpace` on the target pool or `SDN.Use` on the bridge's zone); the daemon's ERROR line quotes PVE's privilege. Grant the four ACLs in [docker-deploy.md §7](docker-deploy.md#7-operating) |
+| lease ends with `released_reason` `template_vmid_missing` | the catalog template's vmid does not exist on the node that clones it (deleted, renumbered, or never replicated there); re-point the catalog entry or rebuild the template |
 
 ## See also
 - [connecting-an-agent.md](connecting-an-agent.md) — pointing an MCP client at the gateway + minting the token, the step before this one

@@ -38,19 +38,25 @@ class _FakeDriver:
         self.grew: list[tuple[int, int]] = []
         self.started: list[int] = []
         self.seq: list[str] = []   # global call order, so the grow's clone→configure→grow→start slot is tested
+        self.hooks: dict[str, object] = {}   # the on_progress each PVE-waiting call received (REL-02)
+        self.clone_exc: Exception | None = None   # raise from clone (the UX-06 HTTP-error classification)
 
     def nextid(self) -> int:
         return 9001
 
-    def provision(self, vmid, name, lease_id, cores=1, memory=512, extra_config=None) -> str:
+    def provision(self, vmid, name, lease_id, cores=1, memory=512, extra_config=None, on_progress=None) -> str:
+        self.hooks["provision"] = on_progress
         self.provisioned.append((vmid, lease_id))
         if self.provision_exc:
             raise self.provision_exc
         return self.create_rc
 
-    def clone(self, template_vmid, new_vmid, name, full=True, storage=None, target=None) -> str:
+    def clone(self, template_vmid, new_vmid, name, full=True, storage=None, target=None, on_progress=None) -> str:
         self.seq.append("clone")
+        self.hooks["clone"] = on_progress
         self.cloned.append((template_vmid, new_vmid, name, full, storage, target))
+        if self.clone_exc:
+            raise self.clone_exc
         return self.clone_rc
 
     def configure(self, vmid, config) -> None:
@@ -59,15 +65,17 @@ class _FakeDriver:
         if self.configure_exc:
             raise self.configure_exc
 
-    def grow_boot_disk(self, vmid, req_gb) -> str | None:
+    def grow_boot_disk(self, vmid, req_gb, on_progress=None) -> str | None:
         self.seq.append("grow")
+        self.hooks["grow"] = on_progress
         self.grew.append((vmid, req_gb))
         if self.grow_exc:
             raise self.grow_exc
         return "scsi0"
 
-    def start(self, vmid, secs=120) -> str:
+    def start(self, vmid, secs=120, on_progress=None) -> str:
         self.seq.append("start")
+        self.hooks["start"] = on_progress
         self.started.append(vmid)
         return self.start_rc
 
@@ -80,7 +88,8 @@ class _FakeDriver:
     def agent_network_interfaces(self, vmid):
         return self.agent_result
 
-    def fenced_destroy(self, vmid, lease_id) -> str:
+    def fenced_destroy(self, vmid, lease_id, on_progress=None) -> str:
+        self.hooks["fenced_destroy"] = on_progress
         self.destroyed.append((vmid, lease_id))
         if self.destroy_exc:
             raise self.destroy_exc
@@ -814,3 +823,104 @@ def test_build_template_size_read_exception_fails_closed_and_destroys(monkeypatc
     out = reconciler.build_template(object(), d, _job(project_id="projX", size_gb=5), node_id="nA")
     assert out.state == "size_read_error" and out.vmid == 9500
     assert ("destroy", 9500, 5) in d.calls and "finalize" not in [c[0] for c in d.calls]
+
+
+def _beat_hook():
+    """A stand-in for the daemon's _beat: a distinct callable the tests can recognise by identity."""
+    def beat() -> None:
+        return None
+    return beat
+
+
+def test_provision_threads_the_heartbeat_into_every_clone_path_wait(cas):
+    """provision_lease passes on_progress to clone, boot-disk grow and start (review REL-02).
+
+    Guards the daemon reading as wedged on /healthz during a healthy slow clone: those three PVE task waits
+    (up to 300 s, 120 s, 120 s) previously ran with no heartbeat, so a clone longer than the stall window
+    tripped liveness and, under an autohealer, got the daemon killed mid-clone."""
+    beat = _beat_hook()
+    d = _FakeDriver()
+    out = reconciler.provision_lease(object(), d, 5, name="br0kr-5", template_vmid=9000, cloud_init={},
+                                     req_disk_gb=20, on_progress=beat)
+    assert out.state == "active"
+    assert d.hooks["clone"] is beat and d.hooks["grow"] is beat and d.hooks["start"] is beat
+
+
+def test_provision_threads_the_heartbeat_into_the_create_wait(cas):
+    """The create-blank path (no template) passes on_progress to driver.provision too (review REL-02)."""
+    beat = _beat_hook()
+    d = _FakeDriver()
+    reconciler.provision_lease(object(), d, 5, name="br0kr-5", on_progress=beat)
+    assert d.hooks["provision"] is beat
+
+
+def test_routing_destroyer_threads_the_heartbeat_into_the_teardown(cas):
+    """make_routing_destroyer passes its on_progress into fenced_destroy, so the stop + DELETE task waits of
+    one slow reaper teardown keep the daemon's liveness fresh (review REL-02)."""
+    beat = _beat_hook()
+    d = _FakeDriver()
+    reg = nodes.NodeRegistry({"n1": d})
+    destroy = reconciler.make_routing_destroyer(reg, on_progress=beat)
+    destroy(lease.ClaimedLease(5, "n1", 9001, "br0kr-5", 1))
+    assert d.destroyed == [(9001, 5)] and d.hooks["fenced_destroy"] is beat
+
+
+def _http_error(code: int, text: str) -> requests.HTTPError:
+    resp = requests.Response()
+    resp.status_code = code
+    resp._content = text.encode()
+    return requests.HTTPError(f"{code} error", response=resp)
+
+
+def test_clone_refused_by_pve_acl_is_released_as_provision_acl_denied(cas, caplog):
+    """A 401/403 from PVE on the clone is released with released_reason='provision_acl_denied', and the
+    ERROR line points at the pveum grants (review UX-06).
+
+    Guards the most likely first-run failure (a missing Datastore.AllocateSpace / SDN.Use grant) reaching
+    the agent as a generic 'provision_error' and the operator as a bare traceback."""
+    d = _FakeDriver()
+    d.clone_exc = _http_error(403, "Permission check failed (/storage/FastStorage, Datastore.AllocateSpace)")
+    with caplog.at_level("ERROR"):
+        out = reconciler.provision_lease(object(), d, 5, name="br0kr-5", template_vmid=9000, cloud_init={})
+    assert out.state == "provision_acl_denied"
+    assert cas["released"] == [(5, "provision_acl_denied")]
+    msg = " ".join(r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+    assert "pveum" in msg and "Datastore.AllocateSpace" in msg
+    assert d.configured == [] and d.started == []
+
+
+def test_clone_of_a_missing_template_is_released_as_template_vmid_missing(cas):
+    """A clone whose SOURCE template does not exist is released as 'template_vmid_missing' (review UX-06).
+    PVE answers 500 naming the template's config file; the template vmid must appear in the message."""
+    d = _FakeDriver()
+    d.clone_exc = _http_error(500, "Configuration file 'nodes/n1/qemu-server/9000.conf' does not exist")
+    out = reconciler.provision_lease(object(), d, 5, name="br0kr-5", template_vmid=9000, cloud_init={})
+    assert out.state == "template_vmid_missing"
+    assert cas["released"] == [(5, "template_vmid_missing")]
+
+
+def test_other_pve_http_errors_stay_provision_error(cas):
+    """An HTTP error that is neither an ACL refusal nor the missing template keeps 'provision_error', including
+    a 'does not exist' that names a DIFFERENT vmid (not the template). Guards the classifier over-claiming."""
+    for err in (_http_error(500, "got timeout"),
+                _http_error(500, "Configuration file 'nodes/n1/qemu-server/9001.conf' does not exist")):
+        cas["released"].clear()
+        d = _FakeDriver()
+        d.clone_exc = err
+        out = reconciler.provision_lease(object(), d, 5, name="br0kr-5", template_vmid=9000, cloud_init={})
+        assert out.state == "provision_error"
+        assert cas["released"] == [(5, "provision_error")]
+
+
+def test_missing_template_match_needs_the_whole_vmid(cas):
+    """Template 100 must not match a missing NEW guest 1001 (its id merely starts with the template's), while
+    template 100's own missing config still classifies as template_vmid_missing. Guards a substring match
+    telling the operator to rebuild a template that is fine."""
+    cases = [("Configuration file 'nodes/n1/qemu-server/1001.conf' does not exist", "provision_error"),
+             ("Configuration file 'nodes/n1/qemu-server/100.conf' does not exist", "template_vmid_missing")]
+    for text, want in cases:
+        cas["released"].clear()
+        d = _FakeDriver()
+        d.clone_exc = _http_error(500, text)
+        out = reconciler.provision_lease(object(), d, 5, name="br0kr-5", template_vmid=100, cloud_init={})
+        assert out.state == want, text

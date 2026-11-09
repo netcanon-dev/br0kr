@@ -70,6 +70,26 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **Name-coincidence bridge SUGGESTIONS in `discover_reachability` — the LAST PR-D-backlog feature of the storage/network auto-discovery arc, the one the design deferred as "a footgun with a label" (design §6; `br0kr/placement.py`, `br0kr/mcp_server.py`).** Why: an operator extending a `logical_network` across the fleet had to hand-type each node's PVE bridge into `set_network_node`; the discovery report surfaced only a raw per-node `bridge_menu`, no help. Now `discover_reachability` gains a `bridge_suggestions` bucket: for a served node that has NO `network_node` row for a logical net L which IS declared (un-quarantined) elsewhere, if the node PRESENTS a bridge whose NAME matches one already mapped to L, it emits a `{node_id, logical_network_id, bridge, basis:"name_coincidence", also_declared_on:[nodes]}` HINT — a prefill for the operator's `set_network_node` confirm. **Built WITH the label ON: it is NEVER a mapping proposal.** Which L2 a bridge realises is UNOBSERVABLE from PVE, so same-name ≠ same-L2 — the exact wrong-L2 footgun 0039 closed by keying placement on the logical IDENTITY, not the raw name. So each entry is tagged `basis:"name_coincidence"` (+ `cross_cluster` when the evidence spans clusters), and the operator VERIFIES the L2 OUT OF BAND before confirming (the trust boundary — discovery never writes). **That verification is the ONLY defense against a wrong suggestion: the post-clone net0 assertion does NOT catch a same-name/wrong-L2 confirm — it fails only on bridge ABSENCE, and a name-coincidence bridge is present by construction.** The name basis is further restricted to a declaration that is un-quarantined AND live-present on its declaring node (an un-quarantined-but-PVE-absent declaration is `declared_missing_bridge`, a mapping PVE contradicts — not evidence). **REPORT-ONLY and NOT a drift bucket:** it is excluded from the 0043 cadence `discovery_drift` gauge and the PR-H dismissal roster (a suggestion is a hint, not drift; it vanishes the moment the operator declares or the coincidence goes away). A QUARANTINED declaration is NEVER a name basis (a known-broken mapping), and a node already holding a row for L (even a different bridge) is excluded (a re-point, not a widen). Computed from the per-node declarations discovery already reads — **no new query, NO migration.** Dismissability is deferred (mirroring the cadence-sidecar restraint — added only if re-proposal noise is demonstrated). Proven: `tests/unit/test_placement.py` (a name-coincidence hint fires report-only + excludes the already-declared node; no basis / no name-match → no hint; a quarantined declaration is not a basis) + `scripts/harness_discovery.py` §L (real-PG: n2 presents a `vmbr0` matching n1's declared `lan=vmbr0` → one `basis:"name_coincidence"` hint, `also_declared_on:[n1]`, writing nothing). This closes the storage/network auto-discovery arc's PR-D backlog.
 
 ### Fixed
+- **A healthy slow clone no longer reads as a wedged daemon (`br0kr/pve.py`, `br0kr/reconciler.py`,
+  `br0kr/daemon.py`).** Why: `pve.clone` (up to 300 s), `grow_boot_disk` and `start` (120 s each) and the
+  create wait ran with no liveness heartbeat, so a clone longer than the stall window turned `/healthz` 503 on a
+  working daemon, and an autohealer would kill it mid-clone. The daemon's `_beat` is now threaded into every PVE
+  task wait on the provision path and into the reaper's and the orphan sweep's destroys (`on_progress`), and the comment on the
+  stall bound states what it really bounds (review REL-02).
+- **A refused guest stop before a teardown is visible and counted (`br0kr/pve.py`, `br0kr/daemon.py`).** Why:
+  the pre-DELETE stop swallowed every error at DEBUG, so a missing `VM.PowerMgmt` grant, a backup lock or a hung
+  QEMU showed up only as DELETE failures until the reaper gave up at `RELEASE_FAILED` with the guest still
+  running. The stop now reads the power state first (an already-stopped guest is skipped silently), logs a
+  WARNING with the HTTP status or task rc (naming `VM.PowerMgmt` on a 401/403), and counts each failure in the
+  new `stop_errors` tick counter (`br0kr_stop_errors_total` on `/metrics`) (review REL-04).
+- **A PVE permission refusal or a missing template at clone time is named (`br0kr/reconciler.py`).** Why: both
+  first-run failures ended as a generic `provision_error` and a traceback. A 401/403 on the provision path now
+  releases the lease with `released_reason = provision_acl_denied` and an ERROR quoting PVE's privilege and the
+  pveum grants; a clone whose source template vmid does not exist releases as `template_vmid_missing`. A task
+  poll refused with 401/403 (the token lacks `Sys.Audit` on the node) is named in one WARNING instead of
+  surfacing only as a clone timeout.
+  `docs/runbooks/vm-access.md` §6 and `docker-deploy.md` §7 describe both (review UX-06; its dashboard half
+  ships with the UI work).
 - **A routine redeploy can no longer take the stack down (`scripts/deploy.sh` NEW, `docker-compose.yml`,
   `docker-compose.tls.yml`, `.env.example`).** Why: both recorded outages of the reference deployment came
   from a hand-typed redeploy, and the only guard was a runbook paragraph. A command that named fewer

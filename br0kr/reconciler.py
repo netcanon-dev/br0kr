@@ -48,6 +48,7 @@ whose lease is terminal/absent.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -114,14 +115,43 @@ def _release_to_reaper(conn: psycopg.Connection[Any], lease_id: int, reason: str
         log.exception("could not release lease %s to the reaper", lease_id, extra={"lease_id": lease_id})
 
 
-def _best_effort_destroy(driver: pve.Pve, vmid: int, lease_id: int) -> None:
+def _http_detail(exc: requests.HTTPError) -> str:
+    """PVE's error text for a failed call, trimmed for a log line / an outcome detail. Never a secret: PVE error
+    bodies name paths and privileges, not credentials."""
+    resp = exc.response
+    text = (resp.text if resp is not None else "") or str(exc)
+    return " ".join(text.split())[:300]
+
+
+_MISSING_VM_MARKERS = ("does not exist", "unable to find configuration file", "no such vm")
+
+
+def _provision_http_reason(exc: requests.HTTPError, *, template_vmid: int | None) -> str:
+    """Classify an HTTP error raised on the provision path into a `released_reason` (review UX-06):
+    ``provision_acl_denied`` for a 401/403; ``template_vmid_missing`` for a clone whose SOURCE template is gone
+    (PVE answers 404, or 500 "Configuration file 'nodes/<n>/qemu-server/<template>.conf' does not exist"; the
+    message must name the template vmid, so a missing NEW guest is not mistaken for it); else the generic
+    ``provision_error``."""
+    code = exc.response.status_code if exc.response is not None else None
+    if code in (401, 403):
+        return "provision_acl_denied"
+    detail = _http_detail(exc).lower()
+    # The vmid must appear as a WHOLE number: template 100 must not match the new guest's '.../1001.conf'.
+    names_template = template_vmid is not None and re.search(rf"(?<!\d){template_vmid}(?!\d)", detail)
+    if names_template and code in (404, 500) and any(m in detail for m in _MISSING_VM_MARKERS):
+        return "template_vmid_missing"
+    return "provision_error"
+
+
+def _best_effort_destroy(driver: pve.Pve, vmid: int, lease_id: int,
+                         on_progress: Callable[[], None] | None = None) -> None:
     """Fenced-destroy a guest with a bounded retry, swallowing the final error. Used
     ONLY where the reaper can no longer own teardown (lease already terminal). If every
     retry fails the guest may orphan — logged loudly; the orphan sweep (roadmap #8) is
     the backstop."""
     for _ in range(_CLEANUP_RETRIES):
         try:
-            driver.fenced_destroy(vmid, lease_id)
+            driver.fenced_destroy(vmid, lease_id, on_progress=on_progress)
             return
         except pve.DeleteTaskFailed:
             # A server-side DELETE failure/timeout won't clear on an immediate inline retry, and hammering
@@ -265,6 +295,7 @@ def _build_via_clone(
     *, clone_driver: pve.Pve | None = None, clone_target: str | None = None,
     target_bridge: str | None = None,
     data_disk_plan: tuple[placement.DataDiskTarget, ...] = (),
+    on_progress: Callable[[], None] | None = None,
 ) -> CloneBuild:
     """Build a guest by CLONING a cloud-init template, returning a ``CloneBuild`` whose ``rc`` is the exitstatus
     the same way `driver.provision` does: 'OK' (cloned, configured, started), 'TIMEOUT' (clone/start still
@@ -309,7 +340,7 @@ def _build_via_clone(
     # with the per-disk landing during the MVP. A single-disk lease keeps ``full_clone`` verbatim (byte-identical).
     full = full_clone or bool(data_disk_plan)
     rc = (clone_driver or driver).clone(template_vmid, vmid, name, full=full,
-                                        storage=clone_storage, target=clone_target)
+                                        storage=clone_storage, target=clone_target, on_progress=on_progress)
     if rc != "OK":
         # clone failed / still running: no guest, a partial clone, or one still being copied. Surface the
         # rc; the caller leaves PROVISIONING (TIMEOUT) or releases (other). The marker reclaim is the
@@ -361,7 +392,7 @@ def _build_via_clone(
     if req_disk_gb > 0:
         # Grow the (fenced, stopped) clone's boot disk to the reserved size. grow_boot_disk is grow-only and
         # self-skips when the request already fits; a non-OK resize task raises → release to the reaper.
-        driver.grow_boot_disk(vmid, req_disk_gb)
+        driver.grow_boot_disk(vmid, req_disk_gb, on_progress=on_progress)
     # Multi-disk ATTACH (PR-4) — the tenant DATA disks, created on the fenced/stopped guest AFTER the boot disk
     # is grown and BEFORE start (a disk is attached while stopped). The boot device is captured on the CLEAN
     # pre-attach config so the caller's boot assertion can't be polluted by a data disk at scsiN (§8 #1). Empty
@@ -371,7 +402,8 @@ def _build_via_clone(
     data_disk_devices: tuple[tuple[int, str, str], ...] = ()
     if data_disk_plan:
         boot_device, data_disk_devices = _attach_data_disks(driver, vmid, lease_id, data_disk_plan)
-    return CloneBuild(driver.start(vmid), boot_device=boot_device, data_disk_devices=data_disk_devices)
+    return CloneBuild(driver.start(vmid, on_progress=on_progress), boot_device=boot_device,
+                      data_disk_devices=data_disk_devices)
 
 
 @dataclass(frozen=True)
@@ -749,6 +781,7 @@ def provision_lease(
     clone_target: str | None = None,
     target_bridge: str | None = None,
     data_disk_plan: tuple[placement.DataDiskTarget, ...] = (),
+    on_progress: Callable[[], None] | None = None,
 ) -> ProvisionOutcome:
     """Take an ADMITTED lease to an ACTIVE, fenced guest. Exception-safe: any failure
     after begin_provisioning hands durable teardown to the reaper. See module docstring
@@ -775,7 +808,11 @@ def provision_lease(
     the placement lockstep). When non-empty, ``_build_via_clone`` attaches each as a NEW ``qm set scsiN`` volume
     on the fenced/stopped guest before start, asserts it landed on its pool, and returns the attached device
     keys — carried into the ACTIVE outcome so the daemon late-stamps them onto the ``lease_data_disk`` rows +
-    marks each pool verified. Empty (the default / a single-disk lease) = no attach, byte-identical to before."""
+    marks each pool verified. Empty (the default / a single-disk lease) = no attach, byte-identical to before.
+
+    ``on_progress`` (the daemon's liveness heartbeat) is threaded into every PVE task wait on this path (clone,
+    boot-disk grow, start, create, and an inline cleanup destroy), so a healthy slow clone never reads as a
+    wedged daemon on /healthz (review REL-02)."""
     if vmid is None:
         vmid = driver.nextid()
 
@@ -802,10 +839,12 @@ def provision_lease(
             build = _build_via_clone(driver, template_vmid, vmid, name, lease_id, cores, memory,
                                      cloud_init, full_clone, clone_storage, req_disk_gb,
                                      clone_driver=clone_driver, clone_target=clone_target,
-                                     target_bridge=target_bridge, data_disk_plan=data_disk_plan)
+                                     target_bridge=target_bridge, data_disk_plan=data_disk_plan,
+                                     on_progress=on_progress)
             rc = build.rc
         else:
-            rc = driver.provision(vmid, name, lease_id, cores=cores, memory=memory, extra_config=extra_config)
+            rc = driver.provision(vmid, name, lease_id, cores=cores, memory=memory, extra_config=extra_config,
+                                  on_progress=on_progress)
     except pve.DataDiskMisplaced as exc:
         # The multi-disk per-disk landed-where assertion (PR-4) found a tenant DATA disk on a DIFFERENT pool than
         # it was created on (near-impossible — a `qm set` volume is created in place). The guest is FENCED
@@ -833,6 +872,28 @@ def provision_lease(
         _release_to_reaper(conn, lease_id, "network_unreachable_detected")
         return ProvisionOutcome(lease_id, vmid, "network_unreachable_detected", str(exc),
                                 missing_bridge=exc.bridge)
+    except requests.HTTPError as exc:
+        # The two first-run failures an operator can fix, named instead of left in a traceback (review UX-06):
+        # a PVE ACL refusal (401/403) and a template vmid that does not exist on the cloning node. Anything
+        # else from PVE keeps the generic provision_error. Either way the guest (if any) is released to the
+        # reaper, exactly like the generic path.
+        reason = _provision_http_reason(exc, template_vmid=template_vmid)
+        code = exc.response.status_code if exc.response is not None else None
+        if reason == "provision_acl_denied":
+            log.error("provision DENIED by PVE ACL (%s) for lease %s vmid %s: the br0kr token lacks a privilege on "
+                      "this clone/create — grant the four ACLs in docker-deploy.md §7 (pveum acl modify /vms, "
+                      "/storage/<pool>, /sdn/zones/localnetwork, /nodes/<node>); PVE said: %s", code, lease_id,
+                      vmid, _http_detail(exc), extra={"lease_id": lease_id, "vmid": vmid, "http_status": code})
+        elif reason == "template_vmid_missing":
+            log.error("provision failed for lease %s: template vmid %s does not exist on the cloning node (HTTP "
+                      "%s) — re-point the catalog entry or rebuild the template; PVE said: %s", lease_id,
+                      template_vmid, code, _http_detail(exc),
+                      extra={"lease_id": lease_id, "vmid": vmid, "http_status": code})
+        else:
+            log.exception("provision raised for lease %s vmid %s", lease_id, vmid,
+                          extra={"lease_id": lease_id, "vmid": vmid})
+        _release_to_reaper(conn, lease_id, reason)
+        return ProvisionOutcome(lease_id, vmid, reason, f"HTTP {code}: {_http_detail(exc)}")
     except Exception as exc:
         log.exception("provision raised for lease %s vmid %s", lease_id, vmid,
                       extra={"lease_id": lease_id, "vmid": vmid})
@@ -910,7 +971,7 @@ def provision_lease(
             return ProvisionOutcome(lease_id, vmid, "reaped_during_provision", "reaper owns teardown")
         log.warning("lease %s reached %s during create — best-effort destroying guest %s",
                     lease_id, state, vmid, extra={"lease_id": lease_id, "vmid": vmid})
-        _best_effort_destroy(driver, vmid, lease_id)
+        _best_effort_destroy(driver, vmid, lease_id, on_progress=on_progress)
         return ProvisionOutcome(lease_id, vmid, "reaped_during_provision", f"lease {state}; cleaned up")
 
     log.info("lease %s ACTIVE on vmid %s", lease_id, vmid, extra={"lease_id": lease_id, "vmid": vmid})
@@ -943,7 +1004,8 @@ def discover_and_stamp_ip(
     return ip if lease.set_ip_address(conn, lease_id, ip) else None
 
 
-def make_destroyer(driver: pve.Pve) -> Callable[[lease.ClaimedLease], None]:
+def make_destroyer(driver: pve.Pve,
+                   on_progress: Callable[[], None] | None = None) -> Callable[[lease.ClaimedLease], None]:
     """The reaper's `destroy` callback bound to a fenced driver: it fenced-destroys
     `claimed.vmid` under `claimed.id`, so a reused vmid is refused (`fence_mismatch`)
     and the reaper settles the lease without touching another lease's guest. Use this for
@@ -951,12 +1013,13 @@ def make_destroyer(driver: pve.Pve) -> Callable[[lease.ClaimedLease], None]:
 
     def destroy(claimed: lease.ClaimedLease) -> None:
         if claimed.vmid is not None:   # the reaper already skips null-vmid, but be defensive
-            driver.fenced_destroy(claimed.vmid, claimed.id)
+            driver.fenced_destroy(claimed.vmid, claimed.id, on_progress=on_progress)
 
     return destroy
 
 
-def make_routing_destroyer(registry: nodes.NodeRegistry) -> Callable[[lease.ClaimedLease], None]:
+def make_routing_destroyer(registry: nodes.NodeRegistry,
+                           on_progress: Callable[[], None] | None = None) -> Callable[[lease.ClaimedLease], None]:
     """The multi-node reaper destroy callback: route each lease's teardown to ITS node's
     driver (`claimed.node_id`), then fenced-destroy under `claimed.id`. The reaper claims
     releasing leases across ALL nodes, so the destroyer must pick the right driver.
@@ -964,7 +1027,10 @@ def make_routing_destroyer(registry: nodes.NodeRegistry) -> Callable[[lease.Clai
     RAISES if the lease's node has no driver (deregistered / capacity-only / a credential
     this daemon lacks): that surfaces as a reaper destroy_error and, after retries, a loud
     `RELEASE_FAILED` — the guest can't be torn down by this daemon, so it must not be
-    silently dropped from the ledger while the real VM lives on."""
+    silently dropped from the ledger while the real VM lives on.
+
+    ``on_progress`` (the daemon's heartbeat) is passed into each fenced destroy, so the stop + DELETE task waits
+    of one slow teardown keep /healthz fresh; the reaper also beats between leases (review REL-02)."""
 
     def destroy(claimed: lease.ClaimedLease) -> None:
         if claimed.vmid is None:   # the reaper already skips null-vmid, but be defensive
@@ -975,6 +1041,6 @@ def make_routing_destroyer(registry: nodes.NodeRegistry) -> Callable[[lease.Clai
                 f"no driver for node {claimed.node_id!r} — cannot tear down lease {claimed.id} "
                 f"(vmid {claimed.vmid}); node deregistered or this daemon lacks its credentials"
             )
-        driver.fenced_destroy(claimed.vmid, claimed.id)
+        driver.fenced_destroy(claimed.vmid, claimed.id, on_progress=on_progress)
 
     return destroy

@@ -66,14 +66,14 @@ class FakeDriver:
             return v
 
     def provision(self, vmid: int, name: str, lease_id: int, *, cores: int = 1, memory: int = 512,
-                  extra_config: dict | None = None) -> str:
+                  extra_config: dict | None = None, on_progress=None) -> str:
         with self._lock:
             if vmid in self._fleet:                       # SAFETY FAILURE: two guests on one vmid
                 self.double_alloc = (vmid, self._fleet[vmid], lease_id)
             self._fleet[vmid] = lease_id
         return "OK"
 
-    def fenced_destroy(self, vmid: int, lease_id: int) -> str:
+    def fenced_destroy(self, vmid: int, lease_id: int, on_progress=None) -> str:
         with self._lock:
             self._fleet.pop(vmid, None)
         return "destroyed"

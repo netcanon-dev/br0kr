@@ -229,6 +229,12 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
     pveum user token add br0kr@pve prod --privsep 0        # prints the secret ONCE → put it in PVE_TOKEN_SECRET
     pveum user permissions br0kr@pve                       # VERIFY: lists the four ACL paths + inherited privs
     ```
+    **When a grant is missing**, the broker names it instead of leaving it in a traceback: a clone or create
+    refused with 401/403 releases the lease with `released_reason = provision_acl_denied` (what the agent sees in
+    `lease_status`) and logs an ERROR quoting PVE's privilege and pointing back here; a clone from a template
+    vmid that no longer exists releases with `template_vmid_missing`. A pre-DELETE stop the token may not perform
+    (`VM.PowerMgmt`, part of `PVEVMAdmin`) logs a WARNING naming the grant and counts in
+    `br0kr_stop_errors_total` on the daemon's `/metrics`; an already-stopped guest is skipped silently.
     (If you additionally enable the operator template-DOWNLOAD / BUILD path — `BR0KR_BUILD_LIMIT>0`, off by
     default — that token needs TWO more grants for the `download-url` import; the set above covers only lease
     provisioning. PVE 8.4's download-url gates on an **AND**: `Datastore.AllocateTemplate` on `/storage/<pool>`
@@ -356,7 +362,8 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
 - **Health, readiness & metrics.** The daemon serves a small HTTP surface on `BR0KR_HEALTH_PORT`
   (default `9090`; `0` disables): **`/healthz`** liveness (a leader whose reconcile loop wedged returns
   503 → Compose/k8s restarts it, a standby takes over; it does NO ledger I/O so a ledger blip never
-  restart-loops the daemon), **`/readyz`** readiness (200 only on the *active* reconciler — leader +
+  restart-loops the daemon; the loop heartbeats once per poll inside every PVE task wait on the provision
+  and teardown paths, so a slow but healthy clone never reads as wedged), **`/readyz`** readiness (200 only on the *active* reconciler — leader +
   ledger reachable + not stalled + its tick isn't failing every pass; a leader whose reconcile tick *raises*
   a few times in a row reads **not_ready** even though the thread stays alive, since it holds the lock but
   reconciles nothing; a standby is alive-but-not-ready, so with `--scale daemon=2` exactly one is ready), and

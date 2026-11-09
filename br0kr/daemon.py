@@ -167,6 +167,9 @@ class TickSummary:
     migrations_advanced: int = field(default=0, metadata=_COUNTER)
     # operator_audit rows deleted by the retention prune this tick (0024; 0 = off/none)
     audit_pruned: int = field(default=0, metadata=_COUNTER)
+    # pre-DELETE guest stops that FAILED on a running guest this tick, on any teardown path (reaper, sweep,
+    # build/replica destroyers): the root cause of a teardown stuck towards RELEASE_FAILED (review REL-04)
+    stop_errors: int = field(default=0, metadata=_COUNTER)
     # 0033: templated leases the placement re-check HELD this tick (new-hold edges)
     placement_holds: int = field(default=0, metadata=_COUNTER)
     # held leases auto-released after the bounded blocked re-check ceiling
@@ -301,11 +304,15 @@ class Daemon:
         self.health_host = health_host
         self.health_port = health_port   # 0 disables the health/metrics server
         # If the loop hasn't stamped PROGRESS within this window it's treated as wedged by the
-        # liveness/readiness probes. Progress is stamped per loop-iteration AND before each per-item PVE
-        # call (each provision, each reap destroy, each sweep destroy) + on every leader-(re)connect
-        # attempt — so this bounds a SINGLE blocking PVE step (~the create/wait budget, ~2 min), NOT a
-        # whole tick, a big reap/sweep batch, or a ledger outage we're riding out. The floor is generous.
+        # liveness/readiness probes. Progress is stamped per loop-iteration, before each per-item PVE call
+        # (each provision, each reap destroy, each sweep destroy), on every leader-(re)connect attempt, AND
+        # once per poll inside every PVE task wait on the provision and teardown paths (clone, boot-disk
+        # grow, start, create, stop, DELETE: `on_progress=self._beat`, review REL-02). So the window bounds
+        # one PVE API round trip or one task poll interval, NOT a whole clone (up to its 300 s budget), a
+        # tick, a big reap/sweep batch, or a ledger outage we're riding out. The floor is generous.
         self._stall_after = max(180.0, interval * 12)
+        # pve.stop_failures_total() at the end of the previous tick, so each tick reports its own increase.
+        self._stop_failures_seen = pve.stop_failures_total()
         # A leader whose tick RAISES this many times IN A ROW reads not_ready on /readyz (review S05). The
         # loop-top _beat() keeps the progress stamp fresh even on a raising tick, so the stall check alone
         # can't see a leader that holds the lock but reconciles nothing; this streak makes readiness honest.
@@ -393,7 +400,7 @@ class Daemon:
         self._last_discovery_drift = 0
         # The destroyer captures the registry OBJECT; adopt() swaps its contents in place, so
         # this stays valid across a hot-reload without re-wiring (see _maybe_reload).
-        self._destroyer = reconciler.make_routing_destroyer(registry)
+        self._destroyer = reconciler.make_routing_destroyer(registry, on_progress=self._beat)
         self._stop = threading.Event()
         # A lock-free reload flag — deliberately NOT a threading.Event. request_reload() is a SIGHUP
         # handler running on the daemon's sole (main) thread; Event.set()/clear() take the Event's
@@ -643,7 +650,8 @@ class Daemon:
         if out.state == "vmid_contended":
             # The per-cluster vmid-uniqueness backstop fired (a concurrent reconciler held the id at failover).
             summary.vmid_contended += 1
-        if out.state in ("provision_failed", "provision_error"):
+        # The reconciler already logged an ERROR for the two named reasons (UX-06); this is the tick-level line.
+        if out.state in ("provision_failed", "provision_error", "provision_acl_denied", "template_vmid_missing"):
             log.warning("provision did not activate lease %s: %s (%s)",
                         al.id, out.state, out.detail, extra={"lease_id": al.id})
 
@@ -913,6 +921,7 @@ class Daemon:
                         req_disk_gb=al.req_disk_gb, placement_assert=self.placement_assert,
                         clone_driver=clone_driver, clone_target=clone_target,
                         target_bridge=target_bridge, data_disk_plan=data_disk_plan,
+                        on_progress=self._beat,   # beats through every PVE task wait (REL-02)
                     )
                 except Exception:
                     # provision_lease is documented exception-safe, but a failure BEFORE
@@ -1038,6 +1047,9 @@ class Daemon:
                     self._last_discovery_drift = drift
                     summary.discovery_drift = drift
                     summary.discovery_ran = True
+        stop_total = pve.stop_failures_total()
+        summary.stop_errors = stop_total - self._stop_failures_seen
+        self._stop_failures_seen = stop_total
         return summary
 
     def _prune_audit(self, conn: psycopg.Connection[Any]) -> int:
