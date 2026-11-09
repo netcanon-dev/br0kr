@@ -68,7 +68,7 @@ from collections.abc import Callable
 from contextlib import closing, suppress
 from dataclasses import dataclass, field, fields
 from http.server import ThreadingHTTPServer
-from typing import Any
+from typing import Any, overload
 
 import psycopg
 
@@ -1727,6 +1727,18 @@ class Daemon:
 
 
 # ── entrypoint ───────────────────────────────────────────────────────────────────
+@overload
+def _env(name: str, default: str) -> str: ...
+@overload
+def _env(name: str, default: None = None) -> str | None: ...
+def _env(name: str, default: str | None = None) -> str | None:
+    """`os.environ.get` that reads a BLANK value as unset (review OPS-02). Compose passes `${VAR:-}` for every
+    variable the operator did not set (docker-compose.yml), so a blank must mean "use the default", never
+    `int("")` crashing the daemon at boot or an empty template id."""
+    raw = os.environ.get(name)
+    return default if raw is None or not raw.strip() else raw
+
+
 def main() -> None:
     """Run the reconciler daemon. Env:
       PGCONN              (required) Postgres DSN — the ledger.
@@ -1752,7 +1764,7 @@ def main() -> None:
                           cloud-init + a cloudinit drive + qemu-guest-agent (see docs/runbooks/vm-access.md);
                           tag it 'br0kr-template' so the orphan sweep can reclaim an abandoned clone.
       BR0KR_VM_FULL_CLONE "0" → faster/lighter LINKED clones (needs a clone-capable storage); default full.
-      BR0KR_VM_CLONE_STORAGE  optional target storage for the clone's disk (default: the template's).
+      BR0KR_VM_CLONE_STORAGE  RETIRED (0033): logged and ignored; the clone pool is resolved per lease.
       BR0KR_CI_USER       default cloud-init login user when the agent doesn't supply ci_user (default br0kr).
       BR0KR_GUEST_IP_PREFIX  optional IPv4 prefix (e.g. "192.168.1.") to prefer the LAN address over a
                           virtual/bridge one when reading the guest agent.
@@ -1782,7 +1794,7 @@ def main() -> None:
     # Honor LOG_LEVEL / LOG_FORMAT env at BOOT (not just the leader's tick hot-apply): a permanent STANDBY
     # never ticks, so without this its level stayed at the INFO default and an operator's LOG_LEVEL was
     # ignored (review S15). apply_settings = resolve_log_settings (env) + configure_logging (RedactionFilter).
-    apply_settings(log_file=os.environ.get("BR0KR_LOG_FILE"))
+    apply_settings(log_file=_env("BR0KR_LOG_FILE"))
     dsn = db.dsn()  # the ledger DSN (PGCONN), resolved once
     # Startup read: retry through a ledger that's briefly unreachable (e.g. this daemon
     # (re)started mid-failover) instead of crash-looping before we can even serve.
@@ -1820,34 +1832,34 @@ def main() -> None:
         replicate_connect=lambda: db.connect(dsn, autocommit=False),
         registry=registry,
         pdm_registry=pdm_registry,
-        interval=float(os.environ.get("BR0KR_TICK_SECONDS", "5")),
-        reap_grace=int(os.environ.get("BR0KR_REAP_GRACE", "30")),
-        sweep_every=int(os.environ.get("BR0KR_SWEEP_EVERY", "12")),
-        sweep_dry_run=os.environ.get("BR0KR_SWEEP_DRY_RUN") == "1",
-        provision_limit=int(os.environ.get("BR0KR_PROVISION_LIMIT", "8")),
-        promote_limit=int(os.environ.get("BR0KR_PROMOTE_LIMIT", "16")),
-        reload_every=int(os.environ.get("BR0KR_RELOAD_EVERY", "60")),
-        health_host=os.environ.get("BR0KR_HEALTH_HOST", "0.0.0.0"),
-        health_port=int(os.environ.get("BR0KR_HEALTH_PORT", "9090")),
-        vm_disk=os.environ.get("BR0KR_VM_DISK"),
-        vm_template=(int(t) if (t := os.environ.get("BR0KR_VM_TEMPLATE")) else None),
+        interval=float(_env("BR0KR_TICK_SECONDS", "5")),
+        reap_grace=int(_env("BR0KR_REAP_GRACE", "30")),
+        sweep_every=int(_env("BR0KR_SWEEP_EVERY", "12")),
+        sweep_dry_run=_env("BR0KR_SWEEP_DRY_RUN") == "1",
+        provision_limit=int(_env("BR0KR_PROVISION_LIMIT", "8")),
+        promote_limit=int(_env("BR0KR_PROMOTE_LIMIT", "16")),
+        reload_every=int(_env("BR0KR_RELOAD_EVERY", "60")),
+        health_host=_env("BR0KR_HEALTH_HOST", "0.0.0.0"),
+        health_port=int(_env("BR0KR_HEALTH_PORT", "9090")),
+        vm_disk=_env("BR0KR_VM_DISK"),
+        vm_template=(int(t) if (t := _env("BR0KR_VM_TEMPLATE")) else None),
         # full_clone is the BOOT default; _apply_settings hot-resolves the SHARED operator_setting knob each
         # tick (COALESCE(ledger, this env, default) — so the gateway's gate and the daemon agree).
-        full_clone=os.environ.get("BR0KR_VM_FULL_CLONE", "1") != "0",
+        full_clone=_env("BR0KR_VM_FULL_CLONE", "1") != "0",
         # `or None`: docker-compose injects env keys it names as "" when unset, and an empty guest_ip_prefix
         # would `startswith("")`-match every address. clone_storage is RETIRED (§4.5) — pinned None here (a
         # stale env value is logged + ignored above); the per-lease resolved pool is used instead.
         clone_storage=None,
-        ci_user_default=os.environ.get("BR0KR_CI_USER", "br0kr"),
-        guest_ip_prefix=os.environ.get("BR0KR_GUEST_IP_PREFIX") or None,
-        ip_discover_limit=int(os.environ.get("BR0KR_IP_DISCOVER_LIMIT", "16")),
-        build_limit=int(os.environ.get("BR0KR_BUILD_LIMIT", "0")),
-        build_stale_seconds=int(os.environ.get("BR0KR_BUILD_STALE_SECONDS", "3600")),
-        build_cores=int(os.environ.get("BR0KR_BUILD_CORES", "2")),
-        build_memory=int(os.environ.get("BR0KR_BUILD_MEMORY_MB", "2048")),
-        migrate_limit=int(os.environ.get("BR0KR_MIGRATE_LIMIT", "0")),
-        replicate_limit=int(os.environ.get("BR0KR_REPLICATE_LIMIT", "0")),
-        repl_stale_seconds=int(os.environ.get("BR0KR_REPL_STALE_SECONDS", str(replication.STALE_SECONDS_DEFAULT))),
+        ci_user_default=_env("BR0KR_CI_USER", "br0kr"),
+        guest_ip_prefix=_env("BR0KR_GUEST_IP_PREFIX") or None,
+        ip_discover_limit=int(_env("BR0KR_IP_DISCOVER_LIMIT", "16")),
+        build_limit=int(_env("BR0KR_BUILD_LIMIT", "0")),
+        build_stale_seconds=int(_env("BR0KR_BUILD_STALE_SECONDS", "3600")),
+        build_cores=int(_env("BR0KR_BUILD_CORES", "2")),
+        build_memory=int(_env("BR0KR_BUILD_MEMORY_MB", "2048")),
+        migrate_limit=int(_env("BR0KR_MIGRATE_LIMIT", "0")),
+        replicate_limit=int(_env("BR0KR_REPLICATE_LIMIT", "0")),
+        repl_stale_seconds=int(_env("BR0KR_REPL_STALE_SECONDS", str(replication.STALE_SECONDS_DEFAULT))),
     )
     for signame in ("SIGINT", "SIGTERM"):  # SIGTERM is how `docker stop` asks us to exit
         sig = getattr(signal, signame, None)

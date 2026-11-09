@@ -45,7 +45,10 @@ ever logged. A leaked ledger dump or backup authenticates nothing.
 - **Proxmox / PDM API token secrets** (`br0kr/nodes.py`, `br0kr/remotes.py`):
   the `cluster` row stores the token id and the NAME of an environment variable
   (`token_secret_env` / `pdm_token_secret_env`). The secret itself lives only in
-  the daemon's environment (C11).
+  the daemon's environment (C11): `docker-compose.yml` names `PVE_TOKEN_SECRET` on
+  the daemon service alone and has no blanket `env_file:`, which would hand every
+  `.env` secret to every container, the tunnel-reachable OAuth shim included
+  (review OPS-02; `tests/unit/test_env_contract.py` pins it).
 - **Deployment secrets** (`PGPASSWORD`, `BR0KR_DASHBOARD_TOKEN`,
   `BR0KR_DASHBOARD_READ_TOKEN`, `TUNNEL_TOKEN`, `PVE_TOKEN_SECRET`): live in
   `.env` on the deploy host, which is `.gitignore`d. Only placeholder

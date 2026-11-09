@@ -26,7 +26,9 @@ class Knob:
     """One tunable knob: its `operator_setting` column + the env var that SEEDS it (None = ledger/default
     only — e.g. the reaper's release ceiling, which had no env before) + the code default + a `kind` used to
     parse the env value and validate an edit. `minimum` bounds an int knob (defense-in-depth behind the DB
-    CHECK). `gateway` marks the one knob read in the gateway process (queue_max), not the daemon tick."""
+    CHECK). `gateway` marks a knob read in the gateway process (queue_max, replication_cooldown_seconds), not
+    only in the daemon tick; the dashboard shows it. Under the bundled compose every broker process receives every
+    knob's env seed (docker-compose.yml x-broker-env), so the env layer agrees across containers."""
 
     name: str
     kind: str          # 'int' | 'bool' | 'str'
@@ -65,12 +67,12 @@ KNOBS: tuple[Knob, ...] = (
     # trail is a deliberate opt-in); a byte-identical all-NULL seed. Daemon-only (the prune runs in the tick).
     Knob("audit_retention_days", "int", "BR0KR_AUDIT_RETENTION_DAYS", 0, minimum=0),
     # Placement gate (0033). full_clone: the clone-storage resolution (br0kr/placement.py §4.2) branches
-    # full-vs-linked, and the gate runs in BOTH the gateway's admit() AND the daemon — but BR0KR_VM_FULL_CLONE
-    # is passed only to the DAEMON container (docker-compose), so an env-only value would leave the gate blind
-    # on the gateway and the two could disagree (the env-drift-across-containers class §3.5 closes). This
-    # operator_setting row is the SHARED source of truth: all-NULL + the daemon's env = full clones, byte-
-    # identical to today. placement_assert: the mandatory post-clone disk-location assertion's audited
-    # break-glass — default ON (True); set false only to disable the tripwire deliberately.
+    # full-vs-linked, and the gate runs in BOTH the gateway's admit() AND the daemon. The bundled compose now
+    # passes BR0KR_VM_FULL_CLONE to both (x-broker-env, review OPS-02), but a hand-run process may still see a
+    # different env, so this operator_setting row is the SHARED source of truth (the env-drift-across-
+    # containers class §3.5 closes): all-NULL + the env = full clones, byte-identical to before.
+    # placement_assert: the mandatory post-clone disk-location assertion's audited break-glass — default ON
+    # (True); set false only to disable the tripwire deliberately.
     Knob("full_clone", "bool", "BR0KR_VM_FULL_CLONE", True),
     Knob("placement_assert", "bool", None, True),
     # Cross-node placement (0037). OFF (default) = v1 node-local: a templated lease is served ONLY from an instance
@@ -144,13 +146,15 @@ class Resolved:
 
 
 def _env_value(knob: Knob) -> Any:
-    """The knob's value from its env var, or None if it has no env or the env is unset/garbage. A bool env is
-    '1'→True / anything-else→False (matching daemon.main()'s `== "1"`); a non-int int-env is IGNORED (falls
-    through to the default) rather than crashing the reader."""
+    """The knob's value from its env var, or None if it has no env or the env is unset/blank/garbage. A bool env
+    is '1'→True / anything-else→False (matching daemon.main()'s `== "1"`); a non-int int-env is IGNORED (falls
+    through to the default) rather than crashing the reader. A BLANK value is unset for every kind: compose
+    passes `${VAR:-}` (an empty string) for each knob the operator did not set (docker-compose.yml
+    x-broker-env), and reading that as a bool False would report an 'env' override nobody made."""
     if knob.env is None:
         return None
     raw = os.environ.get(knob.env)
-    if raw is None:
+    if raw is None or not raw.strip():
         return None
     if knob.kind == "bool":
         return raw == "1"
@@ -198,11 +202,11 @@ def effective(conn: psycopg.Connection[Any]) -> dict[str, Any]:
 
 def overrides(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     """The LEDGER override layer ONLY (col → value, None = not overridden) — what the dashboard displays and
-    edits. Distinct from `resolve`, which also folds in the per-process env + code default: that env layer is
-    correct only INSIDE the daemon/gateway process, and the dashboard shares NEITHER's environment, so it
-    would mis-report a non-overridden knob's effective value. The dashboard therefore manages the SHARED
-    ledger override (authoritative across all processes) and shows the code default as a hint; a blank field
-    clears the override → each process falls back to its own env/default."""
+    edits. Distinct from `resolve`, which also folds in the per-process env + code default. The bundled compose
+    gives the dashboard the same knob seeds as the daemon and gateway, but a process run by hand (or another
+    orchestrator) may not, so the dashboard reports only what is authoritative everywhere: the SHARED ledger
+    override, with the code default as a hint; a blank field clears the override → each process falls back
+    to its own env/default."""
     return _read_row(conn)
 
 

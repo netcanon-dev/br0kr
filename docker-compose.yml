@@ -26,6 +26,37 @@ x-broker: &broker
   pull_policy: never
   restart: unless-stopped
 
+# Env that EVERY broker process reads (review OPS-02): extra libpq session options, the logging switches, and
+# the seed of every operator
+# knob (br0kr/settings.py KNOBS). The daemon, gateway and dashboard each resolve knobs (ledger override, then
+# this env, then the code default), so they must all see the same seed or one container acts on a value the
+# others do not show. Each broker service merges it with `<<: *broker-env`; process-specific variables and
+# secrets (PVE_TOKEN_SECRET reaches the daemon only) stay listed per service, never a blanket `env_file`.
+# `:-` passes a blank when unset, and br0kr reads a blank as unset, so the code default applies.
+# tests/unit/test_env_contract.py keeps this list, the per-service lists, .env.example and the code in step.
+x-broker-env: &broker-env
+  PGOPTIONS: ${PGOPTIONS:-}   # extra libpq session options (br0kr/db.py keeps them; e.g. -c tcp_keepalives_idle=15)
+  LOG_LEVEL: ${LOG_LEVEL:-}
+  LOG_FORMAT: ${LOG_FORMAT:-}
+  BR0KR_LOG_FILE: ${BR0KR_LOG_FILE:-}
+  BR0KR_QUEUE_MAX: ${BR0KR_QUEUE_MAX:-}
+  BR0KR_REAP_GRACE: ${BR0KR_REAP_GRACE:-}
+  BR0KR_SWEEP_EVERY: ${BR0KR_SWEEP_EVERY:-}
+  BR0KR_SWEEP_DRY_RUN: ${BR0KR_SWEEP_DRY_RUN:-}
+  BR0KR_PROVISION_LIMIT: ${BR0KR_PROVISION_LIMIT:-}
+  BR0KR_PROMOTE_LIMIT: ${BR0KR_PROMOTE_LIMIT:-}
+  BR0KR_BUILD_LIMIT: ${BR0KR_BUILD_LIMIT:-}
+  BR0KR_MIGRATE_LIMIT: ${BR0KR_MIGRATE_LIMIT:-}
+  BR0KR_GUEST_IP_PREFIX: ${BR0KR_GUEST_IP_PREFIX:-}
+  BR0KR_AUDIT_RETENTION_DAYS: ${BR0KR_AUDIT_RETENTION_DAYS:-}
+  BR0KR_VM_FULL_CLONE: ${BR0KR_VM_FULL_CLONE:-}
+  BR0KR_CROSS_NODE_CLONE: ${BR0KR_CROSS_NODE_CLONE:-}
+  BR0KR_REPLICATION_MECHANISMS: ${BR0KR_REPLICATION_MECHANISMS:-}
+  BR0KR_REPLICATION_COOLDOWN_SECONDS: ${BR0KR_REPLICATION_COOLDOWN_SECONDS:-}
+  BR0KR_CLONE_CONTENT_ENFORCEMENT: ${BR0KR_CLONE_CONTENT_ENFORCEMENT:-}
+  BR0KR_DISCOVERY_INTERVAL_SECONDS: ${BR0KR_DISCOVERY_INTERVAL_SECONDS:-}
+  BR0KR_MULTI_DISK_ENABLED: ${BR0KR_MULTI_DISK_ENABLED:-}
+
 services:
   # ── Ledger: primary ────────────────────────────────────────────────────────────
   pg-primary:
@@ -103,6 +134,7 @@ services:
     <<: *broker
     command: ["python", "-m", "br0kr.migrate"]
     environment:
+      <<: *broker-env
       PGCONN: ${PGCONN:?set PGCONN in .env}
     depends_on:
       pg-primary:
@@ -114,6 +146,7 @@ services:
     <<: *broker
     command: ["python", "-m", "br0kr.mcp_server"]
     environment:
+      <<: *broker-env
       PGCONN: ${PGCONN:?set PGCONN in .env}
       BR0KR_MCP_TRANSPORT: ${BR0KR_MCP_TRANSPORT:-streamable-http}
       FASTMCP_HOST: 0.0.0.0
@@ -137,57 +170,31 @@ services:
     build: .   # the ONE service that builds br0kr:local (see x-broker); `docker compose build daemon`
     command: ["python", "-m", "br0kr.daemon"]
     environment:
+      <<: *broker-env
       PGCONN: ${PGCONN:?set PGCONN in .env}
-      BR0KR_TICK_SECONDS: ${BR0KR_TICK_SECONDS:-5}
-      BR0KR_REAP_GRACE: ${BR0KR_REAP_GRACE:-30}
-      BR0KR_SWEEP_EVERY: ${BR0KR_SWEEP_EVERY:-12}
-      BR0KR_PROVISION_LIMIT: ${BR0KR_PROVISION_LIMIT:-8}
-      BR0KR_RELOAD_EVERY: ${BR0KR_RELOAD_EVERY:-60}
+      # Daemon-only, env-only settings (not operator knobs; restart to change). A blank is the code default
+      # (daemon.py `_env`), so only the health port, which the healthcheck below also reads, carries a value.
+      BR0KR_TICK_SECONDS: ${BR0KR_TICK_SECONDS:-}
+      BR0KR_RELOAD_EVERY: ${BR0KR_RELOAD_EVERY:-}
+      BR0KR_HEALTH_HOST: ${BR0KR_HEALTH_HOST:-}
       BR0KR_HEALTH_PORT: ${BR0KR_HEALTH_PORT:-9090}
+      # VM provisioning (vm-access.md §3). Agents pass `template_id` per lease; BR0KR_VM_TEMPLATE is only the
+      # single-node legacy default (held `env_template_wrong_cluster` once the fleet has >1 node or cluster).
       BR0KR_VM_DISK: ${BR0KR_VM_DISK:-}
-      BR0KR_SWEEP_DRY_RUN: ${BR0KR_SWEEP_DRY_RUN:-}
-      # VM provisioning knobs the reconciler reads at boot (see vm-access.md §3). These MUST be listed here —
-      # compose only injects keys it names, so a `.env` entry alone is a silent no-op. Compose substitutes ""
-      # for an unset var, so: int/must-be-set knobs carry their code default (CI_USER=br0kr, IP_DISCOVER_LIMIT
-      # =16 — an empty value would blank the cloud-init login / crash int("") — and FULL_CLONE=1); the optional
-      # string knobs (TEMPLATE / CLONE_STORAGE / GUEST_IP_PREFIX) pass "" and daemon.py normalizes ""→unset (an
-      # empty CLONE_STORAGE would else send storage= on every full clone → PVE 400). Agents can always pass
-      # `template_id` per-lease regardless of TEMPLATE.
       BR0KR_VM_TEMPLATE: ${BR0KR_VM_TEMPLATE:-}
-      BR0KR_VM_FULL_CLONE: ${BR0KR_VM_FULL_CLONE:-1}
-      # 0042/PR-D clone-path images gate ENV SEED for the daemon's recheck; empty = fall to the knob default (OFF).
-      # NOTE: admit() runs in the GATEWAY, so to actually ENABLE enforcement fleet-wide set the SHARED
-      # operator_setting via the dashboard/ledger (all processes read it) — this env alone only seeds the daemon.
-      BR0KR_CLONE_CONTENT_ENFORCEMENT: ${BR0KR_CLONE_CONTENT_ENFORCEMENT:-}
-      BR0KR_VM_CLONE_STORAGE: ${BR0KR_VM_CLONE_STORAGE:-}
-      BR0KR_CI_USER: ${BR0KR_CI_USER:-br0kr}
-      BR0KR_GUEST_IP_PREFIX: ${BR0KR_GUEST_IP_PREFIX:-}
-      BR0KR_IP_DISCOVER_LIMIT: ${BR0KR_IP_DISCOVER_LIMIT:-16}
-      # Replication DATA PLANE (PR-5). LIMIT 0 = OFF (default); >0 opts the leader into advancing clone_shared
-      # copies one saga step per tick AND publishes operator_setting.replication_enabled=(limit>0) so the request
-      # surface is honest. STALE_SECONDS sizes the stranded-copy reclaim cutoff + the reservation TTL (2×). Both
-      # carry an int default here (an empty inject would crash int("")); ENV-only — enabling the live-guest engine
-      # warrants a daemon restart. See docs/designs/template-sharing-cross-cluster.md §5.
-      BR0KR_REPLICATE_LIMIT: ${BR0KR_REPLICATE_LIMIT:-0}
-      BR0KR_REPL_STALE_SECONDS: ${BR0KR_REPL_STALE_SECONDS:-7200}
-      # Operator template BUILDS (phase A4.1: download an image -> import -> templatize -> catalog it).
-      # BUILD_LIMIT actuates at most this many REQUESTED builds per tick; 0 = DISABLED (the default — a build
-      # blocks the tick for a multi-hundred-MB download, so it is opt-in). STALE_SECONDS reclaims a build with
-      # no progress for that long (a leader died mid-build). CORES/MEMORY_MB size the resulting template VM.
-      # Without these lines the daemon container never SEES BR0KR_BUILD_LIMIT, so builds stay off regardless of
-      # .env — which also blocks rebuild_source replication (it needs a source-provenanced, i.e. BUILT, template).
-      # Int defaults here (an empty inject would crash int("")); ENV-only — enabling builds warrants a restart.
-      BR0KR_BUILD_LIMIT: ${BR0KR_BUILD_LIMIT:-0}
-      BR0KR_BUILD_STALE_SECONDS: ${BR0KR_BUILD_STALE_SECONDS:-3600}
-      BR0KR_BUILD_CORES: ${BR0KR_BUILD_CORES:-2}
-      BR0KR_BUILD_MEMORY_MB: ${BR0KR_BUILD_MEMORY_MB:-2048}
-      # Reachability-discovery cadence (0043, PR-G): the daemon runs the READ-ONLY discover_reachability drift
-      # report every N seconds (0 = OFF, the default). Seeds the daemon-only operator_setting; an empty inject is
-      # safe (the int env parse falls through to the ledger/default). Prefer the dashboard Settings ledger override
-      # so it is tunable without a restart. Report-only — it WRITES NOTHING to declarations (design §11).
-      BR0KR_DISCOVERY_INTERVAL_SECONDS: ${BR0KR_DISCOVERY_INTERVAL_SECONDS:-}
-      # Per-cluster PVE token secret(s): the daemon resolves cluster.token_secret_env from here.
-      # Add a line per cluster if their secret-env names differ.
+      BR0KR_CI_USER: ${BR0KR_CI_USER:-}
+      BR0KR_IP_DISCOVER_LIMIT: ${BR0KR_IP_DISCOVER_LIMIT:-}
+      # Replication DATA PLANE: LIMIT 0 = OFF (default); >0 opts the leader into advancing clone_shared copies and
+      # publishes operator_setting.replication_enabled. STALE_SECONDS sizes the stranded-copy reclaim (template-
+      # sharing design §5).
+      BR0KR_REPLICATE_LIMIT: ${BR0KR_REPLICATE_LIMIT:-}
+      BR0KR_REPL_STALE_SECONDS: ${BR0KR_REPL_STALE_SECONDS:-}
+      # Operator template builds: the per-tick BUILD_LIMIT is a knob (x-broker-env); these size and reclaim them.
+      BR0KR_BUILD_STALE_SECONDS: ${BR0KR_BUILD_STALE_SECONDS:-}
+      BR0KR_BUILD_CORES: ${BR0KR_BUILD_CORES:-}
+      BR0KR_BUILD_MEMORY_MB: ${BR0KR_BUILD_MEMORY_MB:-}
+      # Per-cluster PVE token secret(s): the daemon resolves cluster.token_secret_env from here, and ONLY the
+      # daemon gets it. Add a line per cluster if their secret-env names differ.
       PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}
     # Reachable on the compose network (e.g. Prometheus scrapes daemon:9090/metrics — change the scrape
     # target if you override BR0KR_HEALTH_PORT). Not host-published — a fixed host port would clash under
@@ -217,6 +224,7 @@ services:
     command: ["python", "-m", "br0kr.dashboard"]
     profiles: ["dashboard"]
     environment:
+      <<: *broker-env
       PGCONN: ${PGCONN:?set PGCONN in .env}
       BR0KR_DASHBOARD_HOST: 0.0.0.0
       BR0KR_DASHBOARD_PORT: "8051"

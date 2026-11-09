@@ -693,8 +693,8 @@ def _read_settings(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     overridden → each process falls back to its own env/default) + the code default as a hint + whether the
     knob is read in the gateway (queue_max) vs the daemon, whether a fleet reload is pending, and the
     applied ledger schema_version (the highest migration; an operability read, not a secret). The
-    dashboard edits the SHARED ledger override layer, NOT the per-process env — it shares neither the daemon's
-    nor the gateway's environment (see settings.overrides). Operator-gated (config, not tenant data)."""
+    dashboard edits the SHARED ledger override layer, NOT the per-process env, which it cannot vouch for in
+    every deployment (see settings.overrides). Operator-gated (config, not tenant data)."""
     ov = settings.overrides(conn)
     knobs = [{"name": k.name, "kind": k.kind, "default": k.default, "gateway": k.gateway,
               "env": k.env, "override": ov.get(k.name),

@@ -308,9 +308,9 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
     on two clusters shares one accounting scope). This scope is **derived-capacity ACCOUNTING only** (availability =
     `total_gb − Σ active req_disk_gb`); it does NOT place the clone's disk, `req_disk_gb` is not validated
     against the template's real size, and a lease that OMITS `storage_id`/`req_disk_gb` debits ZERO disk (the
-    scope only bounds requests that NAME it — agents must pass both to be counted). The clone's boot disk lands on the TEMPLATE's own storage (or
-    `BR0KR_VM_CLONE_STORAGE`). To put boot disks on a specific pool, build the template's disk THERE (or set that
-    env var) AND register a same-named storage scope to bound the sum. There is no PER-PROJECT lease-disk quota
+    scope only bounds requests that NAME it — agents must pass both to be counted). The clone's boot disk pool is resolved per lease by the
+    placement gate (migration 0033, §12 below); the old `BR0KR_VM_CLONE_STORAGE` variable is retired and ignored.
+    Register a same-named storage scope to bound the sum of what lands on a pool. There is no PER-PROJECT lease-disk quota
     (project ceilings are cpu / mem / lease-count only); the shared pool + `max_leases` are the only disk bounds.
   - **Template (catalog)** — `POST /api/template/create` (dashboard *OS templates* panel) with `template_id`
     (the id agents pass as `template_id`), `cluster_id`, `vmid` (the prepared cloud-init + qemu-guest-agent
@@ -649,7 +649,10 @@ quarantined; its build failure stays legible as `build_acl_denied`), a non-gate 
 an empty/unreadable `content` field is reported, not quarantined (the post-clone assertion remains the hard
 tripwire). It needs `Datastore.Audit` on `/storage` for `br0kr@pve` (else it returns `acl_insufficient`
 and quarantines nothing — widen the ACL to make it functional), and the **MCP gateway process must carry the PVE
-token env** (`PVE_TOKEN_SECRET`) to build drivers — otherwise it returns `checked_nodes:[]`. Clear a
+token env** (`PVE_TOKEN_SECRET`) to build drivers — otherwise it returns `checked_nodes:[]`. The bundled
+`docker-compose.yml` deliberately gives that secret to the daemon only (the gateway is the network-facing
+process), so under it this verb, `discover_reachability` and `detect_template_bridge` return
+`checked_nodes:[]` unless you add `PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}` to the gateway service yourself. Clear a
 false/stale quarantine with `clear_storage_node_quarantine`.
 
 **Scheduled drift reporting (PR-G, `discovery_interval_seconds`).** To catch drift *before* it bites — instead of

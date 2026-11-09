@@ -114,29 +114,29 @@ nothing sweeps it — or temporarily stop the `daemon` service for the test.
 
 ---
 
-## 3. Turn it on (daemon env)
+## 3. Turn it on
 
-Set on the reconciler `daemon`. Under the bundled Compose stack these are passed through by
-`docker-compose.yml`'s `daemon.environment`, so a value in `.env` takes effect (a `.env` entry for any env var
-NOT listed there is a silent no-op — see `.env.example`). Agents can also pass `template_id` per-lease, which
-overrides `BR0KR_VM_TEMPLATE` regardless of this default:
+**Register the template in the catalog** (the supported path, and the only one on a fleet with more than one
+node or cluster): `admin.create_template` / the dashboard *OS templates* panel with a `template_id`, after
+`validate_template` (see [docker-deploy.md](docker-deploy.md), "Template (catalog)"). Agents then pass that
+`template_id` per lease, and the placement gate picks the template instance and clone pool for the lease's node.
+
+The daemon env below tunes how clones are made. Under the bundled Compose stack each one is named in
+`docker-compose.yml` (the daemon service, or the shared `x-broker-env` block for knobs), so a value in `.env`
+takes effect; `tests/unit/test_env_contract.py` keeps that true.
 
 | env | meaning | default |
 |-----|---------|---------|
-| `BR0KR_VM_TEMPLATE` | template vmid to clone per lease. **Unset = off** (create-blank shell). | unset |
-| `BR0KR_VM_FULL_CLONE` | `0` = faster/lighter **linked** clones (needs a clone-capable storage); else full | `1` (full) |
-| `BR0KR_VM_CLONE_STORAGE` | target storage for the clone's disk | the template's |
+| `BR0KR_VM_TEMPLATE` | **single-node legacy default:** the vmid to clone when a lease names no catalog template. **Unset = off** (create-blank shell). On a fleet with more than one node or cluster such a lease is HELD (`env_template_wrong_cluster`) instead of cloning a vmid that may not exist where it lands. | unset |
+| `BR0KR_VM_FULL_CLONE` | `0` = faster/lighter **linked** clones (needs a clone-capable storage); else full. A knob. | `1` (full) |
 | `BR0KR_CI_USER` | default cloud-init login user when the agent omits `ci_user` | `br0kr` |
-| `BR0KR_GUEST_IP_PREFIX` | prefer this IPv4 prefix (e.g. `192.168.1.`) over a virtual/bridge address | unset |
+| `BR0KR_GUEST_IP_PREFIX` | prefer this IPv4 prefix (e.g. `192.168.1.`) over a virtual/bridge address. A knob. | unset |
 | `BR0KR_IP_DISCOVER_LIMIT` | max ACTIVE cloud-init leases polled for an IP per tick | `16` |
 
-If a lease requests a key but `BR0KR_VM_TEMPLATE` is unset, the daemon logs a loud warning and
-provisions a fenced shell WITHOUT injected access (its `ip_address` stays null) — set the template to
-honour access requests.
-
-> Single-template note: `BR0KR_VM_TEMPLATE` is one global vmid today. For a multi-cluster fleet the
-> template must exist (with that id) on each cluster the daemon serves; a per-cluster template binding is
-> a later refinement.
+The clone's disk pool is resolved per lease by the placement gate (the retired `BR0KR_VM_CLONE_STORAGE` is
+logged and ignored if still set). If a lease requests a key but names no template and `BR0KR_VM_TEMPLATE` is
+unset, the daemon logs a loud warning and provisions a fenced shell WITHOUT injected access (its `ip_address`
+stays null).
 
 ---
 

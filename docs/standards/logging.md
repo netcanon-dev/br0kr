@@ -21,7 +21,11 @@ once at process start. It is **idempotent** — re-calling it replaces handlers
 cleanly (tests, supervised restarts).
 
 - **Default = plain text**, human-readable: `TS [LEVEL] logger: message`.
-- **`LOG_FORMAT=json` = JSON lines**, one object per record, newline-delimited.
+- **`LOG_FORMAT=json` = JSON lines**, one object per record, newline-delimited. The bundled compose stack passes
+  `LOG_LEVEL`/`LOG_FORMAT`/`BR0KR_LOG_FILE` to every broker process (`x-broker-env`). *Known gap:* the
+  gateway's HTTP server (uvicorn, started by the MCP SDK) installs its own handlers, so its startup and
+  access lines (`Uvicorn running on …`, `"GET /healthz" 200`) stay plain text; a JSON consumer should skip
+  lines that do not start with `{` until br0kr routes uvicorn's loggers through `configure_logging()`.
 - Both shapes go to **stderr AND a rotating file**. A machine consumes the JSON
   file; a human tails the same file or watches stderr. You never have to choose.
 - Every module does `log = logging.getLogger(__name__)` — never the root logger
@@ -170,7 +174,9 @@ The structured file is the source of truth; the aggregator is a convenience pane
 Effective **level** and **format** resolve from three sources, highest first:
 
 1. **Environment** — `LOG_LEVEL` (`DEBUG|INFO|WARNING|ERROR`) and `LOG_FORMAT`
-   (`json|text`). Always wins. For on-the-fly field debugging with no edit.
+   (`json|text`). Wins at process start, for on-the-fly field debugging with no edit. One exception: the
+   reconciler daemon re-reads its level each tick from the `log_level` knob (`br0kr/settings.py`), where a
+   ledger override set on the Settings page beats the env.
 2. **Config / profile** — a persisted app setting.
 3. **Default** — `INFO` / `text`.
 

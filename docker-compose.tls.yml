@@ -45,6 +45,12 @@ services:
         condition: service_completed_successfully
     environment:
       PGCONN: ${PGCONN:?set PGCONN in .env}
+      # What every broker process reads from docker-compose.yml's x-broker-env, minus the knob seeds (YAML anchors
+      # do not cross files, and the shim resolves no knobs): libpq session options and the logging switches.
+      PGOPTIONS: ${PGOPTIONS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      BR0KR_LOG_FILE: ${BR0KR_LOG_FILE:-}
       # Precedence in issuer(): BR0KR_OAUTH_ISSUER (override) → BR0KR_PUBLIC_URL (tunnel) →
       # https://<BR0KR_TLS_SITE> (direct TLS). All three DEFAULT EMPTY so that if NONE is set the resolved
       # issuer is "" and main() REFUSES to boot (fail-loud) — rather than silently serving a bogus
