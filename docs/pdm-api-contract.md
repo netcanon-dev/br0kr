@@ -1,5 +1,10 @@
 # PDM API contract (ASSUMED — not yet live-verified)
 
+> **Status: dormant** (review FEAT-04). The driver and the lease-migration saga over it are built,
+> hermetically proven and constructed at runtime, but disabled (`BR0KR_MIGRATE_LIMIT=0`), and there is no
+> PDM in the fleet. Nothing more is planned until there is. **Decision trigger:** when PDM hardware arrives,
+> step 1 below (`scripts/run_pdm.sh` / `harness_pdm.py` pointed at the real box) is the first thing to run.
+
 `br0kr/pdm.py` (the `PdmDriver`) talks to **Proxmox Datacenter Manager** for two things the
 per-cluster `pve.Pve` driver can't do: a fleet-wide **inventory** across clusters, and **remote
 (cross-cluster) live migration**. PDM is young and the homelab has no PDM instance yet, so every
@@ -12,7 +17,9 @@ detail below is an **assumption**, written down here and mirrored by the `_API_*
 2. For every mismatch, fix it in **one place** — the `_API_*` / `_AUTH_SCHEME` / `_PDM_PORT`
    constants (paths, auth, port) or the `normalize_*`/`remote_migrate` field handling (payload
    shapes) in `br0kr/pdm.py` — and update this doc in the same commit.
-3. Only after that does the driver get wired into the daemon (see "Not yet wired", below).
+3. Only after that is the migration path enabled (`BR0KR_MIGRATE_LIMIT>0`). The daemon already constructs a
+   `Pdm` per PDM-configured cluster (`br0kr/remotes.py`) but drives it only when that limit is above 0 (see
+   "The lease-migration consumer", below).
 
 The pure decision functions (`migrate_decision`, `fenced_inventory`, the fence helpers reused from
 `pve.py`) are contract-INDEPENDENT — they operate on already-parsed `InventoryItem`s — so a contract
@@ -95,7 +102,7 @@ stays self-fencing.
 4. **Task tracking.** Whether the migration task is reported on the source remote (assumed) or via a
    PDM-level task list, and the exact status/exitstatus vocabulary.
 
-## The lease-migration consumer (built; live-wiring pending)
+## The lease-migration consumer (built and wired; disabled, dormant)
 
 This driver actuates and reports; the race-critical orchestration that moves a *lease* on top of it is
 now **built and hermetically proven** — `br0kr/migration.py` (see

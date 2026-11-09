@@ -544,17 +544,17 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
      `schedule_lease` gateway/MCP verb — **proven race-free on real Postgres**
      (`scripts/harness_schedule.py`: 20 concurrent placements into an 8-slot cluster → exactly 8
      admitted, none over-committed, evenly spread; 10 same-key → exactly one lease).
-   - ◐ **PDM-backed inventory + cross-cluster live migration** (`br0kr/pdm.py`): the `PdmDriver` is
-     built and **hermetically proven** — pure verdicts (`migrate_decision`, inventory normalization)
+   - ◐ **Dormant: PDM-backed inventory + cross-cluster live migration** (`br0kr/pdm.py`; hermetically
+     proven, disabled, awaiting PDM hardware; no date): the `PdmDriver` is built and **hermetically proven** — pure verdicts (`migrate_decision`, inventory normalization)
      unit-tested exhaustively, and the full REST path (auth header, `{"data":…}` envelope, form POST,
      task poll) proven against a **mock PDM** serving the assumed contract (`scripts/harness_pdm.py`).
      The fence is reused from `pve.py` so `fenced_migrate` refuses to relocate another lease's guest
      exactly as `fenced_destroy` refuses to delete one. It is now CONSTRUCTED at runtime per PDM-configured
      cluster (`br0kr/remotes.py`, token secret resolved from the env via migration `0018`), but the migration
-     path is **disabled by default**. **Still open:** the PDM API shape is an *assumption*
-     ([pdm-api-contract.md](pdm-api-contract.md)) — it must be reconciled against a real PDM (none in the
-     homelab yet) before a LIVE run.
-   - ◐ **Cross-cluster LEASE migration — the race-free saga** (`br0kr/migration.py`): relocates a
+     path is **disabled by default**. The PDM API shape is an *assumption*
+     ([pdm-api-contract.md](pdm-api-contract.md)) to reconcile against a real PDM before a LIVE run; there is
+     none in the fleet, so nothing more is planned here until there is.
+   - ◐ **Dormant: cross-cluster LEASE migration — the race-free saga** (`br0kr/migration.py`): relocates a
      running lease's guest to another cluster while keeping the ledger correct. It adds **no new
      race-critical SQL** — it RE-DEBITS the target node through the proven `admit()` (a transient
      RESERVATION lease holds the destination slot under admit's scope lock), then actuates the move
@@ -575,16 +575,30 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
      liveness heartbeat threaded through the copy (harness group I). **Now wired but DISABLED BY DEFAULT**
      (`BR0KR_MIGRATE_LIMIT=0`): the operator TRIGGER is the dashboard OR the `migrate_lease` operator-tier MCP
      verb (#47 — only an `operator` token, never a tenant one), and `migration_status` is a lease-scoped MCP
-     read (an operator token may watch any). **Still open:** it is
-     **not live-proven** — reconciling the API contract against a real PDM plus a live cross-cluster proof is
-     the only remaining step. See [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
-   - ⏳ Still open: a cloud burst tier.
+     read (an operator token may watch any). It is **not live-proven**: when PDM hardware arrives, the first
+     step is `scripts/run_pdm.sh` against it, then a live cross-cluster proof, then enabling it. See
+     [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
 
-## Non-goals (for now)
+## Non-goals
 
-Autoscaling GitHub runners and a cloud burst tier are deliberately deferred until the cross-cluster
-core is a running, durable service. Cross-cluster *scheduling* (placement) is built
-(`br0kr/scheduler.py`); the PDM-backed *inventory + migration* driver (`br0kr/pdm.py`) and the
-race-free cross-cluster *lease-migration saga* over it (`br0kr/migration.py`) are built, hermetically
-proven, and now WIRED into the daemon but **disabled by default** — awaiting only a real PDM to verify the
-API contract and a live proof (see roadmap #9). The cloud burst tier is the remaining roadmap #9 item.
+Out of scope by decision, not by omission. Each has its reason, so a request for one can be answered by
+pointing here (review FEAT-05).
+
+- **Backends other than Proxmox VE, including a cloud burst tier.** The ledger itself is Proxmox-shaped
+  (`pve_node`, `pve_host`, integer `vmid`s unique per cluster, fences that are PVE tags), so a second
+  backend is a schema arc, not a new driver file. Overflow onto a public cloud would be that second backend.
+- **Autoscaling CI runners.** A runner autoscaler is a *consumer* of the broker: it requests and releases
+  leases. That logic belongs in the consumer.
+- **Priority or preemption.** Strict per-scope FIFO is the fairness contract
+  ([designs/admission-queue.md](designs/admission-queue.md) §8, a locked decision); per-project quotas and
+  `max_queued` are the fair-share controls. A lease is never evicted to make room for another.
+- **VM lifecycle operations after ACTIVE** (resize, snapshot, console, reboot). The agent has SSH into its
+  guest and Proxmox manages the VM; the broker's job is to reserve, hand over and tear down a fenced guest.
+- **A full operator CLI.** Operators use the dashboard and the operator-tier MCP verbs. The one headless
+  verb planned is the operator-token bootstrap.
+- **A Terraform / Pulumi provider.** A lease is a short-lived reservation an agent asks for at run time,
+  not declared infrastructure.
+
+**Dormant, not cut:** the PDM cross-cluster inventory + lease-migration arc (roadmap #9 above) is built,
+hermetically proven and wired, but disabled until PDM hardware exists; see
+[pdm-api-contract.md](pdm-api-contract.md) for the first step when it does.

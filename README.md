@@ -215,20 +215,23 @@ un-publish would silently no-op and leak the plain port.) See
 - ✅ **Cross-cluster scheduling** — ask for capacity in a cluster (any node) or anywhere with room;
   the broker picks the node race-free (orchestrates the proven `admit()`, no new race-critical path).
   `br0kr/scheduler.py`
-- ◐ **PDM driver (cross-cluster inventory + fenced live migration)** — built and **hermetically
-  proven** against a mock PDM (`br0kr/pdm.py`); fence-safe (refuses to migrate another lease's guest). Now
-  CONSTRUCTED at runtime per PDM-configured cluster (`br0kr/remotes.py`) but **disabled by default** — the
-  PDM API shape is still an assumption to reconcile against a real PDM
-  ([docs/pdm-api-contract.md](docs/pdm-api-contract.md)).
-- ◐ **Cross-cluster lease migration (the race-free saga)** — relocate a running lease to another
+- ◐ **Dormant: PDM driver (cross-cluster inventory + fenced live migration)** — hermetically proven,
+  disabled, awaiting PDM hardware; no date. Built and proven against a mock PDM (`br0kr/pdm.py`); fence-safe
+  (refuses to migrate another lease's guest); constructed at runtime per PDM-configured cluster
+  (`br0kr/remotes.py`) but **disabled by default**. The PDM API shape is still an assumption to reconcile
+  against a real PDM ([docs/pdm-api-contract.md](docs/pdm-api-contract.md)).
+- ◐ **Dormant: cross-cluster lease migration (the race-free saga)** — relocate a running lease to another
   cluster while keeping the ledger correct: RE-DEBIT the target through the proven `admit()`, move the
   guest fence-checked, then flip the lease once it lands. **Hermetically proven incl. the daemon wiring**
   (real Postgres + a fake PDM: M migrations onto a 1-slot target → exactly one wins). Wired into the leader
   tick but **DISABLED BY DEFAULT** (`BR0KR_MIGRATE_LIMIT=0`); an operator triggers it from the dashboard, an
   agent watches its own lease via the MCP `migration_status` read. `br0kr/migration.py` +
   [docs/runbooks/cross-cluster-migration.md](docs/runbooks/cross-cluster-migration.md).
-- ⏳ Next: live-verify the PDM contract against a real PDM box + a live cross-cluster proof, then enable it;
-  a cloud burst tier. See [docs/architecture.md](docs/architecture.md).
+- ⏳ Next: a pinned (long-lived) lease, a generated API reference with a CI client, and a bounded
+  server-side `wait_for_lease` for agents. The two dormant items above wait for PDM hardware; when it
+  exists, the first step is `bash scripts/run_pdm.sh` pointed at the real box.
+- Not planned, with the reasons: see [Non-goals](docs/architecture.md#non-goals) (other backends, a cloud
+  burst tier, runner autoscaling, priority or preemption, VM lifecycle operations, a full CLI, IaC providers).
 
 ## Contributing
 

@@ -227,6 +227,16 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **The operator build subsystem was un-runnable on any deployment: `BR0KR_BUILD_LIMIT` (and `BR0KR_BUILD_STALE_SECONDS`/`BR0KR_BUILD_CORES`/`BR0KR_BUILD_MEMORY_MB`) were read by `daemon.main()` but never passed through the daemon service in `docker-compose.yml`** — so setting them in `.env` was the silent no-op the `.env.example` header explicitly warns about, and template builds stayed disabled regardless. Wired all four into `docker-compose.yml` (`daemon.environment`, int defaults so an empty inject can't crash `int("")`); behaviour-neutral by default (`BUILD_LIMIT` still `0`). This also unblocks `rebuild_source` replication, which requires a BUILT (source-provenanced) template. `.env.example` build block corrected to match.
 
 ### Changed
+- **Scope statement: the PDM arc is dormant, and the cut features are written down as Non-goals
+  (`docs/architecture.md`, `README.md`, `docs/pdm-api-contract.md`).** Why: the only ⏳ "Next" item was to
+  live-verify PDM migration, against an API contract that is assumed, with no PDM hardware in the fleet;
+  and the roadmap still carried a cloud burst tier with no code, while priority, preemption, VM lifecycle
+  operations and a CLI were simply absent, inviting the question every time. The PDM driver and the
+  lease-migration saga are now labelled dormant (hermetically proven, disabled, awaiting hardware, no date)
+  with the first step named for when hardware arrives; "Next" is the pinned lease, a generated API
+  reference with a CI client, and `wait_for_lease`. Non-goals lists the six cut items with one reason each,
+  and `pdm-api-contract.md` no longer points at a "Not yet wired" section that did not exist (the driver is
+  already constructed; only `BR0KR_MIGRATE_LIMIT` gates it). Docs only (review FEAT-04, FEAT-05).
 - **CI now runs on GitHub-hosted `ubuntu-latest` in every workflow, not the self-hosted pool
   (`.github/workflows/*.yml`).** Why: on a public repo CI runs on `pull_request`, so a fork's PR
   executes on the runner. On a self-hosted runner that is a stranger's code on the maintainer's own
