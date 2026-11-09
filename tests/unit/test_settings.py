@@ -157,6 +157,21 @@ def test_replication_mechanisms_knob_is_a_str_defaulting_clone_shared(monkeypatc
     assert settings.validate_patch({"replication_mechanisms": 5}) == "not_a_str:replication_mechanisms"
 
 
+def test_provision_stuck_seconds_knob_defaults_to_twenty_minutes():
+    """The provision_stuck_seconds knob (0048, review REL-01) is a daemon-only int with NO env seed, default 1200
+    (20 min) and minimum 0 (0 = the reaper step is off). Guards the knob being dropped, mis-typed, or defaulting
+    to OFF, which would silently restore the unbounded PROVISIONING phase; and a negative budget reaching the
+    ledger (a clean 'below_min' before the DB CHECK)."""
+    from br0kr import lease
+    by = {k.name: k for k in settings.KNOBS}
+    knob = by["provision_stuck_seconds"]
+    assert knob.kind == "int" and knob.env is None and knob.gateway is False and knob.minimum == 0
+    assert knob.default == 1200 == lease.PROVISION_STUCK_SECONDS
+    assert settings.resolve(_RowConn(_row()))["provision_stuck_seconds"] == settings.Resolved(1200, "default")
+    assert settings.validate_patch({"provision_stuck_seconds": 0}) is None
+    assert settings.validate_patch({"provision_stuck_seconds": -5}) == "below_min:provision_stuck_seconds"
+
+
 # ── COALESCE(ledger, env, default) + source ──────────────────────────────────────────────────────────
 class _RowConn:
     """A fake connection whose SELECT of the singleton returns `row` (a tuple in settings._COLS order, or

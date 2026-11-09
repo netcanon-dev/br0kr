@@ -26,7 +26,8 @@ def seam(monkeypatch):
     released/failed lease ids and exposes lists a test sets to control what the two
     claims return. Patched in lease's home module so reaper's `lease.*` calls hit the
     fakes."""
-    rec = {"expired": [], "releasing": [], "released": [], "failed": [], "queue_expired": []}
+    rec = {"expired": [], "releasing": [], "released": [], "failed": [], "queue_expired": [],
+           "provision_stuck": [], "stuck_budget": None}
 
     def claim_pending_expired(_conn, batch=100):
         return rec["queue_expired"]
@@ -36,6 +37,10 @@ def seam(monkeypatch):
 
     def claim_releasing(_conn, _grace, batch=100):
         return rec["releasing"]
+
+    def claim_provisioning_stale(_conn, budget_seconds, limit=100):
+        rec["stuck_budget"] = budget_seconds
+        return rec["provision_stuck"]
 
     def mark_released(_conn, lid):
         rec["released"].append(lid)
@@ -48,6 +53,7 @@ def seam(monkeypatch):
     monkeypatch.setattr(lease, "claim_pending_expired", claim_pending_expired)
     monkeypatch.setattr(lease, "claim_expired", claim_expired)
     monkeypatch.setattr(lease, "claim_releasing", claim_releasing)
+    monkeypatch.setattr(lease, "claim_provisioning_stale", claim_provisioning_stale)
     monkeypatch.setattr(lease, "mark_released", mark_released)
     monkeypatch.setattr(lease, "mark_release_failed", mark_release_failed)
     return rec
@@ -148,3 +154,30 @@ def test_on_progress_heartbeats_once_per_claimed_lease(seam):
     beats: list[int] = []
     reaper.reap_once(object(), lambda _cl: None, grace_seconds=0, on_progress=lambda: beats.append(1))
     assert len(beats) == 3   # one heartbeat per claimed lease, before each (slow) destroy
+
+
+def test_reap_reclaims_stuck_provisioning_with_the_given_budget(seam):
+    """reap_once runs the PROVISIONING-budget step with the budget it is given and counts what it claimed
+    (0048, review REL-01). Guards the step being dropped from the pass or ignoring the operator's dial: a lease
+    left PROVISIONING (a create/clone outliving its wait budget, or a failed hand-off after mark_active raised)
+    would again be revisited only at expires_at, which a heartbeating agent defers forever."""
+    seam["provision_stuck"] = [_claim(7, 907, attempts=0)]
+    summary = reaper.reap_once(object(), lambda cl: None, grace_seconds=0, provision_stuck_seconds=600)
+    assert seam["stuck_budget"] == 600 and summary.provision_stuck == 1
+
+
+def test_reap_defaults_the_provisioning_budget_to_the_lease_default(seam):
+    """Without an explicit budget, reap_once uses lease.PROVISION_STUCK_SECONDS (on by default), so a caller that
+    predates the knob still bounds PROVISIONING."""
+    reaper.reap_once(object(), lambda cl: None, grace_seconds=0)
+    assert seam["stuck_budget"] == lease.PROVISION_STUCK_SECONDS > 0
+
+
+def test_claim_provisioning_stale_with_a_zero_budget_is_off_and_touches_nothing():
+    """budget_seconds <= 0 disables the step without issuing any statement (the operator's off switch).
+    The SQL itself, and its single-claimant behaviour, is proven against real Postgres in harness_lease."""
+    class _NoConn:
+        def execute(self, *_a, **_k):
+            raise AssertionError("no statement may run when the step is off")
+    assert lease.claim_provisioning_stale(_NoConn(), 0) == []
+    assert lease.claim_provisioning_stale(_NoConn(), -1) == []

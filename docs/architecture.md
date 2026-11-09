@@ -284,8 +284,8 @@ rejected as "node full" by the very lease it already created.
   refused; cluster/project deletes demote).
 - **Operator settings (`br0kr/settings.py` + migration `0021`)** — a one-row `operator_setting` SINGLETON of
   runtime-tunable reconciler/queue knobs (reap grace, sweep cadence + dry-run, provision/promote limits, the
-  build/migrate actuation gates, the global `queue_max`, the reaper's `max_release_attempts`, the
-  guest-IP-prefix), hot-applied from the ledger WITHOUT a restart. Each knob resolves COALESCE(ledger
+  build/migrate actuation gates, the global `queue_max`, the reaper's `max_release_attempts` and
+  `provision_stuck_seconds`, the guest-IP-prefix), hot-applied from the ledger WITHOUT a restart. Each knob resolves COALESCE(ledger
   override → env → code default), so an all-NULL seed row is byte-identical to the old env-only behaviour; the
   operator edits the SHARED ledger layer from the token-gated `#settings-sec` dashboard section (the dashboard
   shares neither the daemon's nor the gateway's env, so it manages the ledger override + shows each knob's
@@ -297,8 +297,8 @@ rejected as "node full" by the very lease it already created.
   the daemon process). Proven on real Postgres (`scripts/harness_settings.py`: resolve/override/clear, the
   `>= 0` CHECK backstop, `queue_max` capping `admission.enqueue`, the reaper honouring `max_attempts`).
 - **Lease lifecycle (`br0kr/lease.py`)** — the guarded-CAS transitions: `begin_provisioning` /
-  `mark_active` (forward edges), `heartbeat` / `release`, `claim_expired` / `claim_releasing`
-  (single-claimant reaper claims), `mark_released` / `mark_release_failed`. Pure state policy
+  `mark_active` (forward edges), `heartbeat` / `release`, `claim_provisioning_stale` / `claim_expired` /
+  `claim_releasing` (single-claimant reaper claims), `mark_released` / `mark_release_failed`. Pure state policy
   (`is_due`, `VALID_TRANSITIONS`, …) is split out and unit-tested hermetically; the concurrency is
   proven in `scripts/harness_lease.py`.
 - **Reaper (`br0kr/reaper.py`)** — the teardown driver that strings the lease CAS ops into actual
@@ -429,7 +429,14 @@ rejected as "node full" by the very lease it already created.
 
 `PENDING → ADMITTED → PROVISIONING → ACTIVE → RELEASING → RELEASED` (with terminal `REJECTED` and
 `RELEASE_FAILED`), with TTL + heartbeat so a forgotten lease auto-reaps, and guarded compare-and-swap
-so exactly one of {renew, expire, complete} wins. **Built in `br0kr/lease.py`**; the teardown driver
+so exactly one of {renew, expire, complete} wins. PROVISIONING is also **bounded** (migration `0048`): it
+is renewable, so expiry alone never ended it for a heartbeating agent, and the provisioner deliberately
+leaves a lease there when a clone or create outlives its wait budget. `begin_provisioning` stamps
+`provisioning_at`, and the reaper reclaims a lease still PROVISIONING `provision_stuck_seconds` later
+(operator setting, default 20 min) as `RELEASING(released_reason = 'provision_stuck')`, whatever its
+`expires_at`. A fenced guest is then fenced-destroyed; a clone that timed out before its fence was stamped is
+removed by the orphan sweep's marker reclaim once the lease is terminal. A lease whose agent stopped renewing
+usually expires first (the default TTL is shorter than the budget) and reads `expired`. **Built in `br0kr/lease.py`**; the teardown driver
 that actually destroys guests is **`br0kr/reaper.py`**. `db/migrations/0001_baseline.sql` carries the
 `ttl_seconds`/`expires_at`/`heartbeat_at`/`reclaim_at`/`release_attempts` columns (a trigger derives
 `expires_at` from `ttl_seconds`, so the deadline can't drift from the TTL).
@@ -448,10 +455,11 @@ provisioner. Both reaper claims use `FOR UPDATE SKIP LOCKED` so many instances r
 double-claiming; `claim_releasing` adds a `reclaim_at` grace window so a teardown in flight isn't
 re-handed-out on the next pass.
 
-> **Empirically established (`scripts/harness_lease.py`, `bash scripts/run_lease.sh`), not assumed —
-> 12 checks, GO:** renew vs N reapers → **renewed XOR expired**; release vs N reapers → **exactly one**
-> into RELEASING; activate vs N reapers → **ACTIVE XOR RELEASING, never resurrected**; `claim_expired`
-> AND `claim_releasing` under C reapers → **each lease claimed once**; a bounded-`LIMIT` backlog
+> **Empirically established (`scripts/harness_lease.py`, `bash scripts/run_lease.sh`, and on every PR in
+> CI's `harness` job), not assumed — GO:** renew vs N reapers → **renewed XOR expired**; release vs N reapers → **exactly one**
+> into RELEASING; activate vs N reapers → **ACTIVE XOR RELEASING, never resurrected**; `claim_expired`,
+> `claim_releasing` AND `claim_provisioning_stale` under C reapers → **each lease claimed once**; a lease
+> PROVISIONING past the budget is reclaimed **even while renewed**; a bounded-`LIMIT` backlog
 > **drains across passes with no loss/dupe**; `reap_once` **destroys + frees capacity** end-to-end
 > (and settles a null-vmid lease with no destroy); a permanently-failing destroy ends
 > **`RELEASE_FAILED`** instead of leaking the slot.

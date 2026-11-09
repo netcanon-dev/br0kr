@@ -46,6 +46,13 @@ KNOBS: tuple[Knob, ...] = (
     Knob("provision_limit", "int", "BR0KR_PROVISION_LIMIT", 8, minimum=0),
     Knob("promote_limit", "int", "BR0KR_PROMOTE_LIMIT", 16, minimum=0),
     Knob("max_release_attempts", "int", None, 5, minimum=0),
+    # The PROVISIONING budget in seconds (0048, review REL-01): the reaper reclaims a lease still PROVISIONING
+    # this long after begin_provisioning as RELEASING(provision_stuck), whatever its expires_at (PROVISIONING is
+    # renewable, so expiry alone never ended it for a heartbeating agent). Default 1200 = 20 min, above the
+    # provisioner's own clone + grow + start wait budgets (see lease.PROVISION_STUCK_SECONDS for why reclaiming is
+    # safe even when PVE is slower); 0 = OFF. Daemon-only (the reaper runs in its tick);
+    # no env seed, like max_release_attempts: an operator dial set from the dashboard, hot-applied.
+    Knob("provision_stuck_seconds", "int", None, 1200, minimum=0),
     Knob("build_limit", "int", "BR0KR_BUILD_LIMIT", 0, minimum=0),
     Knob("migrate_limit", "int", "BR0KR_MIGRATE_LIMIT", 0, minimum=0),
     Knob("guest_ip_prefix", "str", "BR0KR_GUEST_IP_PREFIX", None),

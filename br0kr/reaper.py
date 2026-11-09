@@ -15,7 +15,14 @@ drives `reap_once` on an interval (with the real fenced driver wired via
 One pass (`reap_once`):
   0. claim_pending_expired — flip every PENDING-and-past-wait-deadline (queued) lease to
                        REJECTED(queue_timeout). No teardown — a queued lease has no guest.
-  1. claim_expired   — flip every LIVE-and-past-deadline lease to RELEASING(expired).
+  1. claim_provisioning_stale — flip every lease still PROVISIONING longer than the budget
+                       (0048, `provision_stuck_seconds`) to RELEASING(provision_stuck), whatever its
+                       expires_at: renewing cannot hold a lease in PROVISIONING forever. Runs BEFORE
+                       claim_expired so a lease past both its deadline and the budget gets the more
+                       specific label. (A stuck lease whose agent stopped renewing usually expires first:
+                       the default 900 s TTL is shorter than the default 1200 s budget, so it reads
+                       `expired`; `provision_stuck` is the renewing-agent case the TTL could never end.)
+  1b. claim_expired  — flip every LIVE-and-past-deadline lease to RELEASING(expired).
   2. claim_releasing — grace-gated, single-claimant pickup of RELEASING leases that
                        need a (re)destroy (covers normal releases, fresh expiries,
                        and crash-stranded teardowns).
@@ -55,6 +62,7 @@ class ReapSummary:
     """What a single reap pass did — returned for logging/metrics/tests."""
 
     expired: int = 0          # LIVE leases flipped to RELEASING this pass
+    provision_stuck: int = 0  # PROVISIONING leases past the budget flipped to RELEASING(provision_stuck)
     released: int = 0         # guests destroyed (or none-to-destroy) → RELEASED
     failed: int = 0           # given up on → RELEASE_FAILED
     destroy_errors: int = 0   # destroy() raised; will retry next pass
@@ -68,6 +76,7 @@ def reap_once(
     batch: int = 100,
     on_progress: Callable[[], None] | None = None,
     max_attempts: int = MAX_RELEASE_ATTEMPTS,
+    provision_stuck_seconds: int = lease.PROVISION_STUCK_SECONDS,
 ) -> ReapSummary:
     """Run one reaper pass. ``destroy(claimed)`` receives the whole `ClaimedLease` (so
     a fenced driver can check `claimed.id` against the guest's fence before deleting
@@ -83,7 +92,11 @@ def reap_once(
     ``max_attempts`` (default ``MAX_RELEASE_ATTEMPTS``) is the release-attempt ceiling before a
     still-undestroyable guest is abandoned to terminal ``RELEASE_FAILED`` — an operator reliability dial the
     daemon threads from `operator_setting` (raise it for a flaky PVE so a guest gets more grace periods before
-    it is orphaned; lower it to reclaim a stuck slot faster)."""
+    it is orphaned; lower it to reclaim a stuck slot faster).
+
+    ``provision_stuck_seconds`` is the PROVISIONING budget (0048, review REL-01; the daemon threads the
+    hot-applied `operator_setting.provision_stuck_seconds`): a lease still PROVISIONING this long after
+    `begin_provisioning` is reclaimed as 'provision_stuck' in step 1. 0 turns the step off."""
     summary = ReapSummary()
     with push_context(run_id=generate_correlation_id(), op="reap"):
         # Queued (PENDING) leases past their wait deadline → REJECTED(queue_timeout). A pure state
@@ -91,6 +104,10 @@ def reap_once(
         # no slot to free — it just leaves the queue. Independent of the LIVE expire/teardown below
         # (claim_expired keys on LIVE_STATES, which excludes PENDING, so the two never overlap).
         summary.queue_expired = len(lease.claim_pending_expired(conn, batch))
+        # A lease the provisioner left PROVISIONING (a create/clone outliving its wait budget, or a mark_active
+        # whose hand-off release failed) is otherwise revisited only at expires_at, which renewing defers forever.
+        # First, so a lease past both thresholds is labelled provision_stuck rather than expired.
+        summary.provision_stuck = len(lease.claim_provisioning_stale(conn, provision_stuck_seconds, batch))
         summary.expired = len(lease.claim_expired(conn, batch))
         for t in lease.claim_releasing(conn, grace_seconds, batch):
             if on_progress is not None:

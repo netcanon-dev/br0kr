@@ -29,7 +29,7 @@ def _preserve_root_log_level():
 _KNOB_ATTRS = ("reap_grace", "sweep_every", "sweep_dry_run", "provision_limit", "promote_limit",
                "max_release_attempts", "build_limit", "migrate_limit", "guest_ip_prefix",
                "audit_retention_days", "full_clone", "placement_assert", "cross_node_clone",
-               "clone_content_enforcement", "discovery_interval_seconds")
+               "clone_content_enforcement", "discovery_interval_seconds", "provision_stuck_seconds")
 
 
 def _ns(**over: object) -> SimpleNamespace:
@@ -40,6 +40,7 @@ def _ns(**over: object) -> SimpleNamespace:
                                "audit_retention_days": 0, "full_clone": True, "placement_assert": True,
                                "cross_node_clone": False, "clone_content_enforcement": False,
                                "discovery_interval_seconds": 0, "_last_discovery_at": None,
+                               "provision_stuck_seconds": 1200,
                                "_reload_requested": False,
                                "_beat": lambda: None}   # the real Daemon threads _beat into slow steps (prune)
     base.update(over)
@@ -55,7 +56,8 @@ def test_apply_settings_hot_applies_every_knob_from_the_ledger(monkeypatch):
                 "promote_limit": 9, "max_release_attempts": 2, "build_limit": 1, "migrate_limit": 1,
                 "guest_ip_prefix": "192.168.11.", "audit_retention_days": 30, "queue_max": 500,
                 "full_clone": False, "placement_assert": False, "cross_node_clone": True,
-                "clone_content_enforcement": True, "discovery_interval_seconds": 300, "log_level": "DEBUG"}
+                "clone_content_enforcement": True, "discovery_interval_seconds": 300, "log_level": "DEBUG",
+                "provision_stuck_seconds": 600}
     monkeypatch.setattr(settings, "effective", lambda _c: resolved)
     monkeypatch.setattr(settings, "take_reload", lambda _c: False)   # no reload pending this tick
     daemon.Daemon._apply_settings(ns, object())   # type: ignore[arg-type]

@@ -9,6 +9,13 @@ Deterministic checks:
   heartbeat_saves      a heartbeat pushes the deadline out, so the reaper skips it.
   provision_guard      begin_provisioning/mark_active are guarded; mark_active refuses
                        to resurrect a RELEASING lease.
+  provision_stuck      a lease still PROVISIONING past the budget is reclaimed as RELEASING(provision_stuck)
+                       even though a heartbeat keeps its expires_at in the future; a fresh PROVISIONING lease,
+                       an old ACTIVE lease, and every lease with the step OFF (budget 0) are untouched; the
+                       reaper then tears the guest down; begin_provisioning stamps provisioning_at (0048).
+  provision_stuck_migration
+                       re-applying migration 0048 backfills a PROVISIONING row with NULL provisioning_at to
+                       now() (so the upgrade never reclaims in-flight provisions) and is idempotent.
   begin_provisioning_only_from_admitted
                        begin_provisioning refuses EVERY non-ADMITTED state and leaves the row
                        untouched (no vmid stamped), so a reaped or released lease is never
@@ -27,6 +34,7 @@ Concurrent invariants (barrier-synchronized, thousands of rounds):
   expired_no_double    M due leases, C reapers (claim_expired) → each claimed once.
   releasing_no_double  M RELEASING leases, C reapers (claim_releasing) → each claimed once
                        within the grace window.
+  provision_stuck_no_double  M stale PROVISIONING leases, C reapers → each reclaimed exactly once.
   backlog_drains       limit << due-count, reapers loop → every lease claimed exactly once
                        across passes (bounded-LIMIT multi-pass drain, no loss, no dupes).
 
@@ -71,15 +79,20 @@ def reset() -> None:
         c.execute("INSERT INTO node(id,cpu_total,mem_total_mb) VALUES (%s,%s,%s)", (NODE, NODE_CPU, NODE_MEM))
 
 
-def insert_lease(state: str, expires_offset_s: int, ttl: int = 900, vmid: int | None = None) -> int:
+def insert_lease(state: str, expires_offset_s: int, ttl: int = 900, vmid: int | None = None,
+                 provisioning_offset_s: int | None = None) -> int:
     """Insert a lease in a chosen state with expires_at = now()+offset (negative =
-    already past, i.e. due) and an optional vmid. Returns the lease id."""
+    already past, i.e. due), an optional vmid, and an optional provisioning_at = now()+offset
+    (negative = entered PROVISIONING that long ago; None = NULL). Returns the lease id."""
     with psycopg.connect(CONN, autocommit=True) as c:
         row = c.execute(
-            """INSERT INTO lease(node_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid)
-               VALUES (%s,%s,%s,%s::lease_state,%s, now() + make_interval(secs => %s), %s)
+            """INSERT INTO lease(node_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid,
+                                 provisioning_at)
+               VALUES (%s,%s,%s,%s::lease_state,%s, now() + make_interval(secs => %s), %s,
+                       CASE WHEN %s::int IS NULL THEN NULL ELSE now() + make_interval(secs => %s::int) END)
                RETURNING id""",
-            (NODE, REQ_CPU, REQ_MEM, state, ttl, expires_offset_s, vmid),
+            (NODE, REQ_CPU, REQ_MEM, state, ttl, expires_offset_s, vmid,
+             provisioning_offset_s, provisioning_offset_s),
         ).fetchone()
         return row[0]
 
@@ -164,6 +177,67 @@ def check_begin_provisioning_only_from_admitted() -> bool:
     ok = not wrong
     print(f"[begin_prov_admitted]  {len(others)} non-ADMITTED states refused, row untouched: "
           f"{wrong or 'all'}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def _reason_of(lid: int) -> str | None:
+    with psycopg.connect(CONN, autocommit=True) as c:
+        return c.execute("SELECT released_reason FROM lease WHERE id = %s", (lid,)).fetchone()[0]
+
+
+def check_provision_stuck() -> bool:
+    """A lease left PROVISIONING longer than the budget is reclaimed even while heartbeats keep its expires_at in
+    the future (review REL-01: PROVISIONING is renewable, so expiry never ended it). A fresh PROVISIONING lease
+    and an old ACTIVE lease are untouched, the budget-0 off switch claims nothing, the reaper then destroys the
+    stuck guest and settles the row, and begin_provisioning stamps provisioning_at in the first place."""
+    reset()
+    stuck = insert_lease("PROVISIONING", expires_offset_s=86400, vmid=941, provisioning_offset_s=-7200)
+    fresh = insert_lease("PROVISIONING", expires_offset_s=86400, vmid=942, provisioning_offset_s=-60)
+    old_active = insert_lease("ACTIVE", expires_offset_s=86400, vmid=943, provisioning_offset_s=-7200)
+    with connect() as c:
+        off = lease.claim_provisioning_stale(c, 0)
+        lease.heartbeat(c, stuck)                            # the agent keeps renewing: expires_at stays ahead
+        got = lease.claim_provisioning_stale(c, 1200)
+    claimed_ok = [x.id for x in got] == [stuck] and off == []
+    states_ok = (state_of(stuck), _reason_of(stuck), state_of(fresh), state_of(old_active)) == (
+        "RELEASING", "provision_stuck", "PROVISIONING", "ACTIVE")
+    destroyed: list[int] = []
+    with connect() as c:
+        reaper.reap_once(c, lambda cl: destroyed.append(cl.vmid), grace_seconds=0, provision_stuck_seconds=1200)
+    torn_down = destroyed == [941] and state_of(stuck) == "RELEASED"
+    lid = insert_lease("ADMITTED", expires_offset_s=3600)
+    with connect() as c:
+        lease.begin_provisioning(c, lid, vmid=944, name="g")
+    with psycopg.connect(CONN, autocommit=True) as c:
+        stamped = c.execute("SELECT provisioning_at IS NOT NULL AND provisioning_at <= now() FROM lease "
+                            "WHERE id = %s", (lid,)).fetchone()[0]
+    ok = claimed_ok and states_ok and torn_down and stamped
+    print(f"[provision_stuck]      claimed={[x.id for x in got]} off={off} stuck->{state_of(stuck)} "
+          f"fresh={state_of(fresh)} old_active={state_of(old_active)} destroyed={destroyed} stamped={stamped}"
+          f"  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_provision_stuck_migration() -> bool:
+    """Re-running migration 0048 backfills a PROVISIONING row whose provisioning_at is NULL (the upgrade case: a
+    lease mid-provision when 0048 lands) to now(), so the new reaper step gives it a full budget instead of
+    reclaiming it at the first tick; rows in other states stay NULL. Also proves the file is idempotent."""
+    reset()
+    inflight = insert_lease("PROVISIONING", expires_offset_s=3600, vmid=951)        # provisioning_at NULL
+    other = insert_lease("ACTIVE", expires_offset_s=3600, vmid=952)
+    sql = (Path(__file__).resolve().parent.parent / "db" / "migrations" / "0048_provision_stuck.sql").read_text(
+        encoding="utf-8")
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute(sql)
+        c.execute(sql)                                                               # idempotent
+        a = c.execute("SELECT provisioning_at IS NOT NULL, provisioning_at > now() - interval '1 minute' "
+                      "FROM lease WHERE id = %s", (inflight,)).fetchone()
+        b = c.execute("SELECT provisioning_at IS NULL FROM lease WHERE id = %s", (other,)).fetchone()[0]
+    with connect() as c:
+        reclaimed = lease.claim_provisioning_stale(c, 1200)
+    ok = a == (True, True) and b and reclaimed == []
+    print(f"[provision_stuck_migration] backfilled={a} other_null={b} reclaimed_after_upgrade={len(reclaimed)}"
+          f"  | {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -333,6 +407,34 @@ def check_releasing_no_double() -> bool:
     return ok
 
 
+def check_provision_stuck_no_double(leases: int = 30, reapers: int = REAPERS) -> bool:
+    """Concurrent reapers reclaim each stale PROVISIONING lease exactly once (FOR UPDATE SKIP LOCKED), so two
+    daemons overlapping at failover never both hand the same guest to teardown from this step."""
+    reset()
+    ids = {insert_lease("PROVISIONING", expires_offset_s=86400, vmid=1000 + i, provisioning_offset_s=-7200)
+           for i in range(leases)}
+    barrier = threading.Barrier(reapers, timeout=60)
+    all_claims: list[int] = []
+    lock = threading.Lock()
+
+    def reap() -> None:
+        with connect() as c:
+            barrier.wait()
+            got = lease.claim_provisioning_stale(c, 1200, limit=leases)
+        with lock:
+            all_claims.extend(x.id for x in got)
+
+    ts = [threading.Thread(target=reap) for _ in range(reapers)]
+    for th in ts:
+        th.start()
+    for th in ts:
+        th.join()
+    ok = len(all_claims) == len(set(all_claims)) == leases and set(all_claims) == ids
+    print(f"[provision_stuck_no_double] {leases} stale PROVISIONING, {reapers} reapers: claimed={len(all_claims)} "
+          f"unique={len(set(all_claims))}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def check_backlog_drains(leases: int = 40, reapers: int = 4, limit: int = 7) -> bool:
     """limit << due-count: each reaper LOOPS claim_expired until empty. Proves a
     bounded-LIMIT pass drains the whole backlog across passes with no loss / no dupe."""
@@ -373,6 +475,8 @@ def main() -> int:
         check_heartbeat_saves,
         check_provision_guard,
         check_begin_provisioning_only_from_admitted,
+        check_provision_stuck,
+        check_provision_stuck_migration,
         check_full_release_path,
         check_reaper_end_to_end,
         check_reaper_release_failed,
@@ -381,6 +485,7 @@ def main() -> int:
         check_provision_vs_expire,
         check_expired_no_double,
         check_releasing_no_double,
+        check_provision_stuck_no_double,
         check_backlog_drains,
     ]
     results = [fn() for fn in checks]

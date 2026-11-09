@@ -245,7 +245,8 @@ def begin_provisioning(
     Returns ``True`` if this caller won. ``False`` means the lease left ADMITTED first — almost always
     because the reaper expired it (ADMITTED is LIVE, so a slow pickup past TTL is reapable) — and the
     reconciler must NOT provision a guest for a lease that is already being torn down. Also refreshes the
-    deadline so the provisioning window starts at pickup, not at admission.
+    deadline so the provisioning window starts at pickup, not at admission, and stamps ``provisioning_at``
+    (0048), the start of the bounded PROVISIONING budget `claim_provisioning_stale` enforces.
 
     Raises ``VmidContended`` if the vmid is already held by another LIVE lease in the cluster (the unique
     index `lease_cluster_vmid_uniq`, migration 0004, rejects the double-stamp): the failed UPDATE changes
@@ -258,6 +259,7 @@ def begin_provisioning(
             "UPDATE lease SET state = 'PROVISIONING', vmid = %s, name = %s, "
             "cluster_id = (SELECT cluster_id FROM node WHERE node.id = lease.node_id), "
             "hold_reason = NULL, "   # 0033: a lease being provisioned is no longer held — clear the diagnostic
+            "provisioning_at = now(), "   # 0048: starts the PROVISIONING budget (claim_provisioning_stale)
             "expires_at = now() + make_interval(secs => ttl_seconds) "
             "WHERE id = %s AND state = 'ADMITTED' RETURNING id",
             (vmid, name, lease_id),
@@ -468,6 +470,57 @@ def claim_expired(conn: psycopg.Connection[Any], limit: int = 100) -> list[Claim
         log.info(
             "reaper expired %d lease(s)",
             len(claimed),
+            extra={"lease_ids": [c.id for c in claimed]},
+        )
+    return claimed
+
+
+# The PROVISIONING budget's code default (0048): above the provisioner's own clone (300) + boot-disk grow (120) +
+# start (120) wait budgets. Those budgets count task polls, not wall-clock seconds, so a very sluggish PVE can
+# outlast them; what makes reclaiming safe is that the single leader runs provision and reap on one thread (it can
+# never reclaim a lease it is still provisioning) and that mark_active is a CAS (a reclaimed lease never goes ACTIVE).
+PROVISION_STUCK_SECONDS = 1200
+
+
+def claim_provisioning_stale(conn: psycopg.Connection[Any], budget_seconds: int,
+                             limit: int = 100) -> list[ClaimedLease]:
+    """Reaper step (0048, review REL-01): claim PROVISIONING leases that entered PROVISIONING more than
+    ``budget_seconds`` ago, flipping each to RELEASING(released_reason = 'provision_stuck') and returning them.
+
+    Nothing else revisits a PROVISIONING lease: the provisioner leaves one there on purpose when its clone or
+    create task outlives the wait budget, and one also stays there when mark_active raises and the hand-off
+    release fails on the same ledger blip. PROVISIONING is renewable, so ``expires_at`` alone never ended it for
+    a heartbeating agent. This step keys on ``provisioning_at`` and IGNORES ``expires_at``, so renewing cannot
+    hold a lease in PROVISIONING past the budget. The ordinary teardown (`claim_releasing` + the fenced destroy)
+    then removes the guest: a fenced guest is destroyed, an unfenced partial clone is the orphan sweep's.
+
+    Same single-statement, ``FOR UPDATE SKIP LOCKED`` shape as `claim_expired`, so concurrent reapers never claim
+    a lease twice, and a lease that won ``mark_active`` first is simply no longer PROVISIONING (the CAS loser
+    sees RELEASING and leaves teardown to the reaper, the existing lost-CAS path). A lease with NULL
+    ``provisioning_at`` (a PROVISIONING row from before 0048 that the migration's backfill missed) is never
+    matched; ``budget_seconds`` <= 0 disables the step."""
+    if budget_seconds <= 0:
+        return []
+    rows = conn.execute(
+        """WITH due AS (
+                SELECT id FROM lease
+                 WHERE state = 'PROVISIONING'
+                   AND provisioning_at <= now() - make_interval(secs => %s)
+                 ORDER BY provisioning_at, id
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT %s)
+            UPDATE lease l
+               SET state = 'RELEASING', released_reason = 'provision_stuck'
+              FROM due WHERE l.id = due.id
+          RETURNING l.id, l.node_id, l.vmid, l.name, l.release_attempts""",
+        (budget_seconds, limit),
+    ).fetchall()
+    conn.commit()
+    claimed = [ClaimedLease(*r) for r in rows]
+    if claimed:
+        log.warning(
+            "reaper reclaimed %d lease(s) stuck in PROVISIONING longer than %ss (released_reason=provision_stuck)",
+            len(claimed), budget_seconds,
             extra={"lease_ids": [c.id for c in claimed]},
         )
     return claimed

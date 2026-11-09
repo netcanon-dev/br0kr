@@ -87,6 +87,22 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   row version unchanged. Side effect: that write was the idle broker's only steady WAL, so `ledgerhealth`'s
   byte-based replay lag now reads 0 on an idle fleet even for a standby that stopped replaying, until work
   arrives (a disconnected standby still shows at once); documented in `br0kr/ledgerhealth.py` (review PERF-06).
+- **A lease can no longer sit in PROVISIONING forever (migration `0048`, `br0kr/lease.py`, `br0kr/reaper.py`,
+  `br0kr/settings.py`, `br0kr/daemon.py`).** Why: nothing revisited a PROVISIONING lease. The provisioner leaves
+  one there on purpose when a clone or create outlives its wait budget, and one also stayed there when
+  `mark_active` raised and the hand-off release failed on the same ledger blip. PROVISIONING is renewable, so a
+  heartbeating agent held the capacity (and a possibly half-built guest) indefinitely, with no reason shown.
+  `begin_provisioning` now stamps `lease.provisioning_at`, and a new reaper step moves a lease still
+  PROVISIONING `provision_stuck_seconds` later to `RELEASING(released_reason = 'provision_stuck')`, whatever
+  its `expires_at` (it runs before the expiry claim, so a lease past both reads `provision_stuck`; one whose
+  agent stopped renewing usually expires first and reads `expired`). A fenced guest is then fenced-destroyed;
+  a clone that timed out before its fence goes to the orphan sweep's marker reclaim. A partial index keeps
+  the scan off the lease history, and the migration's ALTERs carry a 10 s `lock_timeout`. The budget is a
+  hot-applied operator setting
+  (default 1200 s = 20 min, above the provisioner's own clone + grow + start wait budgets; 0 = off), counted
+  as `provision_stuck` on `/metrics`. The migration backfills leases already PROVISIONING to `now()`, so an
+  upgrade never reclaims in-flight provisions. Proven against real Postgres in `harness_lease`
+  (`provision_stuck`, `provision_stuck_migration`, `provision_stuck_no_double`) (review REL-01).
 - **A healthy slow clone no longer reads as a wedged daemon (`br0kr/pve.py`, `br0kr/reconciler.py`,
   `br0kr/daemon.py`).** Why: `pve.clone` (up to 300 s), `grow_boot_disk` and `start` (120 s each) and the
   create wait ran with no liveness heartbeat, so a clone longer than the stall window turned `/healthz` 503 on a

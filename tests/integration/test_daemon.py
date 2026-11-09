@@ -115,13 +115,15 @@ def wired(monkeypatch):
 
     monkeypatch.setattr(reconciler, "discover_and_stamp_ip", fake_discover)
 
-    def fake_reap(conn, destroy, grace_seconds=30, batch=100, on_progress=None, max_attempts=5):
+    def fake_reap(conn, destroy, grace_seconds=30, batch=100, on_progress=None, max_attempts=5,
+                  provision_stuck_seconds=1200):
         rec["reap_calls"] += 1
+        rec["reap_provision_stuck_seconds"] = provision_stuck_seconds   # 0048: the daemon threads its dial
         rec["reap_on_progress"] = on_progress
         rec["reap_max_attempts"] = max_attempts   # the daemon threads its (hot-applied) release ceiling
         if on_progress is not None:
             on_progress()   # simulate one claimed-lease heartbeat (the per-destroy beat)
-        return reaper.ReapSummary(expired=1, released=2)
+        return reaper.ReapSummary(expired=1, released=2, provision_stuck=rec.get("stuck_claimed", 0))
 
     monkeypatch.setattr(reaper, "reap_once", fake_reap)
 
@@ -179,6 +181,17 @@ def test_tick_threads_its_heartbeat_into_provisioning_and_teardown(wired):
     assert wired["provision_on_progress"][5] == d._beat
     destroy_cells = [c.cell_contents for c in (d._destroyer.__closure__ or ())]
     assert d._beat in destroy_cells
+
+
+def test_tick_threads_the_provisioning_budget_into_the_reaper_and_counts_it(wired):
+    """The daemon passes its (hot-applied) provision_stuck_seconds to reap_once and copies the reaper's
+    provision_stuck count into the tick summary, so /metrics shows br0kr_provision_stuck_total (0048, REL-01).
+    Guards the knob being read but never wired, which would leave the budget stuck at its default."""
+    wired["stuck_claimed"] = 2
+    d = _daemon(provision_stuck_seconds=900)
+    summary = d.tick(_FakeConn())
+    assert wired["reap_provision_stuck_seconds"] == 900
+    assert summary.provision_stuck == 2
 
 
 def test_tick_reports_the_increase_in_failed_guest_stops(wired, monkeypatch):

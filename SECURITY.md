@@ -474,8 +474,8 @@ Name the residual, why it's accepted, and what would close it.
 - **Operator settings: the `operator_setting` write is operator-trust (and cannot weaken the floor).** The
   runtime-knob singleton (`br0kr/settings.py`, migration `0021`; the dashboard's token-gated `#settings-sec`
   edit) tunes reconciler/queue POLICY dials — reap grace, sweep cadence + dry-run, provision/promote limits,
-  the build/migrate actuation gates, the global `queue_max`, the reaper's `max_release_attempts`, the
-  guest-IP-prefix — hot-applied by the daemon each tick (`_apply_settings`, BETWEEN passes, never mid-admit)
+  the build/migrate actuation gates, the global `queue_max`, the reaper's `max_release_attempts` and
+  `provision_stuck_seconds`, the guest-IP-prefix — hot-applied by the daemon each tick (`_apply_settings`, BETWEEN passes, never mid-admit)
   and by the gateway per request (`_queue_max`). NONE of them is a capacity scope: they change how fast/when
   the reconciler acts and how deep the queue may grow, not the derived-capacity math or the `admit()` advisory
   lock, so an erroneous edit can starve throughput or bound the queue but can NEVER over-allocate a node. Like

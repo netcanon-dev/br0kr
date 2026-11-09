@@ -150,6 +150,8 @@ class TickSummary:
     vmid_contended: int = field(default=0, metadata=_COUNTER)
     unroutable: int = field(default=0, metadata=_COUNTER)        # admitted leases whose node this daemon can't reach
     expired: int = field(default=0, metadata=_COUNTER)           # LIVE leases the reaper flipped to RELEASING
+    # PROVISIONING leases past the budget the reaper flipped to RELEASING(provision_stuck) (0048, review REL-01)
+    provision_stuck: int = field(default=0, metadata=_COUNTER)
     reaped: int = field(default=0, metadata=_COUNTER)            # guests the reaper destroyed (or settled) → RELEASED
     swept: int = field(default=0, metadata=_COUNTER)             # orphan guests the sweep destroyed
     # the node registry was rebuilt this tick (SIGHUP / cadence); the cumulative metric is br0kr_reloads_total
@@ -274,6 +276,7 @@ class Daemon:
         replicate_connect: Callable[[], psycopg.Connection[Any]] | None = None,
         repl_stale_seconds: int = replication.STALE_SECONDS_DEFAULT,
         max_release_attempts: int = reaper.MAX_RELEASE_ATTEMPTS,
+        provision_stuck_seconds: int = lease.PROVISION_STUCK_SECONDS,
     ) -> None:
         self._connect = connect
         self._leader_connect = leader_connect
@@ -380,6 +383,9 @@ class Daemon:
         # RELEASE_FAILED — an operator reliability dial (operator_setting.max_release_attempts, hot-applied
         # in _apply_settings). Threaded into reaper.reap_once as max_attempts.
         self.max_release_attempts = max_release_attempts
+        # The PROVISIONING budget (0048, operator_setting.provision_stuck_seconds, hot-applied): a lease still
+        # PROVISIONING this long is reclaimed as 'provision_stuck' by the reaper (review REL-01). 0 = off.
+        self.provision_stuck_seconds = provision_stuck_seconds
         # Audit-trail retention in DAYS (0024, operator_setting.audit_retention_days, hot-applied in
         # _apply_settings). 0 = OFF (keep forever — the default; not a constructor param, mirroring log_level:
         # resolved from the ledger/env each tick). Gates the opt-in _prune_audit step.
@@ -743,6 +749,7 @@ class Daemon:
             self.provision_limit = eff["provision_limit"]
             self.promote_limit = eff["promote_limit"]
             self.max_release_attempts = eff["max_release_attempts"]
+            self.provision_stuck_seconds = eff["provision_stuck_seconds"]   # 0048; the reaper's PROVISIONING budget
             self.build_limit = eff["build_limit"]
             self.migrate_limit = eff["migrate_limit"]
             self.guest_ip_prefix = eff["guest_ip_prefix"]
@@ -942,8 +949,10 @@ class Daemon:
 
             reap = reaper.reap_once(conn, self._destroyer, grace_seconds=self.reap_grace,
                                     batch=self.batch, on_progress=self._beat,
-                                    max_attempts=self.max_release_attempts)
+                                    max_attempts=self.max_release_attempts,
+                                    provision_stuck_seconds=self.provision_stuck_seconds)
             summary.expired, summary.reaped = reap.expired, reap.released
+            summary.provision_stuck = reap.provision_stuck
             summary.queue_expired = reap.queue_expired
             self._beat()   # progress: reap done
 

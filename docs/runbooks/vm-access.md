@@ -203,7 +203,9 @@ click. See SECURITY.md (dashboard write-surface control) and `br0kr/actas.py`.
   evidence and reclaims nothing. The template itself (`template=1`) is never touched.
 - **No host overdraw.** While a clone is in flight or timed-out-PROVISIONING, its lease still holds the
   capacity in the ledger — so the broker's accounting never under-counts the host, and the guest is
-  reclaimed once its lease goes terminal.
+  reclaimed once its lease goes terminal. A lease cannot stay PROVISIONING forever: after
+  `provision_stuck_seconds` (operator setting, default 20 min) the reaper reclaims it as
+  `provision_stuck`, even if the agent keeps renewing it.
 
 ---
 
@@ -217,6 +219,7 @@ click. See SECURITY.md (dashboard write-surface control) and `br0kr/actas.py`.
 | a stray VM left after a daemon crash mid-clone | the template wasn't tagged `br0kr-template`; reclaim it by hand, then add the tag |
 | clone fails immediately | linked clone (`BR0KR_VM_FULL_CLONE=0`) on a storage that can't linked-clone — use full, or a zfs/lvm-thin/qcow2 storage |
 | lease ends with `released_reason` `provision_acl_denied` | the broker's PVE token lacks a privilege for the clone (most often `Datastore.AllocateSpace` on the target pool or `SDN.Use` on the bridge's zone); the daemon's ERROR line quotes PVE's privilege. Grant the four ACLs in [docker-deploy.md §7](docker-deploy.md#7-operating) |
+| lease ends with `released_reason` `provision_stuck` | the lease stayed PROVISIONING past `provision_stuck_seconds` (default 20 min) while you kept renewing it: the clone or start task outlived its wait budget, or the ledger blipped right after the clone (if you stopped renewing, the same case usually ends `expired` first). Check the daemon log for that lease id and PVE's task log for the clone; request a new lease once the node is healthy |
 | lease ends with `released_reason` `template_vmid_missing` | the catalog template's vmid does not exist on the node that clones it (deleted, renumbered, or never replicated there); re-point the catalog entry or rebuild the template |
 
 ## See also

@@ -32,8 +32,8 @@ retry + grace + a `RELEASE_FAILED` backstop. provision_lease never relies on its
 fire-and-forget destroy as the *only* cleanup. Failure modes:
   • lost at ADMITTED (begin_provisioning → False): built nothing.
   • create raised / failed exitstatus: release → the reaper destroys the stamped vmid.
-  • create TIMEOUT (still running): leave PROVISIONING; the TTL reaper reclaims it
-    later, by which point the create has settled — we never race an in-flight create.
+  • create TIMEOUT (still running): leave PROVISIONING; the reaper reclaims it (at expires_at, or after
+    provision_stuck_seconds, 0048) once the create has settled — we never race an in-flight create.
   • mark_active raised: lease still PROVISIONING (CAS uncommitted) → release to reaper.
   • mark_active False (reaped mid-provision): if the lease is still RELEASING the reaper
     owns teardown (it has the vmid); only if it already went TERMINAL (the reaper gave
@@ -72,7 +72,7 @@ class ProvisionOutcome:
       'vmid_contended'          — the vmid was held by another live lease in the cluster (a concurrent
                                   reconciler won it at failover); lease stays ADMITTED, retried next tick.
       'provision_failed'        — the create task returned a failure exitstatus.
-      'provision_timeout'       — create still running past the poll budget; TTL reaper reclaims.
+      'provision_timeout'       — create still running past the poll budget; the reaper reclaims it.
       'provision_error'         — a step RAISED (API/DB blip); released to the reaper.
       'reaped_during_provision' — the lease left PROVISIONING mid-flight.
       'cross_provision_detected'— the post-clone disk-location assertion (0033) found the boot disk on a
@@ -299,7 +299,7 @@ def _build_via_clone(
 ) -> CloneBuild:
     """Build a guest by CLONING a cloud-init template, returning a ``CloneBuild`` whose ``rc`` is the exitstatus
     the same way `driver.provision` does: 'OK' (cloned, configured, started), 'TIMEOUT' (clone/start still
-    running — the caller leaves the lease PROVISIONING for the TTL reaper), or a non-OK rc (the caller releases
+    running — the caller leaves the lease PROVISIONING for the reaper), or a non-OK rc (the caller releases
     to the reaper). The result ALSO carries the boot device key (for the caller's boot assertion, §8 #1) and the
     attached data-disk devices (for the daemon's late-stamp + verify). Raises on a transient API error (same
     contract as provision).
@@ -902,10 +902,14 @@ def provision_lease(
 
     if rc == "TIMEOUT":
         # Create still running past our poll budget. Do NOT race the reaper against an
-        # in-flight create; leave PROVISIONING and let the TTL reaper reclaim it later
-        # (the create has settled by then), fenced-destroying the stamped vmid.
-        log.warning("provision timeout for lease %s vmid %s — leaving PROVISIONING for the TTL reaper",
-                    lease_id, vmid, extra={"lease_id": lease_id, "vmid": vmid})
+        # in-flight create; leave PROVISIONING. The reaper reclaims it at expires_at or, if the
+        # agent keeps renewing, once it has been PROVISIONING for provision_stuck_seconds
+        # (0048, default 20 min). A guest that got its fence is then fenced-destroyed; a clone that
+        # timed out BEFORE configure carries only the template marker, so the fenced destroy refuses it
+        # (fence_mismatch) and the orphan sweep's marker reclaim removes it once the lease is terminal.
+        log.warning("provision timeout for lease %s vmid %s — leaving PROVISIONING for the reaper "
+                    "(expiry or provision_stuck_seconds)", lease_id, vmid,
+                    extra={"lease_id": lease_id, "vmid": vmid})
         return ProvisionOutcome(lease_id, vmid, "provision_timeout", "create still running")
     if rc != "OK":
         _release_to_reaper(conn, lease_id, "failed")
