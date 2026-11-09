@@ -9,6 +9,8 @@ No DB, no Proxmox; the live end-to-end is scripts/harness_daemon.py.
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from br0kr import daemon as daemon_mod
@@ -598,6 +600,25 @@ def test_run_standby_does_not_serve_when_lock_declined(wired, monkeypatch):
     d.run()
     assert wired["provisioned"] == [] and wired["reap_calls"] == 0
     assert d._last_progress_at is not None   # the standby/reconnect loop beats (liveness stays alive)
+
+
+def test_run_standby_log_names_the_lock_holder(wired, monkeypatch, caplog):
+    """The standby's poll line names the session holding the leader lock (pid, client, idle time) and carries
+    them as structured fields (review REL-03). Guards the operator evidence for a dead leader whose lock the
+    ledger has not released yet: without it, a stuck standby says only 'another reconciler is leader'."""
+    d = _daemon()
+
+    def decline(conn, name):
+        d.stop()
+        return False
+
+    monkeypatch.setattr(leader, "try_acquire", decline)
+    monkeypatch.setattr(leader, "holder", lambda conn, name: {"pid": 4242, "client_addr": "192.0.2.7", "idle_s": 75})
+    with caplog.at_level(logging.INFO, logger="br0kr.daemon"):
+        d.run()
+    rec = next(r for r in caplog.records if r.getMessage().startswith("standby:"))
+    assert "pid 4242 from 192.0.2.7, idle 75s" in rec.getMessage()
+    assert (rec.leader_holder_pid, rec.leader_holder_addr, rec.leader_holder_idle_s) == (4242, "192.0.2.7", 75)
 
 
 def test_run_serves_then_releases_when_leader(wired, monkeypatch):

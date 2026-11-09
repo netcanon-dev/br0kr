@@ -518,7 +518,8 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
      one-cluster-per-ledger assumption is now explicit and removed — **proven on real Postgres**
      (`scripts/harness_cluster.py`).
    - ✅ **Ledger HA — client resilience** (`br0kr/db.py`): every process opens its ledger
-     connection through one seam that applies TCP keepalives + a connect timeout, classifies a
+     connection through one seam that applies TCP keepalives (client side, and the ledger's own per
+     session so a dead leader host's lock is freed in ~60 s) + a connect timeout, classifies a
      failure as *transient* (retry — failover/restart/overload) vs *misconfig* (fail fast), and
      rides through a brief outage with bounded backoff (`connect_with_retry`). HA topology is
      config-as-data: a multi-host `PGCONN` + `target_session_attrs=read-write` re-homes clients

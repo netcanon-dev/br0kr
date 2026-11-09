@@ -1577,7 +1577,15 @@ class Daemon:
                                 # until the standby-poll branch below would republish it (review S22).
                                 self._publish_health(observability.ROLE_STANDBY, None)
                                 break                 # reopen a fresh leader conn, re-stand-by
-                            log.info("standby: another reconciler is leader; retrying in %ss", self.standby_poll)
+                            # Name the session we are waiting on (review REL-03): a dead leader's lock is held
+                            # until the ledger notices, and pid + client + idle time are what an operator needs
+                            # to terminate it with evidence. Best-effort: holder() never raises.
+                            who = leader.holder(lc, self.leader_name)
+                            log.info("standby: another reconciler is leader (%s); retrying in %ss",
+                                     leader.describe_holder(who), self.standby_poll,
+                                     extra={"leader_holder_pid": (who or {}).get("pid"),
+                                            "leader_holder_addr": (who or {}).get("client_addr"),
+                                            "leader_holder_idle_s": (who or {}).get("idle_s")})
                             self._beat()   # progress: the standby poll loop is alive
                             self._publish_health(observability.ROLE_STANDBY, None)
                             self._stop.wait(self.standby_poll)

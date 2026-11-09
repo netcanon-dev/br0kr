@@ -79,6 +79,23 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   version is the newest migration the build ships (`migrate.required_schema`), so it cannot drift. The gate
   never refuses an older image; `docker-deploy.md` states the rollback contract (one release back is supported)
   (review ARCH-02).
+- **A dead or partitioned leader host no longer holds the leader lock for ~2 hours (`br0kr/db.py`,
+  `br0kr/leader.py`, `br0kr/daemon.py`, `docker-compose.yml`, both standby entrypoints).** Why: leadership is
+  a session advisory lock that Postgres frees only once it sees the session end, and a host that dies sends
+  nothing, so with the server's default keepalive time (the OS's 2 h) an external or promoted-standby ledger
+  kept a dead leader's lock that long: every daemon stayed STANDBY, nothing provisioned or reaped, `/healthz`
+  stayed green. `db.connect` now adds the ledger's `tcp_keepalives_idle/interval/count` (30/10/3, the client
+  side's numbers) plus `tcp_user_timeout` (60 s, for a session cut while a reply is in flight, which
+  keepalives do not probe) to every session's startup `options`, first, so an operator's own setting still
+  wins. They are per-session settings, so this works on any ledger without a server change (it needs
+  Postgres 12+ for `tcp_user_timeout`); the bundled ledgers set the same four server-wide as well.
+  **Rollout:** the first `scripts/deploy.sh` after this recreates `pg-primary` (a few seconds of ledger
+  downtime the services ride through); the standby entrypoints are bind-mounted, so run
+  `docker compose restart pg-standby` (and `pg-standby-remote` on a DR host) once to apply them there. A standby's poll line now names the holder (`pid … from …, idle …s`, with
+  `leader_holder_*` fields) so an operator can `pg_terminate_backend` it with evidence; br0kr never does.
+  Proven by `scripts/run_leader_blackhole.sh`: against a ledger with no server-wide settings, a standby won
+  the locks of a blackholed idle session and of one mid-reply within about a minute of the cut, while
+  control sessions without br0kr's settings still held theirs (review REL-03).
 - **Admission no longer scans the whole lease history under its locks (`br0kr/admission.py`,
   `br0kr/inventory.py`, `br0kr/scheduler.py`).** Why: lease rows are never deleted (the orphan sweep's watermark
   relies on it), and the capacity reads joined every lease of a node, pool or project, testing the state only

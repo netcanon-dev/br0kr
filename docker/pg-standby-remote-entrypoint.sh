@@ -54,4 +54,6 @@ CONF
   echo "pg-standby-remote: clone complete, starting as hot standby"
 fi
 
-exec docker-entrypoint.sh postgres -c hot_standby=on
+# tcp_*: same as pg-primary (docker-compose.yml), because a promoted standby IS the primary (REL-03).
+exec docker-entrypoint.sh postgres -c hot_standby=on \
+  -c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10 -c tcp_keepalives_count=3 -c tcp_user_timeout=60000

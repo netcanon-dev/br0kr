@@ -388,6 +388,11 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   one release is supported**: the previous image runs on the newer schema. Going further back is not
   guaranteed, because some migrations drop columns or add CHECK constraints an older build does not know
   about. To roll back, retag the previous image as `br0kr:local` and run `bash scripts/deploy.sh --no-build`.
+- **Changing a ledger container's settings.** A change to `pg-primary`'s `command:` makes the next
+  `bash scripts/deploy.sh` recreate it: a few seconds of ledger downtime the broker services ride through
+  (they reconnect with retry), and a leader re-election. The standby entrypoints are bind-mounted scripts, not
+  part of the compose config, so a change to one takes effect only when that standby restarts: run
+  `docker compose restart pg-standby` (and on a DR host, its `pg-standby-remote`) after deploying one.
 - **Back up the ledger**: [`scripts/backup_ledger.sh`](../../scripts/backup_ledger.sh) (secret-safe
   logical dump). Replication is not a backup — see [ledger-ha.md](ledger-ha.md).
 - **Tear down**: `docker compose down` (keep data) or `docker compose down -v` (drop the ledger volumes too).

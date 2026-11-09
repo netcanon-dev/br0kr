@@ -2,8 +2,10 @@
 """
 Leader-election gate — proves the single-writer advisory lock against a REAL Postgres:
 exactly one session can hold the leader key, a second is declined (not queued), release
-frees it, and a DROPPED connection releases it automatically (the failover path). No
-Proxmox — this is pure ledger concurrency, safe to run unattended.
+frees it, and a DROPPED connection releases it automatically (the failover path). Also
+that `leader.holder` names the holding session for lock names whose hashtext key is positive
+AND negative, since the pg_locks match splits the key into two unsigned halves (review REL-03).
+No Proxmox — this is pure ledger concurrency, safe to run unattended.
 
 Env: PGCONN.
 """
@@ -70,7 +72,30 @@ def main() -> int:
             except Exception:
                 pass
 
-    ok = all(results) and len(results) == 6
+    # 6. holder() names the holding session, for a positive and a negative hashtext key (the pg_locks
+    #    match splits the bigint key into classid/objid halves; a sign slip would miss every negative one).
+    probe = session()
+    try:
+        for sign in ("positive", "negative"):
+            i = 0
+            while True:
+                name = f"br0kr-test-holder-{i}"
+                key = probe.execute("SELECT hashtext(%s)", (name,)).fetchone()[0]
+                if (key > 0) == (sign == "positive"):
+                    break
+                i += 1
+            h = session()
+            try:
+                leader.try_acquire(h, name)
+                pid = h.execute("SELECT pg_backend_pid()").fetchone()[0]
+                got = leader.holder(probe, name)
+                check(f"holder_{sign}_key", (got or {}).get("pid") == pid, f"hashtext={key}: {got}")
+            finally:
+                h.close()
+    finally:
+        probe.close()
+
+    ok = all(results) and len(results) == 8
     print("\n" + ("GO" if ok else "NO-GO"))
     return 0 if ok else 1
 

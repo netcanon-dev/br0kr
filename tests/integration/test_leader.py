@@ -48,6 +48,58 @@ class _DeadConn:
         raise OSError("connection already closed")
 
 
+class _HolderConn:
+    """A stub for `leader.holder`: `execute` returns self (or raises when `boom`), `fetchone` returns `row`."""
+
+    def __init__(self, row: tuple | None = None, boom: bool = False) -> None:
+        self.row, self.boom = row, boom
+        self.calls: list[tuple[str, tuple]] = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        if self.boom:
+            raise OSError("connection already closed")
+        return self
+
+    def fetchone(self):
+        return self.row
+
+
+def test_holder_names_the_session_holding_the_lock():
+    """holder() returns the holding session's pid, client address, application name, state and idle seconds,
+    and matches the lock by the same hashtext(name) key try_acquire takes (review REL-03). Guards the standby's
+    log line losing the evidence an operator needs to terminate a dead leader's session."""
+    conn = _HolderConn(row=(4242, "192.0.2.7", "br0kr", "idle", 3))
+    assert leader.holder(conn, "br0kr-reconciler-leader") == {
+        "pid": 4242, "client_addr": "192.0.2.7", "application_name": "br0kr", "state": "idle", "idle_s": 3}
+    sql, params = conn.calls[0]
+    assert "pg_locks" in sql and "pg_stat_activity" in sql and "hashtext(%s)" in sql
+    assert params == ("br0kr-reconciler-leader", "br0kr-reconciler-leader")
+
+
+def test_holder_is_none_when_free_or_unreadable():
+    """No holding session, a failing read, and a malformed row all give None rather than raising. Guards the
+    standby loop: holder() is best-effort log evidence, and an exception from it would be caught by run() as a
+    leader-connection error and force a needless reconnect every poll."""
+    assert leader.holder(_HolderConn(row=None)) is None
+    assert leader.holder(_HolderConn(boom=True)) is None
+    assert leader.holder(_HolderConn(row=(1,))) is None
+
+
+def test_describe_holder_phrases():
+    """describe_holder() renders the holder for a log line: pid, address and idle seconds when known, or
+    ``holder not visible``. A missing address reads ``local`` for a Unix-socket session (its state is visible)
+    and ``hidden address`` when this role may not inspect it (state hidden too). Guards a None field printing
+    as 'None', and a hidden remote leader being mistaken for a local one."""
+    phrase = leader.describe_holder({"pid": 7, "client_addr": "192.0.2.7", "idle_s": 3})
+    assert phrase == "pid 7 from 192.0.2.7, idle 3s"
+    assert leader.describe_holder({"pid": 7, "client_addr": None, "state": "idle", "idle_s": None}) == \
+        "pid 7 from local"
+    assert leader.describe_holder({"pid": 7, "client_addr": None, "state": None, "idle_s": None}) == \
+        "pid 7 from hidden address"
+    assert leader.describe_holder(None) == "holder not visible"
+
+
 def test_try_acquire_reports_the_lock_grant():
     """try_acquire returns True when Postgres granted the advisory lock and passes the
     namespaced name through hashtext as the key. Guards a regression that swallows the

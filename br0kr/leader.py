@@ -16,6 +16,10 @@ The mechanism is a **session-level** `pg_try_advisory_lock(hashtext(name))`:
     queueing behind the active one.
   * If the leader process dies, its connection drops and Postgres releases the lock
     automatically — a standby's next `try_acquire` then wins. That is the failover.
+    Postgres learns of a vanished client HOST only through TCP, so `db.connect` sets the
+    ledger's keepalives and TCP user timeout on every session: a dead or partitioned leader's lock is freed
+    in about a minute rather than the OS default of ~2 h (review REL-03). `holder` names
+    the session holding the lock, so a standby's log shows which one it is waiting on.
 
 **Hold the lock on a DEDICATED connection** that does no other work (the daemon's
 work runs on separate connections). Keep it on its own session so a stray rollback
@@ -57,6 +61,62 @@ def try_acquire(conn: psycopg.Connection[Any], name: str = DEFAULT_LEADER) -> bo
     log.info("leader lock %s for %r", "acquired" if won else "declined (held by another)", name,
              extra={"leader_name": name, "acquired": won})
     return won
+
+
+# Who holds `name`'s session advisory lock. Postgres files a bigint advisory key as classid = its high 32
+# bits and objid = its low 32 bits (both oids, so unsigned), with objsubid = 1; hashtext() is an int4 the
+# bigint lock functions sign-extend, which is what the shifts and masks below reproduce.
+_HOLDER_SQL = (
+    "SELECT a.pid, host(a.client_addr), a.application_name, a.state,"
+    " EXTRACT(EPOCH FROM now() - a.state_change)::int"
+    " FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+    " WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1"
+    " AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+    " AND l.classid = ((hashtext(%s)::bigint >> 32) & 4294967295)::oid"
+    " AND l.objid = (hashtext(%s)::bigint & 4294967295)::oid"
+    " LIMIT 1"
+)
+
+
+def holder(conn: psycopg.Connection[Any], name: str = DEFAULT_LEADER) -> dict[str, Any] | None:
+    """Describe the session holding the leader lock, for a standby's log line (review REL-03).
+
+    Returns ``pid``, ``client_addr`` (None for a Unix-socket session, or when this role may not
+    see it), ``application_name``, ``state`` and ``idle_s`` (seconds since its last state
+    change), or None when no session holds the lock or the read fails. It is evidence for an
+    operator and never a decision input, so it must not break the standby loop: every error is
+    swallowed (logged at DEBUG). Call it on an autocommit connection, as the leader one is.
+
+    A healthy leader's session changes state at least once a tick (`still_leader`), so an
+    ``idle_s`` far beyond the longest tick, from a ``client_addr`` whose host is gone, is the
+    signature of a dead leader the ledger has not noticed yet. The remedy is an operator's
+    ``SELECT pg_terminate_backend(<pid>)``; br0kr never terminates it itself, because killing a
+    leader that is only slow would force a needless failover.
+    """
+    try:
+        row = conn.execute(_HOLDER_SQL, (name, name)).fetchone()
+        if not row:
+            return None
+        pid, addr, app, state, idle_s = row
+        return {"pid": pid, "client_addr": addr, "application_name": app, "state": state, "idle_s": idle_s}
+    except Exception:
+        log.debug("could not read the leader lock holder for %r", name, exc_info=True,
+                  extra={"leader_name": name})
+        return None
+
+
+def describe_holder(info: dict[str, Any] | None) -> str:
+    """One short phrase for a `holder` result, for a log line: ``pid 4242 from 192.0.2.7, idle 3s``, or
+    ``holder not visible`` when there is none to describe. With no address it says ``local`` (a Unix-socket
+    session, which still reports its state) or ``hidden address`` (another role's session this role may not
+    inspect, where the state is hidden too). The idle part appears only when known."""
+    if not info:
+        return "holder not visible"
+    addr = info.get("client_addr") or ("local" if info.get("state") is not None else "hidden address")
+    text = f"pid {info.get('pid')} from {addr}"
+    if info.get("idle_s") is not None:
+        text += f", idle {info['idle_s']}s"
+    return text
 
 
 def release(conn: psycopg.Connection[Any], name: str = DEFAULT_LEADER) -> bool:

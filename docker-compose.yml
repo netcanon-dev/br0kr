@@ -41,6 +41,10 @@ services:
     # password auth (scram); only REPLICATION is opened to the standby — see pg-primary-init.sh.
     # max_slot_wal_keep_size caps the standby's replication slot so a long-dead standby can't fill
     # the primary's disk (past the cap the slot is invalidated and the standby needs a re-clone).
+    # tcp_keepalives_* + tcp_user_timeout drop a session whose client host vanished after ~60 s
+    # (idle, or with a reply in flight) instead of the OS's ~2 h / ~15 min, so a dead leader's
+    # advisory lock is freed (review REL-03). br0kr sets them on its own sessions anyway
+    # (br0kr/db.py); here they also cover psql, backups and anything else.
     command:
       - postgres
       - -c
@@ -53,6 +57,14 @@ services:
       - max_slot_wal_keep_size=2GB
       - -c
       - hot_standby=on
+      - -c
+      - tcp_keepalives_idle=30
+      - -c
+      - tcp_keepalives_interval=10
+      - -c
+      - tcp_keepalives_count=3
+      - -c
+      - tcp_user_timeout=60000
     volumes:
       - pg-primary-data:/var/lib/postgresql/data
       - ./docker/pg-primary-init.sh:/docker-entrypoint-initdb.d/20-replication.sh:ro

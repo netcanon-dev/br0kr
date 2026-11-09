@@ -41,6 +41,7 @@ bash scripts/run_lease.sh        # lease lifecycle + reaper under concurrency
 bash scripts/run_admission.sh    # race-free admission + idempotency
 bash scripts/run_gateway.sh      # the agent MCP gateway verbs
 bash scripts/run_leader.sh       # single-writer leader election
+bash scripts/run_leader_blackhole.sh  # a dead leader host's lock is freed in ~60 s (blackholed network)
 bash scripts/run_ledger_ha.sh    # ledger HA: the client rides through a Postgres stop/restart
 bash scripts/run_ha_failover.sh  # ledger HA: 2 daemons keep single-writer across a real PG primary→standby failover
 bash scripts/run_ledger_replication.sh  # ledger DR visibility: kill a real streaming standby, prove the signal SEES it

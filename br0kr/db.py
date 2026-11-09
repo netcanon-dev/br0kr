@@ -9,8 +9,9 @@ directly, so that policy lived nowhere and was applied inconsistently (only the 
 set TCP keepalives; the gateway and migrator hung on the OS default during a failover).
 Routing every connection through here puts the policy in one place:
 
-  * `connect`            — apply keepalives + a connect timeout uniformly, default the
-                           DSN from `PGCONN`. One self-consistent connection everywhere.
+  * `connect`            — apply keepalives (client side AND, per session, server side)
+                           + a connect timeout uniformly, default the DSN from `PGCONN`.
+                           One self-consistent connection everywhere.
   * `is_transient`       — classify a connection failure: *retry* (ledger momentarily
                            unreachable) vs *fail fast* (misconfigured DSN). Load-bearing.
   * `connect_with_retry` — bounded exponential backoff over transient connect failures,
@@ -55,6 +56,27 @@ KEEPALIVE: dict[str, Any] = {
     "keepalives_count": 3,
     "connect_timeout": 10,
 }
+
+# The SERVER side of the same policy, set per session (review REL-03). KEEPALIVE lets br0kr notice a dead
+# ledger; these let the LEDGER notice a dead br0kr host. That matters because leadership is a session advisory
+# lock (br0kr/leader.py) that Postgres releases only once it sees the session end. With the server's default
+# (the OS keepalive time, 2 hours on Linux) a leader whose host died or was partitioned off kept the lock for up
+# to ~2 h: every standby stayed STANDBY and nothing provisioned or reaped. The tcp_keepalives_* GUCs are
+# user-settable per session, so this works on any ledger, including an external or managed one br0kr cannot
+# configure. Same numbers as the client side: a vanished peer is dropped after about a minute. Keepalives only
+# probe an IDLE socket, so tcp_user_timeout (Postgres 12+) gives the same bound when the cut lands while the
+# ledger still has unacknowledged data in flight to the session (a reply mid-send), which TCP would otherwise
+# retransmit for ~15 minutes. (It would also drop a LIVE client that left a reply unread for 60 s; br0kr never
+# does, since it reads every result in full: no COPY, server-side cursors or LISTEN.) Placed FIRST in
+# `options` so an operator's own -c tcp_* (kwarg, DSN or PGOPTIONS) overrides them. Postgres ignores them on
+# a Unix-socket connection, which has no TCP to probe.
+_DEAD_PEER_S = KEEPALIVE["keepalives_idle"] + KEEPALIVE["keepalives_interval"] * KEEPALIVE["keepalives_count"]
+_SERVER_KEEPALIVE_OPT = (
+    f"-c tcp_keepalives_idle={KEEPALIVE['keepalives_idle']}"
+    f" -c tcp_keepalives_interval={KEEPALIVE['keepalives_interval']}"
+    f" -c tcp_keepalives_count={KEEPALIVE['keepalives_count']}"
+    f" -c tcp_user_timeout={_DEAD_PEER_S * 1000}"
+)
 
 # The admission floor's race-freedom proof REQUIRES READ COMMITTED (br0kr/admission.py admit()):
 # the post-advisory-lock capacity re-read must observe a competitor that COMMITTED while this
@@ -131,6 +153,10 @@ def connect(explicit_dsn: str | None = None, *, autocommit: bool = False,
     seam), or the `PGOPTIONS` env; the pin is appended last so it still wins on isolation. Without
     this, always passing an `options` kwarg would let libpq's kwargs-beat-conninfo rule silently drop
     a DSN-embedded `options` and permanently shadow `PGOPTIONS`.
+
+    The server-side keepalives (`_SERVER_KEEPALIVE_OPT`) go FIRST, so the final string is
+    ``<server keepalives> <operator options> <isolation pin>``: a later ``-c`` wins in Postgres, so
+    an operator can retune the keepalives but no one can unpin the isolation.
     """
     resolved_dsn = dsn(explicit_dsn)
     prior_options = kwargs.pop("options", None)
@@ -141,7 +167,7 @@ def connect(explicit_dsn: str | None = None, *, autocommit: bool = False,
             prior_options = None   # an odd-but-libpq-valid DSN: fall through, still pin isolation
         prior_options = prior_options or os.environ.get("PGOPTIONS")
     opts: dict[str, Any] = {**KEEPALIVE, **kwargs}
-    opts["options"] = f"{prior_options} {_READ_COMMITTED_OPT}" if prior_options else _READ_COMMITTED_OPT
+    opts["options"] = " ".join(o for o in (_SERVER_KEEPALIVE_OPT, prior_options, _READ_COMMITTED_OPT) if o)
     return psycopg.connect(resolved_dsn, autocommit=autocommit, **opts)
 
 

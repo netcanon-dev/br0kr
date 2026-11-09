@@ -73,7 +73,9 @@ PGCONN="host=pg-a,pg-b port=5432 dbname=broker user=broker target_session_attrs=
   resolution (A **and** AAAA) per connection, forever, and psycopg logs the failure only at
   `debug`. In 2026-07 that turned a dead standby into 71% of a LAN's DNS traffic in silence. If you
   retire a host, take it out of `PGCONN`; the monitoring below is what tells you one has died.
-- Every br0kr process opens connections through `br0kr/db.py`, which applies TCP keepalives + a
+- Every br0kr process opens connections through `br0kr/db.py`, which applies TCP keepalives in
+  both directions (the client's, and the ledger's own per session, see
+  [A leader whose host dies](#a-leader-whose-host-dies-server-side-keepalives)) + a
   connect timeout and, where a brief outage should be ridden through, **bounded retry**
   (`connect_with_retry`): a transient connection error (server unreachable / starting up /
   overloaded) is retried with exponential backoff; a misconfig (bad password, missing database)
@@ -96,6 +98,39 @@ on the ledger, a misconfigured DSN still surfaces (with its real error text) but
 bounded retry budget, not instantly. For instant fail-fast under any locale, keep the ledger's
 `lc_messages = C` (or `en_US`). This is a diagnostics nicety — correctness is never affected (the
 retry is bounded; a misconfig can never be retried into a double-allocation).
+
+### A leader whose host dies (server-side keepalives)
+
+The table above covers the *ledger* going away. The opposite case is the *daemon's host* dying or being
+partitioned off while the ledger stays up. Leadership is a session advisory lock, and Postgres frees it only
+once it sees that session end. A dead host sends no FIN or RST, so only TCP itself can tell the ledger:
+keepalive probes when the session is idle, the retransmission limit when the ledger still has a reply in
+flight to it. With the OS defaults (about 2 hours and 15 minutes on Linux) every standby would stay STANDBY
+that long: nothing provisioned or reaped, and `/healthz` green throughout.
+
+- **br0kr sets the server side itself.** `br0kr/db.py` adds `-c tcp_keepalives_idle=30
+  -c tcp_keepalives_interval=10 -c tcp_keepalives_count=3 -c tcp_user_timeout=60000` to every session's
+  startup `options`, so the ledger drops a vanished br0kr session after about a minute, idle or mid-reply,
+  and a standby takes over. These are ordinary per-session settings, so this works on an external or
+  managed ledger with no server change. It needs **Postgres 12 or newer** (`tcp_user_timeout`; the bundled
+  ledger is 16).
+- **Overriding them:** put your own `-c tcp_keepalives_*` / `-c tcp_user_timeout` in `PGCONN`'s `options`
+  or in `PGOPTIONS`. Because they arrive as connection options they also outrank a per-role or
+  per-database `ALTER … SET` and `postgresql.conf`, so tune them there, not on the server.
+- **The bundled ledgers also set them server-wide** (`pg-primary`'s `command:` in `docker-compose.yml` and
+  both standby entrypoints, since a promoted standby is the primary). That covers sessions br0kr does not
+  open, such as psql or a backup. On an external ledger, set the same four server-wide if anything else on
+  it holds long-lived locks.
+- **Behind a connection pooler** the ledger's TCP peer is the pooler, not the daemon, so the pooler's own
+  client-side keepalives decide how fast a dead daemon is noticed. (The leader lock needs session pooling
+  in any case.)
+- **Reading a standby's log.** While it waits, a standby logs, every poll:
+  `standby: another reconciler is leader (pid 4242 from 192.0.2.7, idle 75s); retrying in 10s`, with the
+  structured fields `leader_holder_pid`, `leader_holder_addr` and `leader_holder_idle_s`. A healthy
+  leader's session changes state at least once a tick, so an idle time well beyond your longest tick (a slow
+  clone can make one tick several minutes) from a host you know is gone means the ledger has not noticed
+  yet. If you cannot wait, end it by hand with `SELECT pg_terminate_backend(4242);`. br0kr never does this
+  itself: killing a leader that is only slow would force a needless failover.
 
 ---
 
@@ -299,6 +334,12 @@ A backup you have never restored is a hope, not a backup. Periodically:
   - `scripts/harness_ha_failover_live.py` (LIVE on a Proxmox node, real fenced VM): a real guest's
     lease survives the failover, the daemon re-homes and provisions a second real guest on the
     promoted primary, and the guest is reaped — proven on a real PVE node.
+- **Proven — a dead leader host's lock is released**: `scripts/run_leader_blackhole.sh` (Docker, real
+  Postgres with NO server-wide settings). The holder's network is cut without closing its sockets; a
+  standby wins the lock of an idle br0kr session (keepalives) and of one mid-reply (`tcp_user_timeout`) in
+  about a minute, while control sessions opened without br0kr's settings, idle and mid-reply, still hold
+  theirs (so it was the settings that freed the locks). `scripts/run_leader.sh` checks that
+  `leader.holder` names the holding session for positive and negative lock keys.
 - **Operator-owned (standard Postgres ops):** the production replication TOPOLOGY itself —
   streaming replication, the failover controller (Patroni/etc.) + **single-primary fencing**, WAL
   archiving, and off-box backup storage. The harnesses hand-roll a primary+standby and promote it
@@ -309,5 +350,5 @@ A backup you have never restored is a hope, not a backup. Periodically:
 - [docker-deploy.md](docker-deploy.md) — the Compose stack that wires this HA topology (the bundled primary+standby starter; §9 the stretched/DR standby over the mesh)
 - [/SECURITY.md](../../SECURITY.md) — C9 single-writer + the split-brain residual
 - [../architecture.md](../architecture.md) — roadmap item #9 (ledger HA)
-- `br0kr/db.py` — the connection seam (keepalives, retry, classifier)
+- `br0kr/db.py` — the connection seam (keepalives in both directions, retry, classifier)
 - `scripts/backup_ledger.sh` — the logical-backup tool this runbook drives

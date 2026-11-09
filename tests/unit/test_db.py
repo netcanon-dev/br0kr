@@ -262,8 +262,9 @@ def test_connect_pins_read_committed_isolation(monkeypatch):
     admission.admit's post-advisory-lock capacity re-read serializes correctly even against a server
     whose default is 'repeatable read' (which would otherwise silently reopen the last-slot
     double-allocation race — review finding S06). The pin is appended LAST so it wins over any
-    caller-supplied isolation. Guards the crown-jewel precondition reverting to 'assumed, not
-    enforced' or being clobbered by a caller."""
+    caller-supplied isolation, and a caller's own options are kept, after the server-side keepalive
+    defaults. Guards the crown-jewel precondition reverting to 'assumed, not enforced' or being
+    clobbered by a caller."""
     captured: dict[str, object] = {}
 
     def fake_connect(conninfo, **kwargs):
@@ -279,7 +280,43 @@ def test_connect_pins_read_committed_isolation(monkeypatch):
     # A caller-supplied `options` string is preserved, with our pin appended LAST (so it wins).
     db.connect(options="-c statement_timeout=3000")
     opts = captured["kwargs"]["options"]
-    assert opts.startswith("-c statement_timeout=3000")
+    assert "-c statement_timeout=3000" in opts
+    assert opts.rstrip().endswith(r"default_transaction_isolation=read\ committed")
+
+
+def test_connect_sets_server_side_keepalives_first(monkeypatch):
+    """Every connection asks the LEDGER to keepalive-probe its session (tcp_keepalives_idle/interval/count, the
+    same numbers as the client side) and to give up on unacknowledged data after the same bound
+    (tcp_user_timeout), placed FIRST in `options` so an operator's own setting overrides them while the isolation
+    pin still comes last (review REL-03).
+
+    Guards the failure this closes: leadership is a session advisory lock that Postgres frees only when it sees
+    the session end, so without server-side keepalives a leader whose host died or was partitioned kept the lock
+    for the OS default of ~2 h and no standby could take over. Also guards an ordering slip that would let the
+    defaults silently beat an operator's tuning."""
+    captured: dict[str, object] = {}
+
+    def fake_connect(conninfo, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(db.psycopg, "connect", fake_connect)
+    monkeypatch.delenv("PGOPTIONS", raising=False)
+
+    db.connect("host=ledger dbname=broker")
+    opts = captured["kwargs"]["options"]
+    for guc, key in (("tcp_keepalives_idle", "keepalives_idle"), ("tcp_keepalives_interval", "keepalives_interval"),
+                     ("tcp_keepalives_count", "keepalives_count")):
+        assert f"-c {guc}={db.KEEPALIVE[key]}" in opts   # one source of truth with the client side
+    # ...and the same bound for a session cut while the ledger has data in flight to it (keepalives only
+    # probe an idle socket): idle + interval * count, in milliseconds.
+    k = db.KEEPALIVE
+    bound_ms = (k["keepalives_idle"] + k["keepalives_interval"] * k["keepalives_count"]) * 1000
+    assert f"-c tcp_user_timeout={bound_ms}" in opts
+
+    db.connect("host=ledger dbname=broker", options="-c tcp_keepalives_idle=15")
+    opts = captured["kwargs"]["options"]
+    assert opts.index("tcp_keepalives_idle=30") < opts.index("tcp_keepalives_idle=15")   # the operator's wins
     assert opts.rstrip().endswith(r"default_transaction_isolation=read\ committed")
 
 
