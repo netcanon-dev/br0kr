@@ -8,6 +8,7 @@ lock); here a tiny fake connection pins the updated-vs-unknown_project branch wi
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pytest
 
@@ -229,6 +230,10 @@ class _Seq:
     def fetchone(self) -> tuple | None:
         return self._cur
 
+    def fetchall(self) -> list[tuple]:
+        """A RETURNING read: the queued result as a one-row list, or no rows."""
+        return [] if self._cur is None else [self._cur]
+
 
 def test_create_node_refuses_unknown_cluster_without_writing():
     """A node create naming a cluster that doesn't exist is refused 'unknown_cluster' from the PRE-CHECK,
@@ -434,9 +439,10 @@ def test_create_template_refuses_unknown_cluster_then_dup_then_creates():
     assert unk == {"template_id": "t1", "created": False, "reason": "unknown_cluster"}
     seq = _Seq(("clA",), None)   # cluster exists, then ON CONFLICT returns no row
     assert admin.create_template(seq, "t1", cluster_id="clA", vmid=9000)["reason"] == "template_exists"
-    ok = admin.create_template(_Seq(("clA",), ("t1",)), "t1", cluster_id="clA", vmid=9000,
+    # cluster exists; the INSERT returns the id; the seed-instance INSERT returns 7; the cluster has one node
+    ok = admin.create_template(_Seq(("clA",), ("t1",), (7,), (1,)), "t1", cluster_id="clA", vmid=9000,
                                name="Debian 12", description="cloud")
-    assert ok == {"template_id": "t1", "created": True, "reason": None}
+    assert ok == {"template_id": "t1", "created": True, "reason": None, "instance_id": 7, "needs_binding": False}
 
 
 def test_set_template_reports_unknown_template():
@@ -486,10 +492,12 @@ def test_delete_template_refuses_in_use_else_deletes():
     has_repl = _Seq(None, None, (1,))   # no lease, no instance, but a replication job references it
     assert admin.delete_template(has_repl, "t1") == {
         "template_id": "t1", "deleted": False, "reason": "template_has_replications"}
-    # all three pre-checks clear (None×3) → the DELETE runs and returns the id
-    assert admin.delete_template(_Seq(None, None, None, ("t1",)), "t1") == {
+    # all three pre-checks clear (None×3) → the template's own instances, then the template, are deleted
+    cleared = _Seq(None, None, None, None, ("t1",))
+    assert admin.delete_template(cleared, "t1") == {
         "template_id": "t1", "deleted": True, "reason": None}
-    assert admin.delete_template(_Seq(None, None, None, None), "ghost") == {
+    ghost = _Seq(None, None, None, None, None)
+    assert admin.delete_template(ghost, "ghost") == {
         "template_id": "ghost", "deleted": False, "reason": "unknown_template"}
 
 
@@ -819,21 +827,21 @@ def test_create_template_forwards_the_public_flag():
     """create_template writes the `public` visibility column, defaulting True (a fresh template is usable by
     all, as in A2) and honouring an explicit False. Guards the flag being dropped on the create path — which
     would silently make every operator-private template public (the governance leak A3 exists to stop)."""
-    seq = _SeqP(("clA",), ("t1",))   # cluster exists, INSERT returns the id
+    seq = _SeqP(("clA",), ("t1",), (7,), (1,))   # cluster exists, INSERT returns the id, the seed, one node
     admin.create_template(seq, "t1", cluster_id="clA", vmid=9000)
-    assert _param_of(seq, "INSERT INTO template") == ("t1", "clA", 9000, None, None, True, None)
-    seq2 = _SeqP(("clA",), ("t1",))
+    assert _param_of(seq, "INSERT INTO template(") == ("t1", "clA", 9000, None, None, True, None)
+    seq2 = _SeqP(("clA",), ("t1",), (7,), (1,))
     admin.create_template(seq2, "t1", cluster_id="clA", vmid=9000, public=False)
-    assert _param_of(seq2, "INSERT INTO template")[5] is False   # public column (logical_network_id is [6], 0039)
+    assert _param_of(seq2, "INSERT INTO template(")[5] is False   # public column (logical_network_id is [6], 0039)
 
 
 def test_create_template_forwards_and_validates_logical_network():
     """create_template forwards logical_network_id (0039) as the 7th INSERT column, and refuses
     'unknown_logical_network' from a PRE-CHECK (SELECT 1 FROM logical_network) with NO insert — so a bad
     identity is a crisp reason, not an FK abort. Guards the column being dropped or a dangling identity landing."""
-    seq = _SeqP(("clA",), ("lan",), ("t1",))   # cluster exists; logical net pre-check; INSERT returns the id
+    seq = _SeqP(("clA",), ("lan",), ("t1",), (7,), (1,))   # + the seed INSERT and the node count
     admin.create_template(seq, "t1", cluster_id="clA", vmid=9000, logical_network_id="lan")
-    assert _param_of(seq, "INSERT INTO template")[6] == "lan"
+    assert _param_of(seq, "INSERT INTO template(")[6] == "lan"
     bad = _SeqP(("clA",), None)   # cluster exists; the logical-net pre-check returns no row → refuse before INSERT
     out = admin.create_template(bad, "t1", cluster_id="clA", vmid=9000, logical_network_id="ghostnet")
     assert out == {"template_id": "t1", "created": False, "reason": "unknown_logical_network"}
@@ -1220,3 +1228,45 @@ def test_force_fail_build_delegates_to_the_build_ledger(monkeypatch):
     out = admin.force_fail_build(object(), 42, "wedged pve")
     assert seen == {"bid": 42, "reason": "wedged pve"}
     assert out == {"forced": True}   # the ledger result, returned verbatim
+
+
+# ── A registered template is placeable: its seed instance (the 0033 gate clones only from an instance) ──
+def test_create_template_seeds_a_ready_unbound_instance():
+    """create_template inserts the template's first template_instance in the same transaction: READY, origin
+    'seed', at the catalog cluster and vmid, with no node or pool (the exact row migration 0032 backfilled), and
+    returns its id. Guards the gap where a template registered after 0032 had no instance, so the placement gate
+    refused every lease of it no_reachable_instance and a fresh install could never lease its first VM."""
+    seq = _SeqP(("clA",), ("t1",), (7,), (1,))
+    out = admin.create_template(seq, "t1", cluster_id="clA", vmid=9000)
+    sql, params = next((s, p) for (s, p) in seq.calls if "INSERT INTO template_instance" in s)
+    assert "'READY', 'seed'" in sql and params == ("t1", "clA", 9000)
+    assert out["instance_id"] == 7
+
+
+def test_create_template_flags_a_seed_that_needs_binding(caplog):
+    """On a multi-node cluster the new seed is unbound, which the gate refuses there, so create_template returns
+    needs_binding=True (the dashboard shows it) and logs a WARNING naming the template, the instance and the bind
+    step; on a single-node cluster it returns False and stays quiet. Guards an operator on a multi-node cluster
+    registering a template and getting only no_reachable_instance later."""
+    with caplog.at_level(logging.WARNING, logger="br0kr.admin"):
+        multi = admin.create_template(_Seq(("clA",), ("t1",), (7,), (3,)), "t1", cluster_id="clA", vmid=9000)
+    assert multi["needs_binding"] is True
+    assert any("unbound on multi-node cluster clA" in r.getMessage() and "bind" in r.getMessage()
+               for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="br0kr.admin"):
+        single = admin.create_template(_Seq(("clA",), ("t1",), (7,), (1,)), "t1", cluster_id="clA", vmid=9000)
+    assert single["needs_binding"] is False and not caplog.records
+
+
+def test_delete_template_takes_only_its_own_instances():
+    """delete_template refuses template_has_instances only for a COPY (an instance whose origin is not seed or
+    build, or one still REPLICATING); once every pre-check is clear it deletes the template's own seed/build
+    instances and THEN the template, in that order. Guards the seed create_template now inserts making every
+    never-used template undeletable, and a delete removing a replica's row (which tracks a separate guest)."""
+    seq = _Seq(None, None, None, None, ("t1",))
+    admin.delete_template(seq, "t1")
+    inst_check, own_delete, tpl_delete = seq.sqls[1], seq.sqls[3], seq.sqls[4]
+    assert "origin NOT IN ('seed','build') OR instance_state = 'REPLICATING'" in inst_check
+    assert own_delete.startswith("DELETE FROM template_instance") and "origin IN ('seed','build')" in own_delete
+    assert tpl_delete.startswith("DELETE FROM template ")

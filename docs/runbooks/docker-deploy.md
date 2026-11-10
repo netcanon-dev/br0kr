@@ -317,6 +317,17 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
     template — see [vm-access.md](vm-access.md) §2), and optional `name` / `description` / `public`. This is
     how an agent picks an image per-lease (and how you can later govern it per-project); it is separate from the
     `BR0KR_VM_TEMPLATE` env default (which only applies when a lease passes NO `template_id`).
+    - **Its instance.** The create also registers the template's first *instance* (the physical copy the
+      placement gate clones from) at that vmid, unbound to any node or pool, and returns its `instance_id`. On a
+      **single-node** cluster that is all a lease needs. On a **multi-node** cluster the gate refuses an unbound
+      instance (`no_reachable_instance`; the dashboard logs a WARNING at create), so bind it once:
+      `POST /api/instance/bind {"instance_id":…, "node_id":"<node holding the vmid>", "storage_id":"<its pool>",
+      "size_gb":…}` after declaring that the node reaches the pool (`/api/storage/nodes`). A template built by
+      br0kr (`/api/template/build/request`) gets its instance bound to the build's node and pool automatically.
+      Deleting a template that no lease ever used removes its own instance with it (the Proxmox guest stays).
+      **Growing a one-node cluster:** an unbound instance blocks adding a second node to its cluster
+      (`cluster_has_unbound_instances`), because it would stop being placeable; bind each one first, then add the
+      node.
     - **Scoping to specific projects.** `public:true` (the create default) = every project may select it. To
       restrict a template to an explicit set of projects, create it `public:false` then grant per project (both
       operator-gated, same bearer): `POST /api/template/grant {"project_id":"…","template_id":"…"}` (and

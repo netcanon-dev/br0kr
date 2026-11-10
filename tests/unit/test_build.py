@@ -59,6 +59,25 @@ def test_mark_ready_forward_stamps_source_provenance():
     assert "url, sha256, false" in sql   # source_dirty forced false (a fresh build supersedes any hand fix)
 
 
+def test_mark_ready_inserts_a_placeable_instance_in_the_same_statement():
+    """mark_ready's one statement also inserts the new template's first READY template_instance: BOUND to the
+    build's node and pool (origin 'build') when the pool is a modeled storage row of the cluster, matched on its
+    PVE name, else an unbound seed. Guards a finished build producing a template the placement gate refuses on
+    every lease (no_reachable_instance), and the instance being written outside the build's atomic CAS."""
+    rc = _RecConn()
+    params: list[object] = []
+    record = rc.execute
+    rc.execute = lambda sql, p=None: (params.append(p), record(sql, p))[1]   # type: ignore[method-assign]
+    build.mark_ready(rc, 5, size_gb=8)
+    sql = rc.sqls[0]
+    assert len(rc.sqls) == 1 and sql.count(";") == 0   # still one atomic statement
+    assert params == [(5, 8, 8)]   # build id, the catalog size, the instance size: one per %s, in order
+    assert "INSERT INTO template_instance" in sql and "RETURNING target_template_id" in sql
+    assert "node_id, storage_id" in sql                                  # the build's node and raw pool name
+    assert "COALESCE(s.pve_name, s.id) = d.storage_id" in sql            # resolved like the build content gate
+    assert "THEN 'build' ELSE 'seed' END" in sql                         # bound when resolvable, else a seed
+
+
 class _StorageCur:
     """A fake conn for check_build_storage: answers the name→row SELECT then the content_types SELECT by SQL
     fragment, so the two-read resolve+capability path is driven without a DB."""

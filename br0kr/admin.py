@@ -1036,7 +1036,17 @@ def create_template(
     `logical_network_id` (0039, optional) points the template's net0 at a LOGICAL NETWORK identity — the net the
     gate resolves to THIS node's bridge for a CROSS-NODE clone (net0 is rewritten to it); must reference an
     existing `logical_network` (`unknown_logical_network`, PRE-CHECKED so no FK abort), NULL = undeclared (a
-    cross-node clone refuses until set, node-local unaffected). Does NOT commit (the caller owns the txn)."""
+    cross-node clone refuses until set, node-local unaffected). Does NOT commit (the caller owns the txn).
+
+    THE SEED INSTANCE: in the same transaction it inserts the template's first `template_instance`, READY and
+    UNBOUND (no node, no pool) at the catalog vmid, exactly the row migration 0032 backfilled for every template
+    that existed then. The placement gate (0033) clones only from an instance, so without it a template
+    registered after 0032 was refused `no_reachable_instance` on every lease. On a single-node cluster the
+    unbound seed is placeable at once; on a multi-node cluster the gate refuses it until the operator binds it to
+    a (node, pool) with `bind_instance_placement`: the result then carries `needs_binding: true` (the dashboard
+    shows it) and a WARNING is logged. The seed also makes `create_node` refuse a SECOND node for a one-node
+    cluster (`cluster_has_unbound_instances`) until it is bound, as for any unbound seed. The new instance's id
+    is returned as `instance_id`."""
     if not imgbuild.valid_template_id(template_id):
         # A catalog id is INTERPOLATED into a PVE guest name by the replication engine (repl-<job>-<id>), so a
         # non-dns-slug id would land a row that clones-once fine but bricks every clone_shared/rebuild_source of
@@ -1054,9 +1064,21 @@ def create_template(
         (template_id, cluster_id, vmid, name, description, public, logical_network_id)).fetchone()
     if row is None:
         return {"template_id": template_id, "created": False, "reason": "template_exists"}
-    log.info("template created: %s (cluster=%s vmid=%s public=%s)", template_id, cluster_id, vmid, public,
-             extra={"template": template_id})
-    return {"template_id": template_id, "created": True, "reason": None}
+    inst = conn.execute(
+        "INSERT INTO template_instance (template_id, cluster_id, vmid, instance_state, origin) "
+        "VALUES (%s, %s, %s, 'READY', 'seed') RETURNING id", (template_id, cluster_id, vmid)).fetchone()
+    instance_id = int(inst[0]) if inst is not None else None
+    log.info("template created: %s (cluster=%s vmid=%s public=%s, seed instance %s)", template_id, cluster_id,
+             vmid, public, instance_id, extra={"template": template_id})
+    nodes = conn.execute("SELECT count(*) FROM node WHERE cluster_id = %s", (cluster_id,)).fetchone()
+    needs_binding = nodes is not None and int(nodes[0]) > 1
+    if needs_binding:
+        log.warning("template %s: its seed instance %s is unbound on multi-node cluster %s, so leases of it are "
+                    "refused no_reachable_instance until you bind it to a node and pool "
+                    "(dashboard Template instances, or bind_instance_placement)", template_id, instance_id,
+                    cluster_id, extra={"template": template_id})
+    return {"template_id": template_id, "created": True, "reason": None, "instance_id": instance_id,
+            "needs_binding": needs_binding}
 
 
 def set_template(
@@ -1165,21 +1187,30 @@ def delete_template(conn: psycopg.Connection[Any], template_id: str) -> dict[str
     `template_replication` job (0034, `template_id` NO ACTION); both would FK-abort the DELETE, so we pre-check
     them into crisp `template_has_instances` (retire + `delete_template_instance` the copies first) and
     `template_has_replications` (cancel + `prune_replications` the jobs first) — mirroring the delete_cluster /
-    delete_storage decommission reasons — rather than surfacing an opaque 503."""
+    delete_storage decommission reasons — rather than surfacing an opaque 503. The template's OWN instances (its
+    `seed`, from create_template, or its `build` instance, from build.mark_ready) describe the catalog vmid
+    itself, which deleting a catalog entry has never touched, so they go with the template; only a COPY (a
+    `replication` or `manual` instance, or any instance still REPLICATING) refuses `template_has_instances`. No
+    lease can reference an own instance here: the template_in_use check already refused any lease of it."""
     if conn.execute(
         "SELECT 1 FROM lease WHERE template_id = %s LIMIT 1", (template_id,),
     ).fetchone() is not None:
         return {"template_id": template_id, "deleted": False, "reason": "template_in_use"}
-    if conn.execute("SELECT 1 FROM template_instance WHERE template_id = %s LIMIT 1",
+    if conn.execute("SELECT 1 FROM template_instance WHERE template_id = %s "
+                    "AND (origin NOT IN ('seed','build') OR instance_state = 'REPLICATING') LIMIT 1",
                     (template_id,)).fetchone() is not None:
         return {"template_id": template_id, "deleted": False, "reason": "template_has_instances"}
     if conn.execute("SELECT 1 FROM template_replication WHERE template_id = %s LIMIT 1",
                     (template_id,)).fetchone() is not None:
         return {"template_id": template_id, "deleted": False, "reason": "template_has_replications"}
+    own = conn.execute("DELETE FROM template_instance WHERE template_id = %s AND origin IN ('seed','build') "
+                       "RETURNING origin, node_id, vmid", (template_id,)).fetchall()
     row = conn.execute("DELETE FROM template WHERE id = %s RETURNING id", (template_id,)).fetchone()
     if row is None:
         return {"template_id": template_id, "deleted": False, "reason": "unknown_template"}
-    log.info("template deleted: %s", template_id, extra={"template": template_id})
+    log.info("template deleted: %s (with its own instance rows %s; the Proxmox guests are untouched)",
+             template_id, [f"{o} vmid {v} on {n or 'unbound'}" for o, n, v in own or []],
+             extra={"template": template_id})
     return {"template_id": template_id, "deleted": True, "reason": None}
 
 

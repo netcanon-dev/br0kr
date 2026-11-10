@@ -361,7 +361,12 @@ async function submitForm(ename, mode){
     body[k] = type==='number' ? (raw===''?null:parseFloat(raw)) : (type==='bool' ? (raw==='true') : raw);
   }
   const r = await postJSON(mode==='create'?e.create:e.edit, body);
-  if(r.ok && r.data && (r.data.created||r.data.updated)) closeForm();
+  if(r.ok && r.data && (r.data.created||r.data.updated)){
+    closeForm();
+    // A template on a multi-node cluster starts with an unbound instance the placement gate refuses.
+    if(r.data.needs_binding) alert('Created. This cluster has more than one node, so bind the template\'s '
+      + 'instance to a node and pool (Template instances) before leasing it.');
+  }
   else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
 }
 function delItem(ename, i){

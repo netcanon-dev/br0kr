@@ -240,12 +240,21 @@ def mark_ready(conn: psycopg.Connection[Any], build_id: int, size_gb: int | None
     attestation (clearing dirty). Since a build INSERTs a NEW catalog id (a duplicate target raises
     UniqueViolation → the build FAILs), "the next build clears dirty" is the operator flow delete-then-rebuild:
     the fresh INSERT is born clean. Without this stamp a post-0040 build would land a provenance-LESS template
-    again (the one-shot-backfill decay the migration's forward-stamp closes)."""
+    again (the one-shot-backfill decay the migration's forward-stamp closes).
+
+    THE INSTANCE: the same statement inserts the template's first READY `template_instance`, because the
+    placement gate (0033) clones only from an instance and a build that wrote just the catalog row produced a
+    template every lease refused `no_reachable_instance`. When the build's node is known and its target pool is
+    a modeled `storage` row of the cluster (matched on its PVE name, as the build's content gate does), the
+    instance is BOUND there (`origin='build'`, with the node, the pool and `size_gb`), placeable on a multi-node
+    cluster wherever that pool is declared reachable. Otherwise it is an unbound `seed`, placeable only on a
+    single-node cluster until an operator binds it (the 0032 backfill's shape)."""
     row = conn.execute(
         "WITH done AS ("
         "  UPDATE template_build SET state = 'READY', updated_at = now() "
         "  WHERE id = %s AND state = 'IMPORTING' "
-        "  RETURNING target_template_id, cluster_id, vmid, name, description, public, project_id, url, sha256"
+        "  RETURNING target_template_id, cluster_id, vmid, name, description, public, project_id, url, sha256, "
+        "            node_id, storage_id"
         "), ins_t AS ("
         "  INSERT INTO template(id, cluster_id, vmid, name, description, public, owner_project_id, size_gb, "
         "                       source_url, source_sha256, source_dirty) "
@@ -257,11 +266,25 @@ def mark_ready(conn: psycopg.Connection[Any], build_id: int, size_gb: int | None
         "  INSERT INTO project_template(project_id, template_id) "
         "  SELECT project_id, target_template_id FROM done WHERE project_id IS NOT NULL "
         "  ON CONFLICT DO NOTHING RETURNING template_id"
+        "), pool AS ("
+        "  SELECT s.id FROM done d JOIN storage s "
+        "    ON s.cluster_id = d.cluster_id AND COALESCE(s.pve_name, s.id) = d.storage_id "
+        "  WHERE d.node_id IS NOT NULL"
+        "), ins_i AS ("
+        "  INSERT INTO template_instance (template_id, cluster_id, node_id, storage_id, vmid, instance_state, "
+        "                                 origin, size_gb) "
+        "  SELECT d.target_template_id, d.cluster_id, "
+        "         CASE WHEN p.id IS NOT NULL THEN d.node_id END, p.id, d.vmid, 'READY', "
+        "         CASE WHEN p.id IS NOT NULL THEN 'build' ELSE 'seed' END, %s "
+        "  FROM done d LEFT JOIN pool p ON true "
+        "  WHERE EXISTS (SELECT 1 FROM ins_t) "
+        "  RETURNING id, storage_id"
         ") "
-        "SELECT id FROM ins_t",
-        (build_id, size_gb)).fetchone()
+        "SELECT t.id, i.id, i.storage_id FROM ins_t t LEFT JOIN ins_i i ON true",
+        (build_id, size_gb, size_gb)).fetchone()
     if row is not None:
-        log.info("template build %s READY -> catalog template %s", build_id, row[0],
+        log.info("template build %s READY -> catalog template %s, instance %s (%s)", build_id, row[0], row[1],
+                 f"bound to pool {row[2]}" if row[2] else "unbound seed: bind it on a multi-node cluster",
                  extra={"build_id": build_id, "template": row[0]})
     return row is not None
 
