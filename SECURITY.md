@@ -45,10 +45,19 @@ ever logged. A leaked ledger dump or backup authenticates nothing.
 - **Proxmox / PDM API token secrets** (`br0kr/nodes.py`, `br0kr/remotes.py`):
   the `cluster` row stores the token id and the NAME of an environment variable
   (`token_secret_env` / `pdm_token_secret_env`). The secret itself lives only in
-  the daemon's environment (C11): `docker-compose.yml` names `PVE_TOKEN_SECRET` on
-  the daemon service alone and has no blanket `env_file:`, which would hand every
-  `.env` secret to every container, the tunnel-reachable OAuth shim included
-  (review OPS-02; `tests/unit/test_env_contract.py` pins it).
+  the environment of the processes that call PVE (C11): `docker-compose.yml`
+  names `PVE_TOKEN_SECRET` on the daemon and on the opt-in `gateway-operator`
+  (whose live-PVE operator reads need it, review UX-02), and on no other service.
+  That gateway is published on the host's loopback by default and never routed
+  through Caddy or the tunnel; the tenant `gateway` they route to has no PVE
+  token. There is no blanket `env_file:`, which would hand every `.env` secret to
+  every container, the tunnel-reachable OAuth shim included (review OPS-02;
+  `tests/unit/test_env_contract.py` pins both). Accepted residuals of the
+  operator gateway: other containers on the compose network (Caddy, cloudflared,
+  the shim) can reach `gateway-operator:8080`, and it serves plain HTTP without
+  the MCP SDK's Host allowlist, so a DNS-rebinding page in an operator's browser
+  could read its `tools/list`. Neither gets past the operator bearer every tool
+  call requires.
 - **Deployment secrets** (`PGPASSWORD`, `BR0KR_DASHBOARD_TOKEN`,
   `BR0KR_DASHBOARD_READ_TOKEN`, `TUNNEL_TOKEN`, `PVE_TOKEN_SECRET`): live in
   `.env` on the deploy host, which is `.gitignore`d. Only placeholder
@@ -124,7 +133,8 @@ Name the residual, why it's accepted, and what would close it.
   on `/storage` for `br0kr@pve`; without it the verb degrades to `acl_insufficient` (quarantines nothing). So
   declaration rot now has BOTH a periodic detector (this verb) and a per-clone tripwire (the assertion) —
   correctness no longer has a half-life of one operator forgetting. (Deploy note: the MCP gateway process must
-  have the PVE token env to build drivers; otherwise the verb returns `checked_nodes:[]`.)
+  have the PVE token env to build drivers; otherwise the verb returns `checked_nodes:[]`. Under the bundled
+  compose that is the opt-in `gateway-operator`, review UX-02; the tenant `gateway` does not serve the verb.)
 - **C18-CONTENT storage CONTENT-TYPE capability is DECLARED, never probed — the build/`rebuild_source` import gate
   (0041).** Whether a pool supports the PVE `import`+`images` content a template build / `rebuild_source` needs is
   an operator-DECLARED `storage.content_types` (NULL = undeclared = fail-closed; no backfill), gated by the ONE

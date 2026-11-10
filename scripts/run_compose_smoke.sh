@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Compose-stack smoke: brings up the FULL docker-compose deployment (HA Postgres primary+standby +
-# migrate + gateway + daemon) with a throwaway .env, and proves the wiring end to end WITHOUT any
+# migrate + both gateways + daemon) with a throwaway .env, and proves the wiring end to end WITHOUT any
 # Proxmox: migrations apply, the standby streams from the primary, the daemon wins leadership and
-# ticks, and the gateway serves HTTP. Then tears everything down (volumes included).
+# ticks, the gateways serve HTTP and split the tool surface (tenant vs operator). Then tears everything down.
 #
 # Failover itself is NOT re-proven here (scripts/harness_ha_failover.py already does, against the
 # same replication recipe) — this proves the COMPOSE wiring + HA topology come up correctly.
@@ -14,6 +14,7 @@ cd "$ROOT"
 PROJECT=br0krsmoke
 ENVFILE="$(mktemp /tmp/br0kr-smoke.XXXXXX.env)"
 PORT=18080
+OPORT=18082   # the operator gateway (profile `operator`, enabled through COMPOSE_PROFILES in the env file)
 DC=(docker compose -p "$PROJECT" --env-file "$ENVFILE")
 
 # A throwaway, non-secret credential for the disposable smoke ledger (kept in a variable, not a
@@ -28,6 +29,8 @@ GATEWAY_PORT=${PORT}
 BR0KR_MCP_TRANSPORT=streamable-http
 BR0KR_TICK_SECONDS=2
 PVE_TOKEN_SECRET=
+COMPOSE_PROFILES=operator
+OPERATOR_GATEWAY_PORT=${OPORT}
 EOF
 
 results=()
@@ -93,6 +96,42 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 check gateway_healthz_ok "$gwh"
+
+# The two gateways split the tool surface (review UX-02). An MCP client inside each container lists its tools:
+# the tenant gateway must serve request_lease but not the operator-only node_cordon, the operator gateway both.
+# tools/list needs no token (each tool authenticates its own call), so this needs no ledger credential.
+list_tools() {
+  "${DC[@]}" exec -T "$1" python -c 'import anyio
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+async def main():
+    async with streamablehttp_client("http://localhost:8080/mcp") as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            print(" ".join(sorted(t.name for t in (await s.list_tools()).tools)))
+anyio.run(main)' 2>/dev/null
+}
+tenant_tools=""; operator_tools=""
+for _ in $(seq 1 30); do
+  tenant_tools="$(list_tools gateway)"; operator_tools="$(list_tools gateway-operator)"
+  [ -n "$tenant_tools" ] && [ -n "$operator_tools" ] && break
+  sleep 2
+done
+has() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
+tw=1; has "$tenant_tools" request_lease && ! has "$tenant_tools" node_cordon && tw=0
+check tenant_gateway_withholds_operator_tools "$tw" "$(echo "$tenant_tools" | wc -w) tools"
+ow=1; has "$operator_tools" request_lease && has "$operator_tools" node_cordon && ow=0
+check operator_gateway_serves_operator_tools "$ow" "$(echo "$operator_tools" | wc -w) tools"
+
+# The operator gateway is published on the host's loopback only, and answers /healthz there.
+obind="$(docker port "$("${DC[@]}" ps -q gateway-operator | head -1)" 8080/tcp 2>/dev/null | head -1)"
+check operator_gateway_loopback_only "$([ "$obind" = "127.0.0.1:${OPORT}" ] && echo 0 || echo 1)" "bind=${obind:-?}"
+ogh=1
+for _ in $(seq 1 30); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:${OPORT}/healthz"; then ogh=0; break; fi
+  sleep 2
+done
+check operator_gateway_healthz_ok "$ogh"
 
 # daemon health surface on the internal port 9090 (not host-published; probe from inside the container).
 # /readyz must be 'ready' (the daemon is the leader, ledger reachable, ticking) and /metrics must carry

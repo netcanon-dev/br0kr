@@ -289,6 +289,26 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **The operator build subsystem was un-runnable on any deployment: `BR0KR_BUILD_LIMIT` (and `BR0KR_BUILD_STALE_SECONDS`/`BR0KR_BUILD_CORES`/`BR0KR_BUILD_MEMORY_MB`) were read by `daemon.main()` but never passed through the daemon service in `docker-compose.yml`** — so setting them in `.env` was the silent no-op the `.env.example` header explicitly warns about, and template builds stayed disabled regardless. Wired all four into `docker-compose.yml` (`daemon.environment`, int defaults so an empty inject can't crash `int("")`); behaviour-neutral by default (`BUILD_LIMIT` still `0`). This also unblocks `rebuild_source` replication, which requires a BUILT (source-provenanced) template. `.env.example` build block corrected to match.
 
 ### Changed
+- **The tenant MCP gateway no longer advertises the operator-only tools; a new opt-in `gateway-operator`
+  serves them, with the PVE token (`br0kr/mcp_server.py`, `docker-compose.yml`).** Why: a tenant token gets
+  nothing but `forbidden_scope` from those tools, yet their descriptions were about 44 % of what every tenant
+  agent's `tools/list` carried, a context cost paid on every turn and a larger surface to mis-pick from. And
+  the three live-PVE operator reads (`verify_declarations`, `discover_reachability`, `detect_template_bridge`)
+  returned `checked_nodes: []` under the bundled compose, because only the daemon had the PVE token.
+  - The operator-tier tools (`auth.VERB_TIER`) register only where `BR0KR_MCP_OPERATOR_TOOLS` is not `0`
+    (or false/no/off). The compose `gateway` defaults it to `0`; a hand-run or stdio gateway is unchanged
+    (unset means on). The gateway logs which mode it booted in. A test holds the collected tools equal to
+    the operator tier in `auth.VERB_TIER`.
+  - `gateway-operator` (profile `operator`) serves the full surface and holds `PVE_TOKEN_SECRET`. It is
+    published on the host's loopback (`127.0.0.1:${OPERATOR_GATEWAY_PORT:-8082}`) and never routed through
+    Caddy or the tunnel. SECURITY.md C11 names it as the second holder of the PVE secret.
+  - The seven operator descriptions over 900 characters were cut to an agent's working summary; the design
+    rationale moved to comments beside each tool. Tests hold every operator description to 900 characters and
+    the tenant surface to a 25,000-character budget.
+  - **Upgrade note:** an operator MCP client that used the tenant gateway loses the operator tools there. Either
+    add `operator` to `COMPOSE_PROFILES` and point that client at the operator gateway (`ssh -L` from another
+    machine; operator-tier.md §2), or set `BR0KR_MCP_OPERATOR_TOOLS=1` in `.env` to keep the old surface
+    (review UX-02).
 - **Stale docs fixed (`tests/README.md`, new `tests/e2e/README.md`, `.github/ISSUE_TEMPLATE/`, `docs/`,
   `README.md`).** Why: a spot-check of ten doc claims found five wrong, and stale docs are a bug here. The test
   pyramid no longer describes scaffold wording ("the app/CLI/API as a black box") or a dedicated e2e CI job:

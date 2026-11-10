@@ -48,7 +48,8 @@ x-pg-hardening: &pg-hardening
 # knob (br0kr/settings.py KNOBS). The daemon, gateway and dashboard each resolve knobs (ledger override, then
 # this env, then the code default), so they must all see the same seed or one container acts on a value the
 # others do not show. Each broker service merges it with `<<: *broker-env`; process-specific variables and
-# secrets (PVE_TOKEN_SECRET reaches the daemon only) stay listed per service, never a blanket `env_file`.
+# secrets (PVE_TOKEN_SECRET reaches only the daemon and the opt-in gateway-operator) stay listed per service,
+# never a blanket `env_file`.
 # `:-` passes a blank when unset, and br0kr reads a blank as unset, so the code default applies.
 # tests/unit/test_env_contract.py keeps this list, the per-service lists, .env.example and the code in step.
 x-broker-env: &broker-env
@@ -172,9 +173,46 @@ services:
       BR0KR_MCP_TRANSPORT: ${BR0KR_MCP_TRANSPORT:-streamable-http}
       FASTMCP_HOST: 0.0.0.0
       FASTMCP_PORT: "8080"
+      # The tenant front door (review UX-02): withhold the operator-only tools, whose descriptions a tenant
+      # agent would otherwise carry in every turn only to be refused. Operators use `gateway-operator` below.
+      # Set BR0KR_MCP_OPERATOR_TOOLS=1 in .env to serve them here too (the behaviour before UX-02).
+      BR0KR_MCP_OPERATOR_TOOLS: ${BR0KR_MCP_OPERATOR_TOOLS:-0}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     # /healthz (FastMCP custom_route) probes the ledger with a fast SELECT 1 → 200/503.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8080/healthz',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Broker: operator MCP gateway (OPT-IN: COMPOSE_PROFILES gains `operator`) ────
+  # The same gateway serving the FULL tool surface, the operator-only tools included (review UX-02), with the
+  # PVE token secret so verify_declarations / discover_reachability / detect_template_bridge can read live PVE
+  # (the tenant gateway has no PVE drivers; those tools return checked_nodes=[] there). Every operator tool
+  # still demands an OPERATOR-tier bearer. Published on the host's LOOPBACK only by default, and never routed
+  # through Caddy or the tunnel: reach it from the host, or over `ssh -L` (operator-tier.md §2). Widening
+  # OPERATOR_GATEWAY_BIND sends the bearer as plain HTTP across that network.
+  gateway-operator:
+    <<: *broker
+    command: ["python", "-m", "br0kr.mcp_server"]
+    profiles: ["operator"]
+    environment:
+      <<: *broker-env
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+      BR0KR_MCP_TRANSPORT: ${BR0KR_MCP_TRANSPORT:-streamable-http}
+      FASTMCP_HOST: 0.0.0.0
+      FASTMCP_PORT: "8080"
+      BR0KR_MCP_OPERATOR_TOOLS: "1"
+      # The per-cluster PVE token secret(s), as on the daemon: the live-PVE operator reads resolve
+      # cluster.token_secret_env from here. Add a line per cluster if their secret-env names differ.
+      PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}
+    ports:
+      - "${OPERATOR_GATEWAY_BIND:-127.0.0.1}:${OPERATOR_GATEWAY_PORT:-8082}:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8080/healthz',timeout=3).status==200 else 1)"]
       interval: 15s

@@ -1339,3 +1339,79 @@ def test_healthz_callers_never_queue_behind_a_slow_probe(monkeypatch):
     release.set()
     first.join(5)
     assert answers == [False] * 5 and len(probes) == 1   # the stale last answer, and a single ledger probe
+# ── Operator-only tool registration (review UX-02) ──────────────────────────────────────────────────
+def _descriptions(server) -> dict[str, str]:
+    """Each tool's description with docstring indentation removed: Python 3.13 (the image) strips it from
+    `__doc__` at compile time, while 3.11/3.12 keep it, so this measures what the deployed gateway serves."""
+    import inspect
+    return {t.name: inspect.cleandoc(t.description or "") for t in server._tool_manager.list_tools()}
+
+
+@pytest.mark.parametrize(("value", "enabled"), [(None, True), ("", True), ("1", True), ("yes", True),
+                                                ("0", False), (" 0 ", False), ("false", False), ("Off", False),
+                                                ("no", False)])
+def test_operator_tools_flag_parses(value, enabled):
+    """BR0KR_MCP_OPERATOR_TOOLS turns the operator-only tools off for "0", false, no or off (any case,
+    whitespace ignored); unset, blank or anything else keeps them on. Guards a hand-run or stdio gateway, which
+    sets nothing, silently losing its operator tools; compose's blank `${VAR:-}` default being read as "off";
+    and an operator's `false` in `.env` silently re-exposing the operator surface on the tenant gateway."""
+    env = {} if value is None else {"BR0KR_MCP_OPERATOR_TOOLS": value}
+    assert mcp_server.operator_tools_enabled(env) is enabled
+
+
+def test_operator_tools_register_only_when_enabled():
+    """With the flag off, a fresh FastMCP gets none of the collected operator tools; with it on, it gets
+    exactly them, by their function names. Guards the tenant gateway still advertising operator tools, and
+    the operator gateway missing one."""
+    from mcp.server.fastmcp import FastMCP
+
+    names = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
+    off, on = FastMCP("tenant"), FastMCP("operator")
+    assert mcp_server.register_operator_tools(off, enabled=False) == 0 and _descriptions(off) == {}
+    assert mcp_server.register_operator_tools(on, enabled=True) == len(names)
+    assert set(_descriptions(on)) == names
+
+
+def _full_surface() -> dict[str, str]:
+    """Every tool's description, operator-only ones included, whatever this process's environment says."""
+    from mcp.server.fastmcp import FastMCP
+
+    tenant = _descriptions(mcp_server.mcp)
+    operator = FastMCP("operator")
+    mcp_server.register_operator_tools(operator, enabled=True)
+    return {**tenant, **_descriptions(operator)}
+
+
+def test_operator_tools_are_exactly_the_operator_tier():
+    """The tools `_operator_tool` collects are exactly the verbs `auth.VERB_TIER` marks "operator", and every
+    served tool has a tier. Guards the split drifting from the authorization table: an operator-tier tool
+    registered with `@mcp.tool()` would reach every tenant agent only to be refused, and a read-tier tool
+    collected by mistake would vanish from the tenant gateway."""
+    collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
+    assert collected == {verb for verb, tier in auth.VERB_TIER.items() if tier == "operator"}
+    assert set(_full_surface()) == set(auth.VERB_TIER)
+
+
+def test_every_operator_only_tool_is_collected_and_kept_short():
+    """Each tool whose description starts "OPERATOR only" is collected by `_operator_tool` (so the tenant
+    gateway can withhold it) and every collected tool says so and stays at or under 900 characters; the tools
+    registered directly never start that way. Guards a new operator tool registered with `@mcp.tool()`, which
+    would reach every tenant agent, and a description growing back into a design document an agent pays for
+    in context on every turn."""
+    collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
+    registered = _full_surface()
+    assert collected <= set(registered)
+    for name, text in registered.items():
+        if name in collected:
+            assert text.startswith("OPERATOR only") and len(text) <= 900, (name, len(text))
+        else:
+            assert not text.startswith("OPERATOR only"), f"{name} is operator-only but not @_operator_tool"
+
+
+def test_tenant_tool_descriptions_stay_within_a_context_budget():
+    """The descriptions a tenant agent receives from tools/list (every tool but the operator-only ones) total
+    under 25,000 characters. Guards the tenant surface creeping back toward the size it had before UX-02,
+    when operator-only text made up a large share of every tenant agent's context."""
+    collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
+    tenant = {n: t for n, t in _descriptions(mcp_server.mcp).items() if n not in collected}
+    assert sum(map(len, tenant.values())) < 25_000, sum(map(len, tenant.values()))

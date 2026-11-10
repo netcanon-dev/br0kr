@@ -25,7 +25,7 @@ to be running with `BR0KR_DASHBOARD_TOKEN` set). Pick the **tier** the agent nee
 | `read` | yes | Inspect only — `list_nodes/clusters/storage/projects/templates`, `*_capacity`, `lease_status`, `queue_status`/`queue_view`, `list_leases`, `fleet_stats`, `whoami`. |
 | `consume` | yes | `read` **plus** reserve/renew/release — `request_lease`, `schedule_lease`, `renew_lease`, `release_lease`, `cancel_lease` (and the bulk `*_leases` forms). Every lease counts against **its own** project's quota. |
 | `provision` | yes | `consume` **plus** raise its own project's quota (`set_quota`) up to an operator-set ceiling, and `request_template_download`. The node floor still caps what admits, so it can never overprovision hardware. |
-| `operator` | **no** (project-less) | Cross-tenant infra only — `node_cordon`, `migrate_lease`, plus the read verbs to observe. **Never** a tenant lease/quota verb. See [operator-tier.md](operator-tier.md). |
+| `operator` | **no** (project-less) | Cross-tenant infra only — the operator-only verbs (cordon, migration, replication, discovery, build escape hatches), plus the read verbs to observe. **Never** a tenant lease/quota verb. The Docker stack serves the operator-only verbs on the opt-in `gateway-operator`, not the tenant `gateway`. See [operator-tier.md](operator-tier.md). |
 
 Equivalent over the wire (what the panel POSTs), if you'd rather script it:
 
@@ -183,7 +183,7 @@ every guest boots pre-provisioned, no first-boot step at all.
   See [/SECURITY.md](../../SECURITY.md) C12 and [docker-deploy.md](docker-deploy.md).
 
 ## See also
-- [operator-tier.md](operator-tier.md) — minting/using the cross-tenant `operator` token (cordon + migrate + fleet observability)
+- [operator-tier.md](operator-tier.md) — minting/using the cross-tenant `operator` token (the operator-only verbs, the operator gateway, fleet observability)
 - [vm-access.md](vm-access.md) — the ssh-key handshake for reaching the VM the broker hands back
 - [docker-deploy.md](docker-deploy.md) — deploying the gateway (and the optional TLS termination) with Docker Compose
 - [/README.md](../../README.md) — the external front door (Quickstart + the auth model in prose)

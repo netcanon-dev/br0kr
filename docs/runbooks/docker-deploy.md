@@ -655,10 +655,11 @@ quarantined; its build failure stays legible as `build_acl_denied`), a non-gate 
 an empty/unreadable `content` field is reported, not quarantined (the post-clone assertion remains the hard
 tripwire). It needs `Datastore.Audit` on `/storage` for `br0kr@pve` (else it returns `acl_insufficient`
 and quarantines nothing — widen the ACL to make it functional), and the **MCP gateway process must carry the PVE
-token env** (`PVE_TOKEN_SECRET`) to build drivers — otherwise it returns `checked_nodes:[]`. The bundled
-`docker-compose.yml` deliberately gives that secret to the daemon only (the gateway is the network-facing
-process), so under it this verb, `discover_reachability` and `detect_template_bridge` return
-`checked_nodes:[]` unless you add `PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}` to the gateway service yourself. Clear a
+token env** (`PVE_TOKEN_SECRET`) to build drivers — otherwise it returns `checked_nodes:[]`. Under the bundled
+`docker-compose.yml` that is the opt-in **`gateway-operator`** service: add `operator` to `COMPOSE_PROFILES` and
+point your operator MCP client at it (loopback `127.0.0.1:${OPERATOR_GATEWAY_PORT:-8082}`, or over `ssh -L`;
+[operator-tier.md §2](operator-tier.md)). The tenant `gateway`, the network-facing one Caddy and the tunnel route
+to, has no PVE token and does not serve the operator-only tools at all (review UX-02). Clear a
 false/stale quarantine with `clear_storage_node_quarantine`.
 
 **Scheduled drift reporting (PR-G, `discovery_interval_seconds`).** To catch drift *before* it bites — instead of

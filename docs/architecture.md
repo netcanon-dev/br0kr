@@ -182,6 +182,10 @@ rejected as "node full" by the very lease it already created.
   (`request_lease`/`schedule_lease` take an optional `project_id`); `mcp_server.py` is a thin **MCP** adapter
   exposing them as tools (the broker's users are AI agents). Verbs proven end-to-end in
   `scripts/harness_gateway.py`; the secret (`PGCONN`) lives in the server env, never a tool arg.
+  The operator-only tools are collected by `_operator_tool` and registered only where
+  `BR0KR_MCP_OPERATOR_TOOLS` is not `0`, so the compose tenant `gateway` leaves them out of `tools/list`
+  and the opt-in `gateway-operator`, which alone holds the PVE token, serves them (review UX-02;
+  [operator-tier.md §2](runbooks/operator-tier.md)).
   **Bulk forms** (`renew_leases`/`release_leases`/`cancel_leases`/`lease_statuses`) fan a single-lease verb
   over many ids in one call via `br0kr/bulk.py` — pure orchestration (per-id ownership gate, per-id
   commit/rollback isolation, deduped + bounded), so a fleet agent needs one round-trip, and they debit no

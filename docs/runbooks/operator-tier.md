@@ -1,8 +1,8 @@
 # Runbook — the operator MCP tier
 
 **Status:** 🟢 **shipped & hermetically proven** (migration `0020`, PR #47). An `operator` token is a
-project-less, cross-tenant MCP credential that can cordon a node, start a cross-cluster lease migration, and
-observe the whole fleet — but can NEVER reserve/renew/release capacity or touch a tenant's quota. This runbook
+project-less, cross-tenant MCP credential that can cordon a node, start a cross-cluster lease migration, run
+the replication, discovery and build escape-hatch verbs, and observe the whole fleet — but can NEVER reserve/renew/release capacity or touch a tenant's quota. This runbook
 covers **minting one, presenting it over MCP, exactly what it can and can't do, and how to guard/rotate it.**
 
 ## What an operator token is (and why it's a separate tier)
@@ -14,8 +14,8 @@ The `operator` tier is the missing MCP home:
 
 - It is **project-less** (`api_token.project_id` is NULL — the `0020` `CHECK(scope='operator' OR project_id
   IS NOT NULL)` lets *only* an operator omit a project; every tenant token still binds to one).
-- It is a **PARALLEL scope, not a rank above `provision`** (`br0kr/auth.tier_allows`). It may call the two
-  operator verbs **plus** the read-tier observability verbs, and **nothing else**. It has no project to bind
+- It is a **PARALLEL scope, not a rank above `provision`** (`br0kr/auth.tier_allows`). It may call the
+  operator-only verbs (§3) **plus** the read-tier observability verbs, and **nothing else**. It has no project to bind
   to, so it **debits no capacity scope and cannot weaken the admission floor** — a pure authorization layer,
   exactly like every tier.
 - It is **the most powerful credential br0kr mints** — the same trust class as the dashboard operator token
@@ -65,6 +65,37 @@ the transport (`BR0KR_MCP_TRANSPORT`):
 
 So an HTTP MCP client points at `http(s)://<host>:<port>/mcp` with the bearer header; a stdio client launches
 `python -m br0kr.mcp_server` with `BR0KR_API_TOKEN=<secret>` in its environment.
+
+### Which gateway serves the operator tools
+
+The tools in §3 that start "OPERATOR only" are registered only on a gateway where `BR0KR_MCP_OPERATOR_TOOLS`
+is not `0`. A tenant token gets nothing but `forbidden_scope` from them, so the tenant front door leaves them
+out of `tools/list`: a tenant agent no longer carries their descriptions in every turn. The read-tier
+observability verbs (§3) stay on every gateway.
+
+| Gateway | Operator-only tools | PVE token | Reachable from |
+|---|---|---|---|
+| `gateway` (the Docker stack's tenant front door, `GATEWAY_PORT`, also what Caddy and the tunnel route to) | withheld (`BR0KR_MCP_OPERATOR_TOOLS` defaults to `0`; set `1` in `.env` to serve them here as before) | no | wherever you publish it |
+| `gateway-operator` (opt-in: add `operator` to `COMPOSE_PROFILES`) | served | yes, so the live-PVE reads work | the host's **loopback**, `127.0.0.1:${OPERATOR_GATEWAY_PORT:-8082}` |
+| a hand-run or stdio `python -m br0kr.mcp_server` | served (unset means on) | whatever its environment has | wherever you run it |
+
+To use the operator gateway from another machine, tunnel to it over SSH rather than widening its bind:
+
+```
+ssh -L 8082:127.0.0.1:8082 <broker-host>      # then point the MCP client at http://127.0.0.1:8082/mcp
+```
+
+`OPERATOR_GATEWAY_BIND` can publish it on another address, but it speaks plain HTTP, so the operator bearer
+would cross that network in cleartext, and it is never routed through Caddy or the tunnel. Never point a
+Cloudflare tunnel hostname or a proxy route at `gateway-operator`; nothing in the repository can check that.
+
+To retire it later, remove the container while the profile is still in `.env`, then drop the profile:
+`docker compose rm -sf gateway-operator`, edit `COMPOSE_PROFILES`, `bash scripts/deploy.sh`. (Dropping the
+profile first leaves a container `deploy.sh` treats as an orphan, and it refuses to run.)
+
+`verify_declarations`, `discover_reachability` and `detect_template_bridge` read live PVE, so they need the
+PVE token secret in the gateway's environment. Only `gateway-operator` (and the daemon) receives it; on a
+gateway without it they answer `checked_nodes: []` or `node_unroutable`.
 
 > **The bearer travels in cleartext** unless you front the gateway with TLS (the optional Caddy override —
 > [docker-deploy.md §10](docker-deploy.md)). On a non-trusted network, put it behind TLS or keep it on a
@@ -173,4 +204,4 @@ migration as pre-wired, not proven-live.
 - [cross-cluster-migration.md](cross-cluster-migration.md) — the migration saga `migrate_lease` triggers, and how to enable + live-verify it
 - [docker-deploy.md](docker-deploy.md) — §10 the optional Caddy TLS front that encrypts the bearer
 - [vm-access.md](vm-access.md) — the tenant (agent) side: reserving a lease + SSHing into its guest
-- `br0kr/auth.py` — `tier_allows` (the parallel operator rule); `br0kr/mcp_server.py` — the `node_cordon` / `migrate_lease` verbs; `br0kr/admin.py` — `create_token` / `revoke_token`
+- `br0kr/auth.py` — `tier_allows` (the parallel operator rule); `br0kr/mcp_server.py` — the operator-only verbs (`@_operator_tool`); `br0kr/admin.py` — `create_token` / `revoke_token`

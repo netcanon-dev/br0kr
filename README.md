@@ -157,7 +157,9 @@ un-publish would silently no-op and leak the plain port.) See
   `examples/multi_disk_request.py`, `scripts/harness_multidisk*.py`)
 - ✅ **Agent gateway (MCP)** — the agent verbs (`request_lease`, `schedule_lease`, `renew_lease`,
   `release_lease`, `lease_status`, the capacity and template reads, …) plus operator-tier verbs gated to an
-  operator token; an MCP client lists every tool with `tools/list`. `br0kr/gateway.py` + `br0kr/mcp_server.py`
+  operator token. The Docker stack's tenant `gateway` leaves the operator-only tools out; the opt-in
+  `gateway-operator` serves them ([operator-tier.md §2](docs/runbooks/operator-tier.md)). An MCP client lists a
+  gateway's tools with `tools/list`. `br0kr/gateway.py` + `br0kr/mcp_server.py`
 - ✅ **Agent authentication** — every gateway tool requires a **per-project API token** (read / consume /
   provision tiers): no anonymous access, reservations are bound to the token's own project (a token can
   only spend its own quota), and a token can't touch another tenant's lease. A `provision` token can

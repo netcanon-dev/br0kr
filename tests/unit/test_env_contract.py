@@ -10,7 +10,8 @@ YAML dependency):
     and the seed of every knob in `settings.KNOBS`;
   * each process is passed every variable its entry-point module reads;
   * every variable `.env.example` documents is consumed somewhere, and every knob seed is documented;
-  * secrets stay on the one service that needs them (no blanket `env_file:`);
+  * secrets stay on the services that need them (no blanket `env_file:`);
+  * the tenant gateway withholds the operator-only tools and the operator gateway serves them;
   * a blank value means unset, because compose passes `${VAR:-}` for every variable the operator left out.
 """
 from __future__ import annotations
@@ -28,9 +29,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE = [_ROOT / name for name in ("docker-compose.yml", "docker-compose.tls.yml",
                                       "docker-compose.primary-remote.yml", "docker-compose.standby.yml")]
 _LOGGING = {"LOG_LEVEL", "LOG_FORMAT", "BR0KR_LOG_FILE"}
-_BROKER_SERVICES = ("migrate", "gateway", "daemon", "dashboard")   # docker-compose.yml, merge x-broker-env
-# The module whose main() a service runs, so the variables it reads must reach that service.
-_ENTRY = {"daemon.py": "daemon", "mcp_server.py": "gateway", "dashboard.py": "dashboard", "oauth.py": "oauth"}
+_BROKER_SERVICES = ("migrate", "gateway", "gateway-operator", "daemon", "dashboard")   # merge x-broker-env
+# The module whose main() each service runs, so the variables it reads must reach those services.
+_ENTRY = {"daemon.py": ("daemon",), "mcp_server.py": ("gateway", "gateway-operator"),
+          "dashboard.py": ("dashboard",), "oauth.py": ("oauth",)}
 # Variables an entry point reads that compose deliberately does NOT pass, each with its reason.
 _NOT_PASSED = {
     "BR0KR_VM_CLONE_STORAGE": "retired (0033): read only to log an error telling the operator to delete it",
@@ -99,7 +101,7 @@ def test_shared_block_is_logging_plus_every_knob_seed():
 
 
 def test_every_broker_service_merges_the_shared_block():
-    """migrate, gateway, daemon and dashboard each merge `x-broker-env`, and the OAuth shim (in the TLS file,
+    """migrate, both gateways, daemon and dashboard each merge `x-broker-env`, and the OAuth shim (in the TLS file,
     which cannot see that file's anchors) lists the logging switches itself. Guards `LOG_FORMAT=json` in `.env`
     being a silent no-op for some process, which is how it started."""
     services, _ = _all_services()
@@ -117,10 +119,10 @@ def test_each_process_is_passed_what_it_reads():
     every = set.intersection(*(_seen_by(s) for s in (*_BROKER_SERVICES, "oauth")))
     for path in sorted((_ROOT / "br0kr").glob("*.py")):
         read = set(_READ.findall(path.read_text(encoding="utf-8"))) - set(_NOT_PASSED)
-        service = _ENTRY.get(path.name)
-        missing = read - (_seen_by(service) if service else every)
-        where = service or "every broker service"
-        assert not missing, f"{path.name} reads {sorted(missing)} but compose does not pass them to {where}"
+        for service in _ENTRY.get(path.name, (None,)):
+            missing = read - (_seen_by(service) if service else every)
+            where = service or "every broker service"
+            assert not missing, f"{path.name} reads {sorted(missing)} but compose does not pass them to {where}"
 
 
 def test_env_example_documents_every_knob_seed():
@@ -155,12 +157,14 @@ def test_retired_clone_storage_is_gone_from_the_contract():
 
 
 def test_secrets_stay_on_their_service():
-    """PVE_TOKEN_SECRET reaches the daemon only, and no compose file uses `env_file:`. Guards the "simple" fix
-    for drift (one env_file for everything), which would hand the PVE token and every other `.env` secret to the
-    gateway, the dashboard and the tunnel-reachable OAuth shim."""
+    """PVE_TOKEN_SECRET reaches only the daemon and the opt-in, loopback-published operator gateway (whose
+    live-PVE reads need it, review UX-02), and no compose file uses `env_file:`. Guards the "simple" fix for
+    drift (one env_file for everything), which would hand the PVE token and every other `.env` secret to the
+    tenant gateway, the dashboard and the tunnel-reachable OAuth shim."""
     services, anchor = _all_services()
     assert "PVE_TOKEN_SECRET" not in anchor
-    assert [name for name, keys in services.items() if "PVE_TOKEN_SECRET" in keys] == ["daemon"]
+    holders = sorted(name for name, keys in services.items() if "PVE_TOKEN_SECRET" in keys)
+    assert holders == ["daemon", "gateway-operator"], holders
     for path in _COMPOSE:
         assert not re.search(r"^\s*env_file:", path.read_text(encoding="utf-8"), re.M), path.name
 
@@ -188,3 +192,28 @@ def test_daemon_env_reads_treat_blank_as_unset(monkeypatch):
         assert daemon._env("BR0KR_TEST_ENV") is None
     monkeypatch.setenv("BR0KR_TEST_ENV", "7")
     assert daemon._env("BR0KR_TEST_ENV", "5") == "7"
+
+
+def test_operator_tools_split_between_the_two_gateways():
+    """The tenant `gateway` withholds the operator-only MCP tools unless the operator opts back in
+    (BR0KR_MCP_OPERATOR_TOOLS defaults to 0 there), while `gateway-operator` always serves them, sits behind the
+    opt-in `operator` profile, and is published on loopback by default. The TLS overlay and the tunnel route
+    only to `gateway`. Guards the tenant front door going back to advertising tools a tenant can only be
+    refused, and the PVE-holding operator gateway becoming reachable through Caddy or the tunnel (review UX-02)."""
+    services, _ = _parse(_ROOT / "docker-compose.yml")
+    assert "BR0KR_MCP_OPERATOR_TOOLS" in services["gateway"] and "BR0KR_MCP_OPERATOR_TOOLS" in services["gateway-operator"]
+    base = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert base.count("BR0KR_MCP_OPERATOR_TOOLS: ${BR0KR_MCP_OPERATOR_TOOLS:-0}") == 1   # the tenant gateway
+    assert base.count('BR0KR_MCP_OPERATOR_TOOLS: "1"') == 1                              # the operator gateway
+    lines = base.splitlines()
+    start = lines.index("  gateway-operator:")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("  ") and not lines[i].startswith("   ")
+               and not lines[i].lstrip().startswith("#"))
+    block = "\n".join(lines[start:end])
+    assert 'BR0KR_MCP_OPERATOR_TOOLS: "1"' in block and 'profiles: ["operator"]' in block
+    assert '"${OPERATOR_GATEWAY_BIND:-127.0.0.1}:${OPERATOR_GATEWAY_PORT:-8082}:8080"' in block
+    for name in ("docker-compose.tls.yml", "docker-compose.primary-remote.yml", "docker-compose.standby.yml"):
+        assert "gateway-operator" not in (_ROOT / name).read_text(encoding="utf-8"), name
+    for path in sorted((_ROOT / "docker").rglob("*")):
+        if path.is_file():
+            assert "gateway-operator" not in path.read_text(encoding="utf-8", errors="replace"), path.name
