@@ -223,6 +223,7 @@ click. See SECURITY.md (dashboard write-surface control) and `br0kr/actas.py`.
 | lease ends with `released_reason` `template_vmid_missing` | the catalog template's vmid does not exist on the node that clones it (deleted, renumbered, or never replicated there); re-point the catalog entry or rebuild the template |
 
 ## See also
+- [first-vm.md](first-vm.md) — the whole first-VM path in one runbook, this template step included
 - [connecting-an-agent.md](connecting-an-agent.md) — pointing an MCP client at the gateway + minting the token, the step before this one
 - [operator-tier.md](operator-tier.md) — the cross-tenant operator token (cordon + migrate + fleet observability)
 - [/README.md](../../README.md) — quickstart and the auth model in prose

@@ -15,7 +15,7 @@ correctly: *can two callers ever both claim the last slot?* — **no, provably n
 |------|------------|
 | [CLAUDE.md](CLAUDE.md) | Contributor directives + Hard Rules (Never Break). |
 | [docs/](docs/) | Architecture, standards, and the docs map ([docs/README.md](docs/README.md)). |
-| `br0kr/` | The importable package (logging setup today; admission/pve/db modules harden out of `scripts/`). |
+| `br0kr/` | The broker: admission, the reconciler daemon, the MCP gateway, the dashboard, the Proxmox driver and the ledger migrations runner. `pip install .` adds the `br0kr-migrate`, `br0kr-gateway`, `br0kr-daemon` and `br0kr-dashboard` commands. |
 | `db/` | The capacity-ledger schema as versioned migrations (`migrations/`, applied by `br0kr/migrate.py`). |
 | `scripts/` | Runnable proofs: the concurrency gates + the live reconciler, each with a `run_*.sh` that spins up a throwaway Postgres. |
 | `tests/` | `validate.sh` gate + `unit/`/`integration/`/`e2e/` (hermetic PR subset = `not e2e and not slow`). |
@@ -30,6 +30,9 @@ inherited from the server default), so the last-slot double-book is mechanically
 Nomad, or etcd.
 
 ## Quickstart
+
+**To run it:** [docs/runbooks/first-vm.md](docs/runbooks/first-vm.md) takes you from a clone to an SSH session
+on your first leased VM. The commands below are the development proofs.
 
 ```bash
 # Apply the schema migrations to a ledger (idempotent; run once before the services):

@@ -5,6 +5,9 @@ three broker processes — `migrate` (one-shot), `gateway` (agent-facing MCP), a
 leader-elected reconciler). One image, three entrypoints (`Dockerfile`); the topology and env wiring
 live in [`docker-compose.yml`](../../docker-compose.yml) + [`.env.example`](../../.env.example).
 
+> **First time?** [first-vm.md](first-vm.md) is the straight path from a clone to an SSH session on a leased
+> VM, one Proxmox node and one pool. This runbook is the full reference behind it.
+
 > **Scope.** The bundled `pg-primary`/`pg-standby` pair is a **homelab STARTER** ledger: it
 > demonstrates the multi-host `PGCONN` re-homing that [ledger-ha.md](ledger-ha.md) describes and the
 > failover harness proves, using **trust replication on an isolated compose network**. It is not a
@@ -15,12 +18,13 @@ live in [`docker-compose.yml`](../../docker-compose.yml) + [`.env.example`](../.
 
 - Docker Engine + the Compose **v2** plugin (`docker compose version`) — **≥ 2.24** if you plan to use the
   built-in TLS profile (§10), which relies on the `!reset` merge tag; any recent v2 is fine for plain HTTP.
-- A clone of this repo (the image builds from it — it is **unpublished** by design, pre-alpha).
+- A clone of this repo (`git clone https://github.com/netcanon-dev/br0kr.git`): the image is built from it,
+  since no prebuilt image is published yet.
 - **Out of scope here:** standing up the Docker host itself (any Debian/Ubuntu box on the LAN that can reach
-  the Proxmox API works — a VM, an LXC, or bare metal) and cloning the **private** repo onto it (deploy key,
-  tarball, or `git archive HEAD | ssh host 'tar -x'` from a working checkout — the `.env`/secrets are
-  `.gitignored`, so a source archive carries no secrets). This runbook picks up once Docker + the repo are on
-  the host.
+  the Proxmox API works — a VM, an LXC, or bare metal). A `git clone` on the host is the simplest way to get
+  the source there; `git archive HEAD | ssh host 'tar -x'` from a working checkout also works (`.env` and the
+  secrets are `.gitignored`, so a source archive carries none, but mind its line endings: §13). This runbook
+  picks up once Docker and the source are on the host.
 
 ## 2. Configure
 
@@ -53,9 +57,11 @@ default 300). `--check` runs only the checks; `--no-build` brings the stack up o
 present; anything after `--` is passed to `up -d` (for example `-- --scale daemon=2`). It needs bash,
 python3 and coreutils on the host. The raw equivalent is `docker compose build daemon && docker compose up -d`.
 
-Once `.env` carries `COMPOSE_FILE`/`COMPOSE_PROFILES`, **do not pass `-f` or `--profile` by hand**: either
-flag replaces the `.env` value for that one command, so `docker compose --profile oauth up -d` treats
-`dashboard` and `cloudflared` as orphans. To add or drop a component, edit `.env` and run `deploy.sh`.
+> **⚠ Never pass `-f` or `--profile` by hand once `.env` names the stack.** Either flag replaces the `.env`
+> value for that one command, so a command that names fewer files or profiles than the stack runs treats the
+> rest as orphans and can stop them (`docker compose --profile oauth up -d` takes down `dashboard` and
+> `cloudflared`). To add or drop a component, edit `COMPOSE_FILE` / `COMPOSE_PROFILES` in `.env` and run
+> `bash scripts/deploy.sh`. §13 has the history and the manual equivalents.
 
 Startup order is enforced by `depends_on`: the standby and `migrate` each wait for the primary to be
 healthy (so they start **in parallel** once it is — `migrate` does not wait for the standby clone);
@@ -430,8 +436,8 @@ This starter stack trades rigour for one-command bring-up. Before relying on it:
   Dependabot proposes the bumps. The broker services run with no Linux capabilities, `no-new-privileges`, a
   read-only root filesystem (a private `/tmp`), and pid / memory ceilings; the ledger and Caddy keep only the
   capabilities their entrypoints need. A `BR0KR_LOG_FILE` must therefore point at a mounted volume. The br0kr
-  image itself is built locally and unpublished; for a fleet, build once, push to a private registry and pin
-  that digest too.
+  image itself is built locally (no prebuilt image is published yet); for a fleet, build once, push to a
+  registry you control and pin that digest too.
 
 ## 9. Stretched / DR standby (remote host over the mesh)
 

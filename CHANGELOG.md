@@ -328,6 +328,16 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
     add `operator` to `COMPOSE_PROFILES` and point that client at the operator gateway (`ssh -L` from another
     machine; operator-tier.md §2), or set `BR0KR_MCP_OPERATOR_TOOLS=1` in `.env` to keep the old surface
     (review UX-02).
+- **A first-VM runbook, and the deploy runbook's stale claims fixed (`docs/runbooks/first-vm.md`,
+  `docs/runbooks/docker-deploy.md`, `README.md`, `docs/README.md`).** Why: a newcomer had no path from a clone
+  to a running VM. The Quickstart was a list of development harnesses, fleet registration sat in a 200-line
+  section, and minting the first token needs the dashboard, which the deploy runbook called optional. The new
+  runbook is one linear path (Proxmox token, template, `.env`, `deploy.sh`, fleet registration, a `consume`
+  token, a lease over MCP, ssh, release), each step a command plus the line that proves it; its commands were
+  run as written against a throwaway stack. Walking it found the bug fixed above (a newly registered template
+  could not be leased). The deploy runbook no longer says the repository is private or the gateway
+  unauthenticated, and its never-pass-`-f`/`--profile` rule is now a warning in §3. The README's `br0kr/` row
+  describes the package as it is and names its console commands (review UX-01).
 - **Stale docs fixed (`tests/README.md`, new `tests/e2e/README.md`, `.github/ISSUE_TEMPLATE/`, `docs/`,
   `README.md`).** Why: a spot-check of ten doc claims found five wrong, and stale docs are a bug here. The test
   pyramid no longer describes scaffold wording ("the app/CLI/API as a black box") or a dedicated e2e CI job:

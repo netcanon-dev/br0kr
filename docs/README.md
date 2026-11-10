@@ -49,6 +49,7 @@ docs/
 - [runbooks/connecting-an-agent.md](runbooks/connecting-an-agent.md) — pointing an agent's MCP client at the gateway (mint a token, pick a transport, paste the config)
 - [runbooks/oauth-connector.md](runbooks/oauth-connector.md) — connecting an OAuth-only MCP host (Claude Desktop / claude.ai custom connector) via the OAuth shim
 - [runbooks/public-tunnel.md](runbooks/public-tunnel.md) — making br0kr reachable from the cloud (a named Cloudflare Tunnel) when it's on a private LAN IP
+- [runbooks/first-vm.md](runbooks/first-vm.md) — **start here**: from a clone to an SSH session on your first leased VM, step by step
 - [runbooks/docker-deploy.md](runbooks/docker-deploy.md) — deploying the whole stack with Docker Compose
 - [runbooks/ledger-ha.md](runbooks/ledger-ha.md) — operating the ledger under high availability
 - [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md) — relocating a lease to another cluster, race-free

@@ -183,6 +183,7 @@ every guest boots pre-provisioned, no first-boot step at all.
   See [/SECURITY.md](../../SECURITY.md) C12 and [docker-deploy.md](docker-deploy.md).
 
 ## See also
+- [first-vm.md](first-vm.md) — a first lease end to end, calling the gateway by hand before any agent is wired up
 - [operator-tier.md](operator-tier.md) — minting/using the cross-tenant `operator` token (the operator-only verbs, the operator gateway, fleet observability)
 - [vm-access.md](vm-access.md) — the ssh-key handshake for reaching the VM the broker hands back
 - [docker-deploy.md](docker-deploy.md) — deploying the gateway (and the optional TLS termination) with Docker Compose
