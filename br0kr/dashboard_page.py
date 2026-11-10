@@ -364,7 +364,7 @@ async function submitForm(ename, mode){
   if(r.ok && r.data && (r.data.created||r.data.updated)){
     closeForm();
     // A template on a multi-node cluster starts with an unbound instance the placement gate refuses.
-    if(r.data.needs_binding) alert('Created. This cluster has more than one node, so bind the template\'s '
+    if(r.data.needs_binding) alert('Created. This cluster has more than one node, so bind the new template '
       + 'instance to a node and pool (Template instances) before leasing it.');
   }
   else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);

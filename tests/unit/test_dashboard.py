@@ -6,9 +6,12 @@ dropped route 404s a panel) and the page/dispatch staying in sync — exactly wh
 """
 from __future__ import annotations
 
+import ast
 import datetime as dt
+import importlib.util
 import inspect
 import re
+from pathlib import Path
 
 import pytest
 
@@ -81,9 +84,59 @@ def test_page_script_has_balanced_template_literals():
     footgun: every JS template literal is a matched pair of backticks, so the count in the <script> block MUST
     be even. Lesson from PR2 (the Active-leases table): a line-length refactor added a stray backtick that
     only a browser — or a real `node --check` on the extracted script (run in the manual gate) — would catch."""
-    m = re.search(r"<script>(.*?)</script>", dashboard.PAGE, re.S)
-    assert m is not None, "PAGE has no <script> block"
-    assert m.group(1).count("`") % 2 == 0, "odd number of backticks — an unbalanced JS template literal in PAGE"
+    js = _script_block(dashboard.PAGE)
+    assert js is not None, "PAGE has no <script> block"
+    assert js.count("`") % 2 == 0, "odd number of backticks — an unbalanced JS template literal in PAGE"
+
+
+def _script_block(page: str) -> str | None:
+    """The page's inline client script: the text between the first `<script>` and the next `</script>` (the
+    `<script src=…>` asset tag does not match), or None. A plain split, the same one tests/check_dashboard_js.py
+    makes; the page is our own string, so this extracts, never sanitizes."""
+    _head, sep, rest = page.partition("<script>")
+    body, end, _tail = rest.partition("</script>")
+    return body if sep and end else None
+
+
+def _page_literal_source() -> str:
+    """The PAGE string literal exactly as written in br0kr/dashboard_page.py (quotes included)."""
+    from br0kr import dashboard_page
+    src = Path(dashboard_page.__file__).read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "PAGE" for t in n.targets))
+    literal = ast.get_source_segment(src, node.value)
+    assert literal is not None
+    return literal
+
+
+def test_page_literal_holds_no_escape_that_changes_the_served_text():
+    r"""Every backslash in the PAGE source literal is doubled (`\\` in the source, one `\` in the served page), so
+    the script the browser receives is the script the source shows. A single backslash is a Python escape that
+    rewrites the page on its way out: `\'` in the source reached the browser as a bare `'`, ended a JS string
+    early and left the whole dashboard script dead on load (a SyntaxError, so no panel ever rendered), while the
+    node check, which then read the source text, passed. Hermetic: runs where node is absent."""
+    literal = _page_literal_source()
+    odd = [literal[max(0, m.start() - 30):m.end() + 10]
+           for m in re.finditer(r"\\+", literal) if len(m.group()) % 2]
+    assert not odd, f"Python escapes in PAGE change the script the browser receives: {odd}"
+
+
+def test_js_syntax_gate_checks_the_script_as_served(tmp_path, monkeypatch):
+    r"""tests/check_dashboard_js.py hands node the script as the browser receives it (PAGE's runtime value), not
+    the source text: for a module whose PAGE holds `\'`, it returns the bare `'` the browser would get. Guards the
+    gate regressing to the source text, where that escape reads as valid JS and a dead page passes the check."""
+    spec = importlib.util.spec_from_file_location(
+        "check_dashboard_js", Path(__file__).resolve().parents[1] / "check_dashboard_js.py")
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    fake = tmp_path / "dashboard_page.py"
+    fake.write_text(r'''PAGE = """<html><script>f('it\'s')</script></html>"""''' + "\n", encoding="utf-8")
+    monkeypatch.setattr(gate, "_PAGE_MODULE", fake)
+    assert gate.page_script() == "f('it's')"            # what the browser gets: a broken JS string
+    served = _script_block(dashboard.PAGE)
+    monkeypatch.undo()
+    assert served is not None and gate.page_script() == served   # the real page, as served
 
 
 def test_read_settings_reports_the_schema_version():
@@ -459,10 +512,10 @@ def test_value_editors_are_modal_popouts_not_native_prompts():
     can't quietly go back to a blocking native dialog. Source/PAGE-needle (the JS lives in a Python string; the
     syntax half is `node --check`)."""
     page = dashboard.PAGE
-    m = re.search(r"<script>(.*?)</script>", page, re.S)
-    assert m is not None
+    js = _script_block(page)
+    assert js is not None
     # no native prompt() survives — the two data-entry prompts are the whole point of this change
-    assert "prompt(" not in m.group(1), "a native prompt() is back — it should be a modal popout"
+    assert "prompt(" not in js, "a native prompt() is back — it should be a modal popout"
     for needle in (
         # template-disk quota: opener renders a modal, submit posts with the blank=disable + typo-guard semantics
         "function setTemplateDisk(", "async function submitTemplateDisk(", 'id="td-gb"',
@@ -485,9 +538,8 @@ def test_destructive_confirmations_are_modal_dialogs_not_native_confirm():
     from inside the grant-management modal (a modal-over-modal would fight #form-slot) — so no NEW native confirm
     can creep in. Source/PAGE-needle (the JS lives in a Python string; `node --check` is the syntax half)."""
     page = dashboard.PAGE
-    m = re.search(r"<script>(.*?)</script>", page, re.S)
-    assert m is not None
-    js = m.group(1)
+    js = _script_block(page)
+    assert js is not None
     # at most the ONE documented exception (revokeGrant, nested in the grant modal) stays native
     assert js.count("confirm(") <= 1, "a new native confirm() crept in — it should be a confirmModal"
     for needle in (
