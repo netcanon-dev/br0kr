@@ -338,6 +338,20 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   could not be leased). The deploy runbook no longer says the repository is private or the gateway
   unauthenticated, and its never-pass-`-f`/`--profile` rule is now a warning in §3. The README's `br0kr/` row
   describes the package as it is and names its console commands (review UX-01).
+- **The README is a front door again; the status log and the harness catalogue moved out (`README.md`, new
+  `docs/status.md`, new `scripts/README.md`).** Why: the README listed the development harnesses before the
+  commands that start the services, carried a long per-feature status log, never mentioned `pip install` or the
+  console commands, and told newcomers to read the architecture document first. It is now install and run
+  (`deploy.sh`, the dashboard, the first-VM runbook, the `pip` path), a feature table linking each feature's
+  code and runbook, a short status block, and the layout. The status list moved verbatim to `docs/status.md`.
+  The harness catalogue is now `scripts/README.md`, covering every script with what it proves and the port it
+  publishes, so the port registry lives in the repo. The two dashboard paragraphs with no other home (the theme
+  and named dashboard operators) moved to `docker-deploy.md` §3. Unit tests keep it honest: the README stays at
+  most 120 lines, the front-door pages' links and anchors resolve, every runbook is within two clicks of the
+  README, the README names every console command, and every script has a catalogue row whose port matches its
+  wrapper. Building the registry showed `run_tls_smoke.sh` also took host port 8443 (Caddy's dashboard front
+  door, a compose default), so a smoke on a host already running the TLS stack would collide; it now uses
+  18444 (review DOCS-01).
 - **Stale docs fixed (`tests/README.md`, new `tests/e2e/README.md`, `.github/ISSUE_TEMPLATE/`, `docs/`,
   `README.md`).** Why: a spot-check of ten doc claims found five wrong, and stale docs are a bug here. The test
   pyramid no longer describes scaffold wording ("the app/CLI/API as a black box") or a dedicated e2e CI job:

@@ -14,6 +14,7 @@ cd "$ROOT"
 PROJECT=br0krtls
 ENVFILE="$(mktemp /tmp/br0kr-tls.XXXXXX.env)"
 TLSPORT=18443      # host port → Caddy :443 (avoid needing host 443)
+DPORT=18444        # host port → Caddy :8443, the dashboard front door (keeps a real stack's 8443 free)
 DC=(docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.tls.yml --env-file "$ENVFILE")
 
 PW="smoke-disposable-$$"
@@ -28,6 +29,7 @@ PVE_TOKEN_SECRET=
 BR0KR_TLS_SITE=localhost
 BR0KR_TLS_ISSUER=internal
 TLS_GATEWAY_PORT=${TLSPORT}
+TLS_DASHBOARD_PORT=${DPORT}
 EOF
 
 results=()

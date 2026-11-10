@@ -87,6 +87,11 @@ Browse `http://<host>:8051/`. The **reads** are **unauthenticated plain HTTP by 
 capacity counts / ids / queue state — keep it on a trusted network or behind the same proxy/TLS as the
 gateway (SECURITY.md C3); it never reads or exposes a secret or a cluster's connection config.
 
+The dashboard chrome is themed by the shared netcanon-dev UI spec (`netcanon-dev/ui-design-spec`,
+pinned at tag `v0.2.1`, vendored + sha256-gated in `br0kr/ui_assets.py`); pick a palette with the
+swatch strip in the header — the choice persists per browser. Dark-only for now: light mode stays
+off until the page's hardcoded dark literals are migrated (see the CHANGELOG entry).
+
 **Read-auth is opt-in.** To harden a less-trusted network, set `BR0KR_DASHBOARD_READ_TOKEN` (in `.env`) to
 require a bearer on the inventory reads too — the operator token below ALSO satisfies it (operator ⊇
 viewer), so hand a read-only viewer the read token while an operator uses one credential. Leave it UNSET and
@@ -114,6 +119,12 @@ enabled). Every action POST carries `Authorization: Bearer <token>` (checked con
 single shared secret over plain HTTP — it is the opt-in + a guard against an accidental write, **not** a
 substitute for TLS / network isolation, so keep the surface trusted-net regardless. A quota edit cannot
 over-allocate (admission re-reads it under its lock); a cancel reuses the race-safe lease teardown.
+
+For **per-human audit attribution** (so the trail records *who* ran an operator action, not just
+`dashboard-operator`), mint a **named dashboard operator** from the dashboard's *Dashboard operators* panel
+and sign in with its token instead of the shared `BR0KR_DASHBOARD_TOKEN`. It is a distinct credential — it
+drives only the dashboard (never the MCP gateway) — while the env token stays the enable-switch and a shared
+bootstrap identity. The header shows *acting as &lt;name&gt;* and each write records that name.
 
 Smoke-test the whole stack end-to-end (no Proxmox needed) with
 [`scripts/run_compose_smoke.sh`](../../scripts/run_compose_smoke.sh): it brings the stack up under a
@@ -824,4 +835,5 @@ git add -A && git checkout-index -a -f
 - [oauth-connector.md](oauth-connector.md) + [public-tunnel.md](public-tunnel.md) — the OAuth-only (Claude Desktop) connector and how to make it reachable from the cloud
 - [ledger-ha.md](ledger-ha.md) — the ledger HA model, single-primary rule, and failover behaviour
 - [/SECURITY.md](../../SECURITY.md) — C9 (single-writer) + C12 (agent auth + the cleartext-bearer residual TLS closes) + C17 (public reachability) + the secret-management invariants
-- [/README.md](../../README.md) — quickstart and the gate/harness map
+- [/README.md](../../README.md) — the front door: install and run, the feature table
+- [/scripts/README.md](../../scripts/README.md) — the harness catalogue and the operator tools (`deploy.sh`, backup, restore, TLS)

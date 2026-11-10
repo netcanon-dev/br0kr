@@ -226,4 +226,4 @@ click. See SECURITY.md (dashboard write-surface control) and `br0kr/actas.py`.
 - [first-vm.md](first-vm.md) — the whole first-VM path in one runbook, this template step included
 - [connecting-an-agent.md](connecting-an-agent.md) — pointing an MCP client at the gateway + minting the token, the step before this one
 - [operator-tier.md](operator-tier.md) — the cross-tenant operator token (cordon + migrate + fleet observability)
-- [/README.md](../../README.md) — quickstart and the auth model in prose
+- [/README.md](../../README.md) — the front door: install and run, the feature table

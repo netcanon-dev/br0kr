@@ -16,6 +16,7 @@ docs/
 │   ├── ci-cd.md               # the CI workflows + workflow hardening
 │   └── security-and-hygiene.md  # secret/PII hygiene (the controls live in /SECURITY.md)
 ├── architecture.md            # PLAN-OF-RECORD for the whole broker (status-legended)
+├── status.md                  # what is built, dormant and next, per feature (status-legended)
 ├── pdm-api-contract.md        # the assumed Proxmox Datacenter Manager API (unverified)
 ├── designs/                   # per-feature design specs (status-legended)
 ├── runbooks/                  # operator procedures (deploy, HA, connect an agent, …)
@@ -28,7 +29,7 @@ docs/
 | Tier | Lifecycle | Contents |
 |------|-----------|----------|
 | **`standards/`** | Stable — changes are deliberate | Binding rules every contributor follows. The "law" of the repo. |
-| **`architecture.md`, `designs/*.md`** | Living — tracks reality | Plan-of-record for the broker or one feature: the design, the *why*, the rollout. Carries the repo-wide status legend (✅ done · ◐ partial, or built but disabled · ⏳ next) and a `## See also` footer. |
+| **`architecture.md`, `status.md`, `designs/*.md`** | Living — tracks reality | Plan-of-record for the broker or one feature: the design, the *why*, the rollout. Carries the repo-wide status legend (✅ done · ◐ partial, or built but disabled · ⏳ next) and a `## See also` footer. |
 | **`reviews/<date>-<slug>.md`** | **Frozen** | The dated, reproducible record of a review/audit run. **EXPECTED-STALE:** a later audit must never flag a past run's evidence as drift — it is a historical record, not a live doc. |
 | **`runbooks/`** | Living — operational | Step-by-step operator procedures (HA, failover, restore). Practiced, not aspirational. e.g. [runbooks/ledger-ha.md](runbooks/ledger-ha.md). |
 
@@ -56,6 +57,8 @@ docs/
 - [runbooks/operator-tier.md](runbooks/operator-tier.md) — minting/using the cross-tenant `operator` MCP token (cordon + migrate + fleet observability)
 - [runbooks/vm-access.md](runbooks/vm-access.md) — handing an agent SSH access to its VM via cloud-init (its own public key)
 - [architecture.md](architecture.md) — the broker's plan of record
+- [status.md](status.md) — what is built, dormant and next, per feature, with the harness that proves each
+- [/scripts/README.md](../scripts/README.md) — the harness catalogue and the operator tools
 - [standards/documentation.md](standards/documentation.md) — the full doctrine
 - [/README.md](../README.md) — the external front door
 - [/CLAUDE.md](../CLAUDE.md) — contributor directives + the doc-sync checklist

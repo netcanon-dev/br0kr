@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # operator template download — LEDGER (A4.1): a throwaway Postgres + the real br0kr admin/build/migrate,
 # proving the source allowlist, the request gate, and the build-job lifecycle SQL (guarded CAS, the atomic
-# READY+catalog-INSERT, one-active-per-target, the stale reclaim). NO Proxmox — the download/import
-# actuation's live proof is still pending; this isolates the ledger.
+# READY+catalog-INSERT, one-active-per-target, the stale reclaim). NO Proxmox — this isolates the ledger; the
+# download/import actuation is proven on a real node by run_live_imgbuild.sh (scripts/live_imgbuild.py).
 set -euo pipefail
 PGPORT=5462
 HERE="$(cd "$(dirname "$0")" && pwd)"

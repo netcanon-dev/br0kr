@@ -187,6 +187,6 @@ every guest boots pre-provisioned, no first-boot step at all.
 - [operator-tier.md](operator-tier.md) — minting/using the cross-tenant `operator` token (the operator-only verbs, the operator gateway, fleet observability)
 - [vm-access.md](vm-access.md) — the ssh-key handshake for reaching the VM the broker hands back
 - [docker-deploy.md](docker-deploy.md) — deploying the gateway (and the optional TLS termination) with Docker Compose
-- [/README.md](../../README.md) — the external front door (Quickstart + the auth model in prose)
+- [/README.md](../../README.md) — the external front door (install and run, the feature table)
 - [/SECURITY.md](../../SECURITY.md) — the agent-token trust model + the cleartext-bearer control (C12)
 - [../architecture.md](../architecture.md) — how the gateway sits above admission
