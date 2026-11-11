@@ -126,6 +126,13 @@ and sign in with its token instead of the shared `BR0KR_DASHBOARD_TOKEN`. It is 
 drives only the dashboard (never the MCP gateway) — while the env token stays the enable-switch and a shared
 bootstrap identity. The header shows *acting as &lt;name&gt;* and each write records that name.
 
+**What needs a look is above the tabs.** A *needs attention* line at the top of every tab lists what an
+operator should act on, worst first: quarantined node-storage pairs, a ledger with replication configured but
+no standby streaming, failed template builds (when unlocked) and replications, held leases, migrations in flight,
+cordoned nodes, a pending fleet reload, queued requests. Each item jumps to its section. The line is empty when all
+is well. A failed build or replication stays listed until you dismiss it (×) in that browser; a newer failure
+brings it back. Your own cancels and force-fails are not listed. The Images tab's badge counts those failures, and the Tenancy tab's badge counts queued requests.
+
 **When something fails, the page says so.** A panel whose read fails shows *could not load … — reason* in
 place of its content, never an empty list. If a refresh fails after a good load, the header shows *stale since
 HH:MM:SS — reason* and the panels keep the last good numbers; the fleet and ledger tiles say how old they are.

@@ -342,8 +342,10 @@ def test_page_uses_client_side_tabs_grouped_into_four_panels():
     section being dropped from a panel (its render would write to a missing node) or a group being mis-nested,
     and the classification drifting from the four agreed groups. The operator sections keep their OWN display:none
     gating on the <section> (a different element than the .tabpanel), so tab-visibility never fights it — the
-    Security & Ops panel carries a #sec-hint shown until unlocked. The JS lives in a Python string, so this is a
-    source/PAGE-needle test; `node --check` on the extracted <script> is the syntax half of the gate."""
+    Security & Ops panel carries a #sec-hint shown until unlocked. The needs-attention strip sits above the panels,
+    outside every .tabpanel, so it shows whichever tab is open. The JS lives in a Python string, so this is a
+    source/PAGE-needle test; `node --check` on the extracted <script> is the syntax half of the gate, and
+    tests/integration/test_dashboard_client.py proves the strip's behaviour."""
     page = dashboard.PAGE
     # the nav + the four grouped panels, in the agreed classification
     for needle in ('<nav id="tabnav">', "onclick=\"setTab('capacity')\"", "onclick=\"setTab('tenancy')\"",
@@ -352,7 +354,12 @@ def test_page_uses_client_side_tabs_grouped_into_four_panels():
                    '<div class="tabpanel" data-tab="images">', '<div class="tabpanel" data-tab="security">',
                    # setTab wired: defined, persisted to localStorage (a preference, NOT the token), init-called
                    "function setTab(", "localStorage.setItem('br0kr_tab'", "setTab(TAB)", 'id="sec-hint"',
-                   "const TABS = ['capacity', 'tenancy', 'images', 'security']"):
+                   "const TABS = ['capacity', 'tenancy', 'images', 'security']",
+                   # the needs-attention strip sits OUTSIDE every .tabpanel (visible on all four tabs), is
+                   # rendered by every poll, and the Images / Tenancy buttons carry its badges (review UI-02)
+                   '<main>\n  <div id="attention" role="region" aria-label="needs attention" hidden></div>',
+                   "function renderAttention(", "  renderAttention();   // the strip",
+                   'id="badge-images"', 'id="badge-tenancy"'):
         assert needle in page, needle
     # every section the render loop targets is still present exactly once (grouping must not drop a panel)
     for sec_id in ("clusters-sec", "nodes-sec", "storage-sec", "projects-sec", "leases-sec", "queue-sec",

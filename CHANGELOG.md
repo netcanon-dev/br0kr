@@ -81,6 +81,16 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
   its old image until it is rebuilt and redeployed.
 
 ### Added
+- **The dashboard has a "needs attention" line above every tab, plus tab badges (`br0kr/dashboard_page.py`).**
+  Why: the signals an operator must act on were split across three tabs, some below the fold, and nothing
+  summarised them. A FAILED build was invisible from the default tab. The line lists them worst first, built from
+  data the page already has: quarantined node-storage pairs, a ledger with replication configured but no standby
+  streaming, failed builds and replications, held leases, migrations in flight, cordoned nodes, a pending fleet
+  reload and queued requests. Each item jumps to its section, and the line is empty when all is well. Builds have
+  no retention prune, so a failure stays listed until it is dismissed in that browser and returns only for a newer
+  one; counting every FAILED row would have kept the line red forever. An operator's own cancels and force-fails
+  are stored as FAILED but are not listed, and the ledger's "unknown" and "none" states never alarm. The Images badge counts failures and the Tenancy badge the queue (review UI-02).
+  `tests/integration/test_dashboard_client.py` proves each case in node.
 - **CI runs the real-Postgres harnesses on every PR (`ci.yml` `harness` job, `scripts/run_ci_harnesses.sh`
   NEW).** Why: the race-free admission proof, the queue promoter, the VMID fence race, the lease lifecycle
   CASes, the migration saga and multi-disk admission only ran when someone remembered `run_*.sh` by hand,

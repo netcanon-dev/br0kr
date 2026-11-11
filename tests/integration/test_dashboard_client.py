@@ -225,6 +225,96 @@ def test_the_lease_status_modal_says_why_it_is_not_refreshing(served_script: Pat
                            "database · retrying")
 
 
+def test_a_healthy_fleet_renders_no_attention_strip_and_no_badges(served_script: Path) -> None:
+    """With nothing wrong (no quarantine, no failure, no cordon, empty queue, no ledger replication configured)
+    the strip renders nothing at all, is hidden (no empty landmark for a screen reader), and both tab badges are
+    empty. `hidden` is set only by renderAttention, so this also proves the strip was rendered, not just never
+    touched. Guards a strip that is always on, which an operator learns to ignore (review UI-02's done-when: a
+    healthy fleet renders no strip)."""
+    got = _run(served_script, "attention_healthy")
+    assert got["hidden"] is True
+    assert got["html"] == "" and got["images"] == "" and got["tenancy"] == ""
+
+
+def test_a_failed_build_shows_on_the_capacity_tab_until_dismissed(served_script: Path) -> None:
+    """One FAILED build, with the default Capacity tab open, puts '1 failed template build' on the strip as a jump
+    to the Images tab's downloads section and a badge of 1 on the Images tab, with no click needed (review
+    UI-02's done-when). Dismissing it clears both and records the dismissal in this browser. A newer failure
+    brings it back, counting only the new one. Re-rendering the same items leaves the line untouched (a rewrite
+    every poll would drop keyboard focus), and the server's microsecond isoformat stamp parses to the right
+    millisecond. Guards the failure being invisible from the default tab, and, because builds have no retention
+    prune, a strip that could never clear."""
+    got = _run(served_script, "attention_failed_build")
+    shown = got["shown"]
+    assert shown["tab"] == "capacity" and shown["hidden"] is False
+    assert shown["rewrittenOnSameItems"] is False
+    assert shown["stamp"] == 1794304800123   # 2026-11-10T10:00:00.123Z
+    assert "1 failed template build" in shown["html"]
+    assert "goTo('images','downloads-sec')" in shown["html"] and "ackFailures('build')" in shown["html"]
+    assert shown["images"] == "1"
+    assert got["dismissed"]["html"] == "" and got["dismissed"]["images"] == ""
+    assert '"build"' in got["dismissed"]["stored"]
+    assert "1 failed template build" in got["newer"]["html"] and got["newer"]["images"] == "1"
+
+
+def test_the_attention_strip_lists_every_signal_worst_first(served_script: Path) -> None:
+    """Every signal the review lists reaches the strip, in severity order. The bad ones come first: quarantined
+    pairs, a ledger with replication configured but no standby streaming, an invalidated slot, a failed
+    replication. Then warn: held leases, a migration in flight, a cordoned node, a pending fleet reload. Info
+    comes last: queued requests. The Images badge counts failures and the Tenancy badge the queue. Guards a
+    signal dropping out (each sits on a different tab, some below the fold) and an alarm sorting below a
+    routine state."""
+    got = _run(served_script, "attention_everything")
+    html = got["html"]
+    expected = ["1 quarantined node-storage pair", "no ledger standby is streaming", "1 invalidated ledger slot",
+                "1 failed replication", "2 held leases", "1 migration in flight", "1 cordoned node",
+                "a fleet reload is pending", "2 requests queued"]
+    positions = [html.find(text) for text in expected]
+    assert all(p >= 0 for p in positions), dict(zip(expected, positions, strict=True))
+    assert positions == sorted(positions)
+    assert html.count('class="att bad"') == 4 and html.count('class="att warn"') == 4
+    assert html.count('class="att info"') == 1
+    assert got["images"] == "1" and got["tenancy"] == "2"
+
+
+def test_the_ledger_raises_an_alarm_only_when_replication_is_configured_and_down(served_script: Path) -> None:
+    """The strip alarms on the ledger only for a primary with replication configured and no standby streaming.
+    'unknown' (catalogs unreadable), 'none' (a deliberate single-node ledger) and a read that landed on a
+    standby stay silent, exactly as the ledger tiles keep them neutral. Guards the strip crying wolf over a
+    legitimate setup, which is how a real outage once stayed invisible."""
+    got = _run(served_script, "attention_ledger_states")
+    assert got["unknown"] == "" and got["none"] == "" and got["replica"] == "" and got["healthy"] == ""
+    assert "no ledger standby is streaming" in got["down"]
+
+
+def test_an_attention_item_jumps_to_its_tab_and_section(served_script: Path) -> None:
+    """goTo switches to the item's tab (persisted like a click on the tab) and scrolls its section into view,
+    with a scroll margin sized from the sticky tab bar (48 px when its height is unknown, plus 8). Guards a strip
+    item that names a problem but leaves the operator to hunt for it, or lands its heading under the tab bar."""
+    got = _run(served_script, "attention_jump")
+    assert got["tab"] == "images" and got["stored"] == "images"
+    assert got["scrolled"] == {"behavior": "smooth", "block": "start"}
+    assert got["margin"] == "56px"
+
+
+def test_cancelled_and_force_failed_jobs_are_not_attention_items(served_script: Path) -> None:
+    """A replication the operator cancelled (error 'cancelled'), one whose template was already present, and a
+    force-failed replication or build are stored as FAILED but are not faults, so they do not reach the line or
+    the Images badge; a real failure beside them still does. The server's own cooldown logic excludes the same
+    rows. Guards the line turning red over the operator's own deliberate act."""
+    got = _run(served_script, "attention_deliberate_failures")
+    assert "1 failed replication" in got["html"] and "failed template build" not in got["html"]
+    assert got["images"] == "1"
+
+
+def test_a_locked_page_does_not_report_operator_only_build_failures(served_script: Path) -> None:
+    """The build list is operator-only, so a locked page never puts build failures on the strip, even with a
+    FAILED build left in memory from an earlier unlocked view. Guards the strip leaking an operator-only
+    signal after lock."""
+    got = _run(served_script, "attention_locked")
+    assert "failed template build" not in got["html"] and got["images"] == ""
+
+
 def test_why_explains_codes_by_exact_entry_then_by_family(served_script: Path) -> None:
     """why() gives 'code — hint'. An exact REASON_HINT entry comes first, then the code families with underscores
     read as spaces: unknown_X, X_exists, X_in_use, X_has_Y, X_required, missing_X, non_positive_X, X_too_large,

@@ -37,6 +37,7 @@ class El {
   querySelectorAll() { return []; }
   addEventListener() {}
   select() {}
+  scrollIntoView(opts) { this.scrolledWith = opts || true; }
 }
 const els = new Map();
 const document = {
@@ -120,6 +121,12 @@ const toasts = () => $('toast').children.map(c => ({
   kind: c.className, text: c.children[0].textContent, markup: c.children[0].innerHTML,
   closable: c.children.length > 1 }));
 const fail = (status, error) => ({ status, body: { error } });
+const ok = body => ({ status: 200, body });
+const strip = () => ({ html: $('attention').innerHTML, hidden: $('attention').hidden === undefined
+  ? 'never rendered' : $('attention').hidden, images: $('badge-images').textContent,
+  tenancy: $('badge-tenancy').textContent, tab: run('TAB') });
+const FAILED_BUILD = (id, at) => ({ build_id: id, target_template_id: 'debian-' + id, state: 'FAILED', cluster_id: 'c1',
+  vmid: null, url: 'https://images.example/d.qcow2', error: 'checksum mismatch', updated_at: at });
 async function confirmYes() { await run("document.getElementById('cm-ok').onclick()"); await settle(); }
 
 const SCENARIOS = {
@@ -238,6 +245,77 @@ const SCENARIOS = {
     await boot({ token: 't', routes: { '/api/lease/status': fail(503, 'ledger_unreachable') } });
     run('showLeaseStatus(7)'); await settle();
     return { note: $('ps-note').textContent, body: $('ps-body').innerHTML };
+  },
+  async attention_healthy() {
+    await boot({ token: 't' });
+    return strip();
+  },
+  async attention_failed_build() {
+    await boot({ token: 't', routes: {
+      '/api/template/builds': ok({ builds: [FAILED_BUILD(1, '2026-11-10T10:00:00.123456+00:00')] }) } });
+    const shown = strip();
+    // the same items again must not rewrite the line (a rewrite drops keyboard focus): a marker survives
+    $('attention').innerHTML += '<!--focus marker-->';
+    run('renderAttention()');
+    shown.rewrittenOnSameItems = !$('attention').innerHTML.includes('focus marker');
+    shown.stamp = run("stamp('2026-11-10T10:00:00.123456+00:00')");
+    run("ackFailures('build')");
+    const dismissed = { ...strip(), stored: sandbox.localStorage.getItem('br0kr_ack') };
+    routes['/api/template/builds'] = ok({ builds: [FAILED_BUILD(2, '2026-11-10T11:00:00+00:00'),
+      FAILED_BUILD(1, '2026-11-10T10:00:00.123456+00:00')] });
+    await run('loadDownloads()'); await settle();
+    return { shown, dismissed, newer: strip() };
+  },
+  async attention_everything() {
+    await boot({ token: 't', routes: {
+      '/api/overview': ok({ ...OVERVIEW,
+        nodes: [{ ...OVERVIEW.nodes[0], cordoned: true }],
+        queue: { depth: 2, waiting: [], truncated: false, shown: 0 },
+        replications: [{ replication_id: 3, template_id: 't1', target_cluster_id: 'c1', target_storage_id: 's1',
+          mechanism: 'clone_shared', size_gb: 10, job_state: 'FAILED', project_id: null, error: 'boom',
+          updated_at: '2026-11-10T10:00:00+00:00' }],
+        migrations: [{ migration_id: 4, lease_id: 5, state: 'COPYING', source_node: 'n1', target_node: 'n2',
+          reason: null, updated_at: '2026-11-10T10:00:00+00:00' }] }),
+      '/api/fleet': ok({ queue_depth: 2, window_minutes: 60, quarantined_reachability_pairs: 1, held_leases: 2 }),
+      '/api/ledger': ok({ readable: true, configured: true, is_primary: true, standbys_streaming: 0,
+        standbys_total: 0, slots_inactive: 1, slots_lost: 1, slots: [] }),
+      '/api/settings': ok({ knobs: [], schema_version: 48, reload_pending: true }) } });
+    return strip();
+  },
+  async attention_ledger_states() {
+    await boot({});
+    const at = l => { run('LEDGER = ' + JSON.stringify(l) + '; renderAttention()'); return $('attention').innerHTML; };
+    return {
+      unknown: at({ readable: false, reason: 'permission denied' }),
+      none: at({ readable: true, configured: false }),
+      replica: at({ readable: true, is_primary: false, configured: true, standbys_streaming: 0 }),
+      healthy: at({ readable: true, is_primary: true, configured: true, standbys_streaming: 1, slots_lost: 0 }),
+      down: at({ readable: true, is_primary: true, configured: true, standbys_streaming: 0 }),
+    };
+  },
+  async attention_jump() {
+    await boot({ token: 't', routes: {
+      '/api/template/builds': ok({ builds: [FAILED_BUILD(1, '2026-11-10T10:00:00+00:00')] }) } });
+    run("goTo('images', 'downloads-sec')");
+    return { tab: run('TAB'), stored: sandbox.localStorage.getItem('br0kr_tab'),
+      scrolled: $('downloads-sec').scrolledWith || null, margin: $('downloads-sec').style.scrollMarginTop };
+  },
+  async attention_deliberate_failures() {
+    const rep = (id, error) => ({ replication_id: id, template_id: 't1', target_cluster_id: 'c1',
+      target_storage_id: 's1', mechanism: 'clone_shared', size_gb: 10, job_state: 'FAILED', project_id: null,
+      error, updated_at: '2026-11-10T10:00:00+00:00' });
+    await boot({ token: 't', routes: {
+      '/api/overview': ok({ ...OVERVIEW, replications: [rep(1, 'cancelled'), rep(2, 'already_present'),
+        rep(3, 'operator_force_fail:wedged'), rep(4, 'clone task failed: no space')] }),
+      '/api/template/builds': ok({ builds: [{ ...FAILED_BUILD(1, '2026-11-10T10:00:00+00:00'),
+        error: 'operator_force_fail' }] }) } });
+    return strip();
+  },
+  async attention_locked() {
+    await boot({ routes: {
+      '/api/template/builds': ok({ builds: [FAILED_BUILD(1, '2026-11-10T10:00:00+00:00')] }) } });
+    run("BUILDS = [" + JSON.stringify(FAILED_BUILD(1, '2026-11-10T10:00:00+00:00')) + "]; renderAttention()");
+    return strip();
   },
   async reasons() {
     await boot({});

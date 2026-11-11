@@ -97,6 +97,16 @@ PAGE = """<!doctype html>
     font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
   .toast-item.ok{border-left-color:var(--ok)} .toast-item.warn{border-left-color:var(--warn)}
   .toast-item.err{border-left-color:var(--bad)} .toast-item .act{margin-top:0;flex:none}
+  /* the "needs attention" strip: above every tab, empty (and so invisible) when nothing needs a look */
+  #attention:not(:empty){display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 16px}
+  .att{font:inherit;font-size:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);
+    border-radius:999px;padding:3px 10px;cursor:pointer}
+  .att.bad{border-color:var(--bad);color:var(--bad)} .att.warn{border-color:var(--warn);color:var(--warn)}
+  .att-x{font:inherit;font-size:12px;background:transparent;color:var(--mut);border:0;cursor:pointer;
+    margin-left:-4px;padding:0 4px}
+  nav#tabnav .badge:not(:empty){margin-left:6px;font-size:10px;border-radius:999px;padding:0 6px;
+    background:var(--bad);color:#fff}
+  nav#tabnav #badge-tenancy:not(:empty){background:var(--accent);color:#0b0f14}
 </style>
 <link rel="stylesheet" href="/assets/v0.2.1/netcanon-ui.css">
 <link rel="stylesheet" href="/assets/v0.2.1/br0kr.css">
@@ -109,11 +119,14 @@ PAGE = """<!doctype html>
 </header>
 <nav id="tabnav">
   <button data-tab="capacity" onclick="setTab('capacity')">Capacity</button>
-  <button data-tab="tenancy" onclick="setTab('tenancy')">Tenancy</button>
-  <button data-tab="images" onclick="setTab('images')">Images</button>
+  <button data-tab="tenancy" onclick="setTab('tenancy')">Tenancy<span class="badge" id="badge-tenancy"
+    title="requests waiting in the admission queue"></span></button>
+  <button data-tab="images" onclick="setTab('images')">Images<span class="badge" id="badge-images"
+    title="failed template builds and replications"></span></button>
   <button data-tab="security" onclick="setTab('security')">Security &amp; Ops</button>
 </nav>
 <main>
+  <div id="attention" role="region" aria-label="needs attention" hidden></div>
   <div id="form-slot"></div>
   <div class="tabpanel" data-tab="capacity">
   <section id="fleet-sec"><h2>Fleet — admission SLOs</h2><div id="fleet-err"></div><div class="cards" id="fleet"></div>
@@ -707,7 +720,7 @@ async function loadSettings(){
   const el = $('settings');
   if(el.innerHTML.trim() !== '' && !el.querySelector('.load-err')) return;
   const r = await fetchJSON('/api/settings');
-  if(r.ok && Array.isArray(r.data.knobs)) renderSettings(r.data);
+  if(r.ok && Array.isArray(r.data.knobs)){ renderSettings(r.data); renderAttention(); }   // reload_pending
   else el.innerHTML = loadErr('settings', r.ok ? {status:r.status, data:{error:'bad_response'}} : r);
 }
 function renderSettings(s){
@@ -1197,6 +1210,7 @@ async function loadDownloads(){
   if(rs.ok){ SOURCES = rs.data.sources || []; DL_ERR.sources = null; } else DL_ERR.sources = rs;
   if(rb.ok){ BUILDS = rb.data.builds || []; DL_ERR.builds = null; } else DL_ERR.builds = rb;
   if(!paused) renderDownloads();
+  renderAttention();   // a failed build shows on the strip whichever tab is open
 }
 const bstate = s => ({REQUESTED:'var(--mut)', DOWNLOADING:'var(--accent)', IMPORTING:'var(--accent)',
   RECLAIMING:'var(--warn)', READY:'var(--ok)', FAILED:'var(--bad)'}[s] || 'var(--mut)');
@@ -1578,7 +1592,7 @@ function stripResult(id, what, r, render){
 }
 async function loadFleet(){
   const r = await fetchJSON('/api/fleet');   // best-effort, independent of the /api/overview poll
-  if(!paused) stripResult('fleet', 'fleet stats', r, renderFleet);
+  if(!paused) stripResult('fleet', 'fleet stats', r, f => { FLEET = f; renderFleet(f); renderAttention(); });
 }
 // ── Ledger DR-posture tile strip (Capacity tab): surfaces GET /api/ledger — br0kr/ledgerhealth.py's read of the
 //    ledger's OWN Postgres replication state (slots + connected standbys). NOTE this is not the same subject as
@@ -1643,7 +1657,96 @@ function renderLedger(d){
 }
 async function loadLedger(){
   const r = await fetchJSON('/api/ledger');  // best-effort, exactly like loadFleet
-  if(!paused) stripResult('ledger', 'the ledger DR posture', r, renderLedger);
+  if(!paused) stripResult('ledger', 'the ledger DR posture', r,
+                          l => { LEDGER = l; renderLedger(l); renderAttention(); });
+}
+// ── the "needs attention" strip (above every tab) + tab badges. The signals an operator must act on are spread
+//    over three tabs, some below the fold; this one line summarises them from data already in hand (the overview,
+//    the last good fleet and ledger reads, and for an unlocked operator the build list and settings) and renders
+//    NOTHING when all is well. Each item jumps to its section. A failed build or replication stays listed until
+//    dismissed in this browser (builds have no retention prune, so counting every FAILED row would keep the strip
+//    red forever after the first failure, and a signal that never clears is ignored); a newer failure returns. ──
+let FLEET = null, LEDGER = null;   // the last good /api/fleet and /api/ledger reads
+const ACK = (() => {   // per-browser dismissals {build|replication: newest dismissed updated_at, epoch ms}
+  try{ return JSON.parse(localStorage.getItem('br0kr_ack') || '{}') || {}; }catch(e){ return {}; }
+})();
+const FAILED_KEY = {build:'state', replication:'job_state'};
+// FAILED rows that are not faults: an operator cancel or force-fail (deliberate acts) and a replication whose
+// template turned out to be present already. The server's own cooldown and rotation logic excludes the same rows.
+const deliberate = x => x.error === 'cancelled' || x.error === 'already_present'
+  || String(x.error || '').startsWith('operator_force_fail');
+const failedRows = kind => (kind === 'build' ? BUILDS : ((DATA && DATA.replications) || []))
+  .filter(x => x[FAILED_KEY[kind]] === 'FAILED' && !deliberate(x));
+// The server stamps isoformat() with microseconds; trim to milliseconds, which every browser's Date.parse reads.
+const stamp = s => Date.parse(String(s || '').replace(/([.][0-9]{3})[0-9]+/, '$1'));
+// Failures newer than this browser's dismissal. The dismissal is the newest dismissed failure's own server
+// updated_at, so a skewed browser clock does not matter; a failure stamped in the same instant as the newest one
+// dismissed, but not yet listed when dismissed, stays hidden (it needs two writes in one now()).
+function newFailures(kind){
+  return failedRows(kind).filter(x => {
+    const t = stamp(x.updated_at);
+    return isNaN(t) ? !(kind in ACK) : !(t <= ACK[kind]);   // unparseable: shown until the first dismissal
+  });
+}
+function ackFailures(kind){
+  const ts = failedRows(kind).map(x => stamp(x.updated_at)).filter(t => !isNaN(t));
+  ACK[kind] = ts.length ? Math.max(...ts) : Date.now();
+  try{ localStorage.setItem('br0kr_ack', JSON.stringify(ACK)); }catch(e){}
+  renderAttention();
+}
+const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+// The items, worst first: bad (something is broken), warn (a deliberate or transient state worth a look), info.
+function attention(){
+  const d = DATA || {}, f = FLEET || {}, L = LEDGER, items = [];
+  const add = (sev, text, tab, sec, ack) => items.push({sev, text, tab, sec, ack});
+  const q = f.quarantined_reachability_pairs || 0;
+  if(q) add('bad', plural(q, 'quarantined node-storage pair', 'quarantined node-storage pairs'), 'capacity',
+    'fleet-sec');
+  if(L && L.readable && L.configured && L.is_primary !== false){   // 'unknown' and 'none' are never alarms
+    if(!(L.standbys_streaming > 0)) add('bad', 'no ledger standby is streaming', 'capacity', 'fleet-sec');
+    if(L.slots_lost > 0)
+      add('bad', plural(L.slots_lost, 'invalidated ledger slot', 'invalidated ledger slots'), 'capacity', 'fleet-sec');
+  }
+  const fb = canEdit ? newFailures('build') : [];   // the build list is operator-only
+  if(fb.length) add('bad', plural(fb.length, 'failed template build', 'failed template builds'), 'images',
+    'downloads-sec', 'build');
+  const fr = newFailures('replication');
+  if(fr.length) add('bad', plural(fr.length, 'failed replication', 'failed replications'), 'images',
+    'replications-sec', 'replication');
+  const held = f.held_leases || 0;
+  if(held) add('warn', plural(held, 'held lease', 'held leases'), 'capacity', 'fleet-sec');
+  const migs = (d.migrations || []).filter(m => m.state !== 'DONE' && m.state !== 'ABORTED').length;
+  if(migs) add('warn', plural(migs, 'migration in flight', 'migrations in flight'), 'images', 'migrations-sec');
+  const cord = (d.nodes || []).filter(n => n.cordoned).length;
+  if(cord) add('warn', plural(cord, 'cordoned node', 'cordoned nodes'), 'capacity', 'nodes-sec');
+  if(canEdit && SETTINGS && SETTINGS.reload_pending)
+    add('warn', 'a fleet reload is pending', 'security', 'settings-sec');
+  const qd = (d.queue && d.queue.depth) || 0;
+  if(qd) add('info', plural(qd, 'request queued', 'requests queued'), 'tenancy', 'queue-sec');
+  return {items, failed: fb.length + fr.length, queued: qd};
+}
+let ATT_HTML = null;   // the line as last written: it is re-rendered several times a poll, so write only on change
+function renderAttention(){
+  const el = $('attention'); if(!el) return;
+  const a = attention();
+  // tab, sec and ack are constants from attention(), never server data; the text is escaped
+  const html = a.items.length ? '<span class="pill">needs attention:</span>' + a.items.map(it =>
+    `<button class="att ${it.sev}" onclick="goTo('${it.tab}','${it.sec}')">${esc(it.text)}</button>`
+    + (it.ack ? `<button class="att-x" title="dismiss until a newer failure" aria-label="dismiss ${esc(it.text)}" `
+      + `onclick="ackFailures('${it.ack}')">&times;</button>` : '')).join('') : '';
+  if(html !== ATT_HTML){ el.innerHTML = html; ATT_HTML = html; }   // a rewrite would drop keyboard focus
+  el.hidden = !a.items.length;   // no empty "needs attention" landmark for a screen reader on a healthy fleet
+  const badge = (id, n) => { const b = $(id), t = n ? String(n) : ''; if(b && b.textContent !== t) b.textContent = t; };
+  badge('badge-images', a.failed);
+  badge('badge-tenancy', a.queued);
+}
+function goTo(tab, sec){
+  setTab(tab);
+  const s = $(sec); if(!s) return;
+  // land below the sticky tab bar, which wraps to two lines on a narrow window
+  const nav = $('tabnav');
+  s.style.scrollMarginTop = (((nav && nav.offsetHeight) || 48) + 8) + 'px';
+  if(s.scrollIntoView) s.scrollIntoView({behavior:'smooth', block:'start'});
 }
 function render(d){
   DATA = d;
@@ -1749,6 +1852,7 @@ function render(d){
   loadDownloads();// operator-only: the download source allowlist + build-job status (phase A4.1)
   loadSettings(); // operator-only: the runtime settings editor (migration 0021)
   syncAudit();    // operator-only: the append-only audit trail (migration 0023); loads once, then on-demand
+  renderAttention();   // the strip + tab badges; the async loaders above re-render it when they land
 }
 // ── act-as-project provisioning + lease lifecycle: create a VM as a CHOSEN project (debiting ITS quota via
 //    the same admission path an agent's request_lease/schedule_lease uses, br0kr/actas.py), watch it boot,
