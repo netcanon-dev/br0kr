@@ -32,7 +32,8 @@ on your first leased VM. To point a real agent at the gateway (`http://<host>:80
 [connecting-an-agent.md](docs/runbooks/connecting-an-agent.md).
 
 `bash scripts/deploy.sh` is also how you redeploy; never pass `-f` or `--profile` to it or to `docker compose`
-([why](docs/runbooks/docker-deploy.md#3-bring-it-up)). The ledger HA pair, TLS, the OAuth shim, a public
+([why](docs/runbooks/docker-deploy.md#3-bring-it-up)). To run a signed release instead of building:
+[docker-deploy §3](docs/runbooks/docker-deploy.md#running-a-published-release-instead-of-building). The ledger HA pair, TLS, the OAuth shim, a public
 tunnel, scaling and production hardening: [docs/runbooks/docker-deploy.md](docs/runbooks/docker-deploy.md).
 
 Without Docker, `pip install .` (Python 3.11+) puts the four services on `PATH`, each reading the ledger DSN

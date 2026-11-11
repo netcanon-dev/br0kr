@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **A version tag publishes the release.** Nothing could `docker pull` br0kr; `release.yml` gates the image on
+  Trivy, pushes it signed with SBOM + provenance, attaches the wheel; `deploy.sh --pull` runs it (TEST-03).
 - **Pinned leases (migration 0049).** A long-lived VM needed a heartbeat sidecar or a huge TTL; a pinned one is
   skipped by the TTL reaper, bounded by `project.max_pinned` (0 = off). `harness_lease.py`; review FEAT-01.
 - **An API reference, generated: `docs/api.md`.** Runbooks listed the tools piecemeal; it lists every MCP tool

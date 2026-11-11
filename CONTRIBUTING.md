@@ -30,16 +30,25 @@ capacity or a real guest, so the contribution shape is opinionated.
 
 ## Releases
 
-Releases are cut by hand; no workflow runs on a tag, so a tag publishes nothing
-by itself.
+A version tag publishes the release: `.github/workflows/release.yml` builds the
+image, gates it on Trivy, pushes it to GHCR signed and attested, and attaches the
+wheel and sdist to the GitHub release. It refuses a tag that is not on `main`, is
+not `__version__`, or names a commit whose checks did not pass on `main`, so tag
+only what step 1 merged.
 
 1. In one PR, set `br0kr/__init__.py` `__version__` to the new version and
    promote `[Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] — YYYY-MM-DD`, with a
    short summary block on top and a new empty `[Unreleased]` above it.
    `tests/unit/test_repo_hygiene.py` fails while the newest section and
    `__version__` disagree.
-2. After it merges, tag that commit `vX.Y.Z` on `main` and create the GitHub
-   release from the summary block.
+2. After it merges, tag that commit `vX.Y.Z` on `main` and push the tag. The
+   release workflow publishes `ghcr.io/<owner>/br0kr:X.Y.Z` and creates the
+   GitHub release if it does not exist; put the summary block in its notes.
+3. To finish a release that failed part-way, run the release workflow by hand
+   with the tag as the ref. A version is never re-pushed: an image already
+   published from that commit is signed and attested again, never rebuilt.
+   The first push of the package creates it private; make it public once, in
+   the package settings, when that is the decision.
 
 ## Dependencies
 

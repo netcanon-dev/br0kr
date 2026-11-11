@@ -137,7 +137,41 @@ it is.
 Trivy scans the locally built image and fails the PR on a fixable CRITICAL
 (`ignore-unfixed`: a CVE with no upstream patch is nothing to act on). The scan
 runs before anything could publish the image, so a vulnerable image never
-reaches a tag.
+reaches a tag. docker.yml never publishes: it has no registry login and no
+`packages: write`. Publishing is release.yml's, below.
+
+## release.yml — a version tag publishes the release
+
+On a `vX.Y.Z` tag push (or a manual re-run with the tag as the ref), three jobs:
+
+1. **gate** refuses, before anything is built, a ref that is not such a tag, a
+   tag that is not on main, a tag that is not `br0kr.__version__`, and a commit
+   whose ci, docker, security or pii-guard run on main did not pass.
+2. **image** first looks the version up in the registry: a version is never
+   re-pushed (published from this commit, the run re-signs that digest; from
+   another commit, it refuses). Otherwise it builds the image ONCE, gates that
+   very image on Trivy (fixable
+   `CRITICAL` fails the release), then pushes `ghcr.io/<owner>/br0kr:X.Y.Z` and
+   `:sha-<commit>`, signs the digest with cosign keylessly, attests its SBOM
+   (SPDX) and its build provenance, and verifies the signature against the exact
+   signer identity. Nothing failable sits between the push and the signature. No
+   `latest` before 1.0: a deployment pins a version or a digest.
+3. **dist** builds the wheel and sdist and attaches them to the GitHub release,
+   creating it from the tag if it does not exist yet.
+
+If the gate refuses because a main check was cancelled (a newer push superseded
+it), re-run that workflow for the commit, then re-run the release by hand with
+the tag as the ref. The gate lives in the tagged commit's own workflow, so a
+`v*` tag ruleset (only the maintainer tags, tags are immutable) is what stops a
+tag that edited the workflow from publishing.
+
+Each write scope lives on its one job (`packages`/`id-token`/`attestations` on
+image, `contents: write` on dist); the workflow default is read-only.
+`tests/unit/test_release_workflow.py` pins the trigger, the scopes and the
+build → gate → push → sign order. A package's first push creates it private;
+whether it is public is a one-time decision in the package settings. The deploy
+host runs a release with `BR0KR_IMAGE` + `bash scripts/deploy.sh --pull`
+([docker-deploy.md](../runbooks/docker-deploy.md#running-a-published-release-instead-of-building)).
 
 ## Dependabot
 

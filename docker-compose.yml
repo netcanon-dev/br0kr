@@ -21,8 +21,11 @@
 # `build:`, an `up -d --build` would bake the same image once per service, in parallel, which killed
 # buildkit on a 6 GB host and left the stack down. `pull_policy: never`: br0kr:local exists only
 # locally, so a service that does not build it must never try to pull it from a registry.
+# BR0KR_IMAGE (in .env) swaps in a PUBLISHED image instead, e.g. ghcr.io/netcanon-dev/br0kr:0.2.0 (pin a
+# version or a digest): `bash scripts/deploy.sh --pull` pulls it explicitly, so compose still never pulls on
+# its own, and a build-mode deploy refuses while it is set.
 x-broker: &broker
-  image: br0kr:local
+  image: ${BR0KR_IMAGE:-br0kr:local}
   pull_policy: never
   restart: unless-stopped
   # Runtime hardening (review SEC-02). The broker processes need no Linux capability, never write to their

@@ -158,7 +158,7 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 
 | Script | What it does | Runbook |
 |--------|--------------|---------|
-| `deploy.sh` | Deploys or redeploys the stack named by `COMPOSE_FILE` / `COMPOSE_PROFILES` in `.env`: one image build, `up -d` without `--build`, refuses orphans. `--check` and `--no-build` too. | [docker-deploy §3](../docs/runbooks/docker-deploy.md#3-bring-it-up) |
+| `deploy.sh` | Deploys or redeploys the stack named by `COMPOSE_FILE` / `COMPOSE_PROFILES` in `.env`: one image build, `up -d` without `--build`, refuses orphans. `--check`, `--no-build`, and `--pull` (run the published release `BR0KR_IMAGE` pins) too. | [docker-deploy §3](../docs/runbooks/docker-deploy.md#3-bring-it-up) |
 | `tls-up.sh` | Starts the stack with the built-in Caddy TLS front door; refuses a Compose version that would leave the plain ports published. | [docker-deploy §10](../docs/runbooks/docker-deploy.md#10-tls-termination-optional-built-in-caddy) |
 | `backup_ledger.sh` | A `pg_dump` of the ledger, mode `0600`, with retention. | [ledger-ha](../docs/runbooks/ledger-ha.md#backups-durability) |
 | `restore_ledger.sh` | Restores a dump in one transaction; refuses over live leases without `--force`. | [ledger-ha](../docs/runbooks/ledger-ha.md#restore-drill-practice-this-before-you-need-it) |

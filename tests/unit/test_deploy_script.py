@@ -39,6 +39,7 @@ case "$*" in
   "compose config --format json") echo '{"name": "br0kr"}' ;;
   "compose config --services") printf '%s\n' $FAKE_SERVICES ;;
   "ps -a --filter ancestor=br0kr:local"*) printf '%s\n' $FAKE_PROJECTS ;;
+  "ps -a --filter ancestor="*) printf '%s\n' $FAKE_PUB_PROJECTS ;;
   "ps -a --filter label=com.docker.compose.project.working_dir="*) printf '%s\n' $FAKE_DIR_PROJECTS ;;
   "ps -a --filter label=com.docker.compose.project=br0kr --filter label=com.docker.compose.oneoff=False"*)
     printf '%s\n' $FAKE_PRESENT ;;
@@ -63,7 +64,8 @@ def _settled(services: str = _STACK, **override: tuple[str, str, int]) -> str:
 def _run(tmp_path: Path, args: list[str] | None = None, *, env_file: str | None,
          services: str = _STACK, present: str = _STACK, projects: str = "br0kr",
          dir_projects: str = "br0kr", ps_json: str | None = None, wait: str = "0",
-         compose_version: str = "5.6.0") -> tuple[subprocess.CompletedProcess[str], list[str]]:
+         compose_version: str = "5.6.0", pub_projects: str = "br0kr",
+         ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run a copy of deploy.sh (with tls-up.sh beside it) in a scratch repo root against the fake docker."""
     (tmp_path / "scripts").mkdir(exist_ok=True)
     for name in ("deploy.sh", "tls-up.sh"):
@@ -80,6 +82,7 @@ def _run(tmp_path: Path, args: list[str] | None = None, *, env_file: str | None,
     env = {k: v for k, v in os.environ.items() if not k.startswith("COMPOSE_")}
     env.update(PATH=f"{bindir}{os.pathsep}{env['PATH']}", FAKE_LOG=str(log), FAKE_SERVICES=services,
                FAKE_PRESENT=present, FAKE_PROJECTS=projects, FAKE_DIR_PROJECTS=dir_projects,
+               FAKE_PUB_PROJECTS=pub_projects,
                FAKE_PS_JSON=ps_json if ps_json is not None else _settled(services),
                FAKE_COMPOSE_VERSION=compose_version, DEPLOY_WAIT_SECONDS=wait)
     proc = subprocess.run(["bash", str(tmp_path / "scripts" / "deploy.sh"), *(args or [])],
@@ -92,7 +95,7 @@ _TLS_ENV = ("COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml\n"
 
 
 def _mutating(calls: list[str]) -> list[str]:
-    return [c for c in calls if c.startswith(("compose build", "compose up"))]
+    return [c for c in calls if c.startswith(("compose build", "compose up", "pull "))]
 
 
 def test_refuses_without_compose_file_and_touches_nothing(tmp_path):
@@ -270,16 +273,20 @@ def _blocks(text: str) -> list[list[str]]:
 
 
 def test_image_only_br0kr_services_never_pull():
-    """Every compose block that names br0kr:local without building it says `pull_policy: never`.
+    """Every compose block that names the br0kr image without building it says `pull_policy: never`, and
+    names it as `${BR0KR_IMAGE:-br0kr:local}` (TEST-03).
 
     br0kr:local exists only on the deploy host. Without the policy, a fresh host's `up -d` tries to pull it
-    from a registry for each service that does not build it. Services that merge the x-broker anchor
-    inherit both the image and the policy from it, so the anchor is one of the blocks checked."""
+    from a registry for each service that does not build it; a published image (BR0KR_IMAGE) is pulled by
+    `deploy.sh --pull`, never by compose on its own. Services that merge the x-broker anchor inherit both the
+    image and the policy from it, so the anchor is one of the blocks checked. Guards a block hard-coding
+    br0kr:local (it would ignore BR0KR_IMAGE and run a stale local build beside the published one)."""
     checked = []
     for name, text in _compose_texts().items():
+        assert "image: br0kr:local" not in text, f"{name} hard-codes br0kr:local"
         for block in _blocks(text):
             body = [ln.split("#", 1)[0].strip() for ln in block]
-            if "image: br0kr:local" in body and not any(b.startswith("build:") for b in body):
+            if "image: ${BR0KR_IMAGE:-br0kr:local}" in body and not any(b.startswith("build:") for b in body):
                 checked.append(f"{name}:{block[0].strip()}")
                 assert "pull_policy: never" in body, f"{name}: {block[0].strip()}"
     assert "docker-compose.yml:x-broker: &broker" in checked
@@ -291,3 +298,81 @@ def test_env_example_declares_the_stack_definition():
     text = (_ROOT / ".env.example").read_text(encoding="utf-8")
     assert "\nCOMPOSE_FILE=docker-compose.yml\n" in text
     assert "COMPOSE_PROFILES=" in text
+
+
+_PUBLISHED = "ghcr.io/example/br0kr:0.2.0"
+
+
+def test_pull_mode_pulls_the_pinned_image_then_brings_up_without_building(tmp_path):
+    """--pull with BR0KR_IMAGE set to a pinned published image pulls exactly that image, then runs
+    `up -d --no-build`, and never builds (TEST-03: the host runs the digest the release gate scanned). Guards
+    --pull rebuilding locally, bringing the stack up before the new image is present, and compose building the
+    daemon's `build: .` under the registry's name."""
+    proc, calls = _run(tmp_path, ["--pull"], env_file="COMPOSE_FILE=docker-compose.yml\n"
+                                                    f"BR0KR_IMAGE={_PUBLISHED}\n")
+    assert proc.returncode == 0, proc.stderr
+    assert _mutating(calls) == [f"pull {_PUBLISHED}", "compose up -d --no-build"]
+    assert f"image {_PUBLISHED}" in proc.stdout
+
+
+@pytest.mark.parametrize(("image", "says"), [
+    (None, "needs BR0KR_IMAGE"),
+    ("ghcr.io/example/br0kr:latest", "not latest"),
+    ("ghcr.io/example/br0kr", "names no tag"),
+])
+def test_pull_mode_refuses_a_missing_or_unpinned_image(tmp_path, image, says):
+    """--pull refuses, before touching anything, when BR0KR_IMAGE is unset, is `latest`, or names no tag: a
+    deployment pins a version or a digest. Guards a pull that silently moves the host to whatever a tag points
+    at today."""
+    env = "COMPOSE_FILE=docker-compose.yml\n" + (f"BR0KR_IMAGE={image}\n" if image else "")
+    proc, calls = _run(tmp_path, ["--pull"], env_file=env)
+    assert proc.returncode != 0 and says in proc.stderr
+    assert _mutating(calls) == []
+
+
+def test_pull_mode_accepts_a_digest(tmp_path):
+    """A digest-pinned BR0KR_IMAGE (name@sha256:...) is the strongest pin and is accepted by --pull."""
+    digest = "ghcr.io/example/br0kr@sha256:" + "0" * 64
+    proc, calls = _run(tmp_path, ["--pull"], env_file=f"COMPOSE_FILE=docker-compose.yml\nBR0KR_IMAGE={digest}\n")
+    assert proc.returncode == 0, proc.stderr
+    assert _mutating(calls) == [f"pull {digest}", "compose up -d --no-build"]
+
+
+def test_a_build_deploy_refuses_while_a_published_image_is_configured(tmp_path):
+    """A plain (build) deploy refuses while BR0KR_IMAGE names a published image, and builds nothing: the build
+    would tag a local image with the registry's name and shadow the signed one. Guards a habitual
+    `bash scripts/deploy.sh` quietly replacing a released image with a local build."""
+    proc, calls = _run(tmp_path, env_file=f"COMPOSE_FILE=docker-compose.yml\nBR0KR_IMAGE={_PUBLISHED}\n")
+    assert proc.returncode != 0 and "deploy it with --pull" in proc.stderr
+    assert _mutating(calls) == []
+
+
+def test_no_build_mode_with_a_published_image_never_lets_compose_build(tmp_path):
+    """--no-build (the recovery path) with BR0KR_IMAGE set brings the stack up with `up -d --no-build`: if the
+    published image is missing, compose fails instead of building the working tree under the registry's name
+    (the daemon service carries `build: .`). Guards a local build shadowing the signed image."""
+    env = "COMPOSE_FILE=docker-compose.yml\n" + f"BR0KR_IMAGE={_PUBLISHED}\n"
+    proc, calls = _run(tmp_path, ["--no-build"], env_file=env)
+    assert proc.returncode == 0, proc.stderr
+    assert _mutating(calls) == ["compose up -d --no-build"]
+
+
+def test_check_mode_validates_a_published_image_pin(tmp_path):
+    """--check refuses an unpinned BR0KR_IMAGE (`latest`) like --pull would, so the preflight never reports OK
+    for a configuration the deploy would refuse."""
+    env = "COMPOSE_FILE=docker-compose.yml\n" + "BR0KR_IMAGE=ghcr.io/example/br0kr:latest\n"
+    proc, calls = _run(tmp_path, ["--check"], env_file=env)
+    assert proc.returncode != 0 and "not latest" in proc.stderr
+    assert _mutating(calls) == []
+
+
+@pytest.mark.parametrize("which", ["local", "published"])
+def test_with_a_published_image_another_stack_on_either_image_is_refused(tmp_path, which):
+    """With BR0KR_IMAGE set, the other-stack check looks for containers of BOTH br0kr:local and the published
+    image (a host part-way through a switch runs one or the other), and refuses on either before anything
+    changes. Guards one of the two queries being dropped, which would let `up -d` start a second stack."""
+    env = "COMPOSE_FILE=docker-compose.yml\n" + f"BR0KR_IMAGE={_PUBLISHED}\n"
+    stray = {"projects": "br0kr\nold-stack"} if which == "local" else {"pub_projects": "br0kr\nold-stack"}
+    proc, calls = _run(tmp_path, ["--pull"], env_file=env, **stray)
+    assert proc.returncode != 0 and "old-stack" in proc.stderr
+    assert _mutating(calls) == []

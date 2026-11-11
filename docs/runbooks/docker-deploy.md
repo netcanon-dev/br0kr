@@ -153,6 +153,33 @@ Smoke-test the whole stack end-to-end (no Proxmox needed) with
 throwaway project + `.env`, asserts migrations applied, the standby is streaming, the daemon is
 leader, and the gateway serves, then tears it all down.
 
+### Running a published release instead of building
+
+Each version tag publishes the image to GHCR (`.github/workflows/release.yml`). Trivy gates the very image
+before it is pushed, cosign signs it keylessly, and its SBOM and build provenance are attested. To run a
+release instead of building on this host, pin it in `.env` (a version, or `name@sha256:<digest>`; there is
+no `latest`), check its signature, and deploy with `--pull`:
+
+```bash
+# .env
+BR0KR_IMAGE=ghcr.io/netcanon-dev/br0kr:0.2.0
+```
+
+```bash
+cosign verify ghcr.io/netcanon-dev/br0kr:0.2.0 \
+  --certificate-identity https://github.com/netcanon-dev/br0kr/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+bash scripts/deploy.sh --pull     # pulls exactly BR0KR_IMAGE, then up -d; never builds
+```
+
+While the package is private, the host needs `docker login ghcr.io` first, with a token that has
+`read:packages`; a public package needs no login. The migrate one-shot runs from the same image, so the
+ledger schema moves with the release. While `BR0KR_IMAGE` is set, a plain `bash scripts/deploy.sh` refuses
+and every `up -d` it runs gets `--no-build`, so a build can't shadow the signed image with a local one
+(the daemon service carries `build: .`, so a hand-typed `docker compose up -d` with the image missing
+WOULD build it: go through the script). Unset it to go back to building here. `--pull` and `--check`
+refuse `latest` and a name with no tag.
+
 ## 4. High availability — how it works here
 
 - **Two Postgres containers**: `pg-primary` (read-write) and `pg-standby` (hot standby streaming WAL).
@@ -437,7 +464,8 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   move forward, so **the schema never rolls back**, and the gate never refuses an older image. **Rolling back
   one release is supported**: the previous image runs on the newer schema. Going further back is not
   guaranteed, because some migrations drop columns or add CHECK constraints an older build does not know
-  about. To roll back, retag the previous image as `br0kr:local` and run `bash scripts/deploy.sh --no-build`.
+  about. To roll back, retag the previous image as `br0kr:local` and run `bash scripts/deploy.sh --no-build`;
+  on a published release, set `BR0KR_IMAGE` back to the previous version and run `bash scripts/deploy.sh --pull`.
 - **Changing a ledger container's settings.** A change to `pg-primary`'s `command:` makes the next
   `bash scripts/deploy.sh` recreate it: a few seconds of ledger downtime the broker services ride through
   (they reconnect with retry), and a leader re-election. The standby entrypoints are bind-mounted scripts, not

@@ -56,13 +56,15 @@ def _services(text: str) -> dict[str, str]:
 
 
 def test_every_image_is_pinned_by_digest():
-    """Every `image:` in a compose file is either the locally built br0kr image or carries `@sha256:` + a
-    64-hex digest, and the Dockerfile's base does too. Guards a floating tag (`latest`, a major tag) coming back,
-    which lets an upstream re-push change the ledger, proxy or tunnel binary without any change here."""
+    """Every `image:` in a compose file is either the br0kr image (`${BR0KR_IMAGE:-br0kr:local}`: built here, or
+    a published release that `deploy.sh --pull` only accepts pinned to a version or a digest, TEST-03) or
+    carries `@sha256:` + a 64-hex digest, and the Dockerfile's base does too. Guards a floating tag (`latest`, a
+    major tag) coming back, which lets an upstream re-push change the ledger, proxy or tunnel binary without any
+    change here."""
     for path in _COMPOSE:
         for line in path.read_text(encoding="utf-8").splitlines():
             image = re.match(r"^\s+image:\s*(\S+)", line)
-            if image and image.group(1) != "br0kr:local":
+            if image and image.group(1) != "${BR0KR_IMAGE:-br0kr:local}":
                 assert _DIGEST.search(image.group(1)), f"{path.name}: {image.group(1)} is not pinned by digest"
     for line in _text("Dockerfile").splitlines():
         if line.startswith("FROM "):
@@ -94,16 +96,20 @@ def test_every_broker_service_is_hardened():
     """Every service in docker-compose.yml merges either `x-broker` (the broker processes) or `x-pg-hardening`
     (the ledger), and every service in another compose file that runs the br0kr image carries the hardening
     keys itself. Guards a new service being added without the hardening: a list of named services would not
-    notice a new one."""
+    notice a new one. At least one such outside service (the TLS file's OAuth shim) must be found, so a renamed
+    image line can't turn the check into a silent no-op."""
     for name, block in _services(_text("docker-compose.yml")).items():
         assert _has(block, "<<: *broker") or _has(block, "<<: *pg-hardening"), f"{name} merges neither block"
+    checked = []
     for path in _COMPOSE:
         if path.name == "docker-compose.yml":
             continue
         for name, block in _services(path.read_text(encoding="utf-8")).items():
-            if _has(block, "image: br0kr:local"):
+            if _has(block, "image: ${BR0KR_IMAGE:-br0kr:local}"):
+                checked.append(f"{path.name}:{name}")
                 missing = [key for key in _BROKER_HARDENING if not _has(block, key)]
                 assert not missing, f"{path.name} {name} lacks {missing}"
+    assert "docker-compose.tls.yml:oauth" in checked
 
 
 def test_third_party_containers_keep_only_what_they_need():

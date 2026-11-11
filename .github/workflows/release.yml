@@ -1,0 +1,285 @@
+# release — publish a version tag: the image to GHCR (Trivy-gated, then cosign-signed with its SBOM and build
+# provenance attested) and the wheel + sdist on the GitHub release (review TEST-03).
+#
+# It runs on a `vX.Y.Z` tag push, or by hand with a tag as the ref to finish or repeat a release. Before building
+# anything it refuses a ref that is not such a tag, a tag that is not on main, a tag that is not the code's
+# __version__, and a commit whose CI, image build, security scan or PII guard did not pass on main. The image is
+# built ONCE and Trivy scans that very image BEFORE anything is pushed, so the digest that ships is the one the
+# gate passed; the deploy host then pulls it (scripts/deploy.sh --pull). Tags: `X.Y.Z` and `sha-<commit>`. No
+# `latest` before 1.0: a deployment pins a version or a digest.
+#
+# A version is never re-pushed. If `X.Y.Z` is already in the registry from THIS commit (a run that failed after
+# its push), the run skips the build and the push and signs and attests the published digest again; from any
+# other commit it refuses. A package's first push creates it private: whether ghcr.io/<owner>/br0kr is public is
+# a one-time decision in the package's settings. See docs/standards/ci-cd.md "release.yml".
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:   # finish or repeat a release: run it with the tag selected as the ref
+
+# Read-only by default; each job names the one extra scope it needs.
+permissions:
+  contents: read
+
+# One publish per tag at a time, never cancelled: a half-pushed, unsigned image is worse than a queued re-run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  REGISTRY: ghcr.io
+
+jobs:
+  gate:
+    name: refuse what must not ship
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read        # read the main-branch workflow runs for this commit
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Refuse a ref that is not a vMAJOR.MINOR.PATCH tag
+        # $GITHUB_REF (a default env var), not a template, so there is no injection surface.
+        run: |
+          if [[ ! "${GITHUB_REF}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to publish from '${GITHUB_REF}': a release runs from a vMAJOR.MINOR.PATCH tag."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0            # the ancestry check needs history
+          persist-credentials: false
+
+      - name: Refuse a tag that is not on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "::error::$(git rev-parse HEAD) is not an ancestor of origin/main: refusing to publish."
+            exit 1
+          fi
+
+      - name: Refuse a tag that is not the code's version
+        id: version
+        run: |
+          code="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' br0kr/__init__.py)"
+          tag="${GITHUB_REF#refs/tags/v}"
+          if [ "$code" != "$tag" ]; then
+            echo "::error::The tag is v${tag} but br0kr/__init__.py says __version__ = \"${code}\"."
+            exit 1
+          fi
+          echo "version=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse a commit whose main-branch checks did not pass
+        # Polls each workflow's push-event run for this commit for up to 20 minutes (CI's own jobs time out at
+        # 15). A cancelled run (a newer push to main superseded it) refuses too: re-run that workflow for this
+        # commit from the Actions page, then re-run the release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          for wf in ci.yml docker.yml security.yml pii-guard.yml; do
+            ok=""
+            for attempt in $(seq 1 60); do
+              out="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?head_sha=${sha}&event=push&per_page=1" \
+                --jq '(.workflow_runs[0].status // "none") + " " + (.workflow_runs[0].conclusion // "none")' || true)"
+              status="${out%% *}"; conclusion="${out##* }"
+              if [ "$conclusion" = "success" ]; then ok=1; echo "${wf}: success for ${sha}"; break; fi
+              if [ "$status" = "completed" ]; then
+                echo "::error::${wf} concluded '${conclusion}' for ${sha}: refusing to publish (re-run it on main, then this)."
+                exit 1
+              fi
+              [ "$status" = "none" ] && [ "$attempt" -ge 9 ] && break   # 3 min and still no run: there is none
+              echo "${wf} is '${status:-unknown}' for ${sha} (attempt ${attempt}/60); waiting 20s"
+              sleep 20
+            done
+            if [ -z "$ok" ]; then
+              if [ "$status" = "none" ]; then
+                echo "::error::${wf} has no push-event run for ${sha}: tag a commit that was the tip of a push to main."
+              else
+                echo "::error::timed out waiting for ${wf} on ${sha}: refusing to publish."
+              fi
+              exit 1
+            fi
+          done
+
+  image:
+    name: image to GHCR (gated, signed, attested)
+    needs: [gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push the image and its cosign signature + SBOM attestation
+      id-token: write        # keyless signing and provenance via Sigstore + GitHub OIDC
+      attestations: write    # the build-provenance attestation
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Log in to the registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          printf '%s' "$GH_TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Is this version already published?
+        # A version is never re-pushed. Published from this commit (a run that failed after its push): skip the
+        # build and the push, and sign and attest that digest below. Published from another commit: refuse.
+        id: existing
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        # Fails closed: only a positive "not there" counts as unpublished. `denied` counts too (a package that
+        # does not exist yet), which is safe, since a push can only overwrite with the access the lookup lacked.
+        # Anything else (a 5xx, a timeout) is retried, then stops the run rather than risk an overwrite.
+        run: |
+          found=""
+          for attempt in 1 2 3; do
+            if out="$(docker manifest inspect "${IMAGE}:${VERSION}" 2>&1)"; then found=1; break; fi
+            if printf '%s' "$out" | grep -qiE 'manifest unknown|no such manifest|name unknown|not found|denied'; then
+              found=0; break
+            fi
+            echo "registry lookup failed (attempt ${attempt}/3): ${out}"; sleep 10
+          done
+          [ -n "$found" ] || { echo "::error::could not tell whether ${IMAGE}:${VERSION} exists: refusing."; exit 1; }
+          if [ "$found" = 1 ]; then
+            docker pull -q "${IMAGE}:${VERSION}" >/dev/null
+            rev="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${IMAGE}:${VERSION}")"
+            if [ "$rev" != "$GITHUB_SHA" ]; then
+              echo "::error::${IMAGE}:${VERSION} is already published from commit ${rev}, not ${GITHUB_SHA}. A version is never re-used: bump __version__."
+              exit 1
+            fi
+            ref="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${VERSION}")"
+            echo "digest=${ref#*@}" >> "$GITHUB_OUTPUT"
+            echo "::notice::${IMAGE}:${VERSION} is already published from this commit (${ref#*@}): not rebuilt or re-pushed."
+          fi
+
+      - name: Build the image once (nothing pushed yet)
+        if: steps.existing.outputs.digest == ''
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        # No build cache: a release builds clean from source, so no shared cache layer can launder into the
+        # signed image. The base is pinned by digest in the Dockerfile and Python deps by hash in the lock.
+        run: |
+          docker build --pull --no-cache \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE}:${VERSION}" -t "${IMAGE}:sha-${GITHUB_SHA}" .
+
+      - name: Gate on CRITICAL CVEs, before anything is pushed
+        if: steps.existing.outputs.digest == ''
+        # The same gate and pin as docker.yml: a fixable CRITICAL in any layer stops the release here. A fresh
+        # vulnerability DB per run (cache off): the job that holds packages: write reads no shared cache.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ needs.gate.outputs.version }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          cache: 'false'
+
+      - name: Smoke test (the package imports inside the image)
+        if: steps.existing.outputs.digest == ''
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: docker run --rm "${IMAGE}:${VERSION}"
+
+      # Installed BEFORE the push, so nothing that can fail sits between the push and the signature.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Push the scanned image
+        if: steps.existing.outputs.digest == ''
+        id: push
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          docker push "${IMAGE}:sha-${GITHUB_SHA}"   # first: the version tag existing implies this one does
+          docker push "${IMAGE}:${VERSION}"
+          ref="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${VERSION}")"
+          echo "digest=${ref#*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the image (keyless)
+        id: sign
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          PUSHED: ${{ steps.push.outputs.digest }}
+          EXISTING: ${{ steps.existing.outputs.digest }}
+        run: |
+          digest="${PUSHED:-$EXISTING}"
+          cosign sign --yes "${IMAGE}@${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          printf '### Published\n\n`%s:%s`\n\n`%s@%s`\n' "$IMAGE" "$VERSION" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate the SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.sign.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false   # this job has no contents: write; the SBOM rides on the image
+
+      - name: Attach the SBOM as a signed attestation
+        env:
+          DIGEST: ${{ steps.sign.outputs.digest }}
+        run: cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.sign.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the signature (the exact signer identity, not a pattern)
+        env:
+          DIGEST: ${{ steps.sign.outputs.digest }}
+          EXPECTED_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "${EXPECTED_IDENTITY}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Log out of the registry
+        if: always()
+        run: docker logout "$REGISTRY" || true
+
+  dist:
+    name: wheel + sdist on the GitHub release
+    needs: [gate, image]     # only once the image passed its gate and shipped
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release (if missing) and upload its assets
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Build the wheel and the sdist
+        # `build` pinned; hatchling comes from pyproject's [build-system] (build isolation).
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build==1.6.1
+          python -m build
+
+      - name: Attach them to the release (created from the tag if it does not exist yet)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "br0kr ${TAG#v}" \
+                 --notes "The changes are in CHANGELOG.md under ${TAG#v}."
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber

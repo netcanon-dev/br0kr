@@ -1,6 +1,7 @@
-# br0kr runtime image. Built + smoke-tested in CI but NEVER published (the broker
-# is pre-alpha). It ships two real entrypoints (see the CMD note below); the default
-# CMD stays an import smoke so CI's `docker run --rm` needs no DB.
+# br0kr runtime image. Built + smoke-tested in CI on every PR (docker.yml, never pushed), and
+# published to GHCR only from a version tag (release.yml: Trivy-gated, signed, attested). It
+# ships two real entrypoints (see the CMD note below); the default CMD stays an import smoke so
+# CI's `docker run --rm` needs no DB.
 # Pinned by digest (review SEC-02): a re-pushed tag cannot change what builds. Dependabot (docker) proposes
 # the bumps.
 FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS base

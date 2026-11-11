@@ -6,14 +6,16 @@
 #      host, after compose had already stopped the containers it meant to recreate.
 # This script: reads WHICH files and profiles make up the stack from .env (COMPOSE_FILE/COMPOSE_PROFILES),
 # refuses if a container of this project (running or stopped) is not in that set, or if another compose
-# project already runs the br0kr image here, builds the ONE image target, brings the stack up WITHOUT
-# --build, waits for it to settle, and prints `docker compose ps`.
+# project already runs the br0kr image here, builds the ONE image target (or, with --pull, pulls the
+# published image BR0KR_IMAGE names), brings the stack up WITHOUT --build, waits for it to settle, and prints
+# `docker compose ps`.
 #
 # Once .env defines the stack, do not pass -f or --profile to compose by hand: either one REPLACES the
 # .env value for that command (a `--profile oauth` drops dashboard and cloudflared). Edit .env instead.
 #
 # Usage:
 #   bash scripts/deploy.sh                 # build the image, then bring the stack up
+#   bash scripts/deploy.sh --pull          # pull the published image BR0KR_IMAGE pins, then bring it up
 #   bash scripts/deploy.sh --no-build      # bring up on the image already present (the recovery path)
 #   bash scripts/deploy.sh --check         # run the preflight checks only; change nothing
 #   bash scripts/deploy.sh -- --scale daemon=2   # anything after `--` is passed to `up -d` (not --build)
@@ -29,9 +31,10 @@ up_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-build) mode="no-build" ;;
+    --pull) mode="pull" ;;
     --check) mode="check" ;;
     --) shift; up_args=("$@"); break ;;
-    *) echo "usage: bash scripts/deploy.sh [--no-build|--check] [-- <extra up -d args>]" >&2; exit 2 ;;
+    *) echo "usage: bash scripts/deploy.sh [--no-build|--pull|--check] [-- <extra up -d args>]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -76,7 +79,33 @@ case ":$files:" in
   *docker-compose.tls.yml*) bash "${HERE}/tls-up.sh" --check >/dev/null || die "Compose version gate failed (run: bash scripts/tls-up.sh --check)" ;;
 esac
 
-# 4. Orphan precondition: every container of this project must be a service compose can see. Stopped
+# 4. Which image the broker services run: br0kr:local, built here, unless BR0KR_IMAGE names a published one.
+#    A published image must be pinned to a version or a digest (never `latest` or a bare name), and nothing may
+#    build while it is set: a build would tag the working tree with the registry's name and shadow the signed
+#    image. So a build-mode deploy refuses, and every `up -d` below gets --no-build (the daemon service carries
+#    `build: .`, and compose builds a missing image it can build).
+image="$(env_val BR0KR_IMAGE)"
+image="${image:-br0kr:local}"
+published=""
+if [ "$image" != "br0kr:local" ]; then
+  published=1
+  case "$image" in
+    *@sha256:*) ;;
+    *) case "${image##*/}" in
+         *:latest) die "BR0KR_IMAGE=${image}: pin a version or a digest, not latest" ;;
+         *:?*) ;;
+         *) die "BR0KR_IMAGE=${image} names no tag: pin a version or a digest" ;;
+       esac ;;
+  esac
+  [ "$mode" != "deploy" ] || die "BR0KR_IMAGE is set (${image}), so this host runs a published image:
+        deploy it with --pull, or unset BR0KR_IMAGE in .env to build br0kr:local here."
+fi
+if [ "$mode" = "pull" ] && [ -z "$published" ]; then
+  die "--pull needs BR0KR_IMAGE in .env set to a published image, e.g.
+        BR0KR_IMAGE=ghcr.io/netcanon-dev/br0kr:0.2.0 (see .env.example)."
+fi
+
+# 5. Orphan precondition: every container of this project must be a service compose can see. Stopped
 #    containers count: the recovery path (--no-build after a failed build) runs with the stack DOWN, and
 #    bringing it back with fewer files would restart the gateway WITHOUT the TLS override. One-off
 #    `compose run` containers are not services and are ignored.
@@ -100,24 +129,37 @@ by_dir="$(docker ps -a --filter "label=com.docker.compose.project.working_dir=${
             --format '{{.Label "com.docker.compose.project"}}')" || die "docker ps failed"
 by_image="$(docker ps -a --filter ancestor=br0kr:local --format '{{.Label "com.docker.compose.project"}}')" \
   || die "docker ps failed"
+if [ -n "$published" ]; then   # a stack on the published image too (a host part-way through a switch has both)
+  # Tolerant: before the first --pull the image is not on this host yet. A broken docker already died above.
+  by_image="$(printf '%s\n' "$by_image"
+              docker ps -a --filter "ancestor=${image}" --format '{{.Label "com.docker.compose.project"}}' || true)"
+fi
 others="$(printf '%s\n%s\n' "$by_dir" "$by_image" | sed '/^$/d' | sort -u | { grep -v -x -F -- "$project" || true; })"
 if [ -n "$others" ]; then
   die "br0kr containers belong to another compose project here: $(printf '%s\n' "$others" | tr '\n' ' ')
         (expected ${project}). Set COMPOSE_PROJECT_NAME in .env to match, or remove that stack first."
 fi
-echo "deploy: project ${project}; services: $(printf '%s\n' "$wanted" | tr '\n' ' ')"
+echo "deploy: project ${project}; image ${image}; services: $(printf '%s\n' "$wanted" | tr '\n' ' ')"
 [ "$mode" = "check" ] && { echo "deploy: preflight OK"; exit 0; }
 
-# 5. One image target. Every br0kr service runs the image this produces.
+# 6. One image: built here (one target), or pulled. Every br0kr service runs it.
 if [ "$mode" = "deploy" ]; then
   echo "deploy: building the image (one target: daemon)"
   docker compose build daemon
+elif [ "$mode" = "pull" ]; then
+  echo "deploy: pulling ${image}"
+  docker pull "$image"
 fi
 
-# 6. Bring up WITHOUT --build: if a later step fails, the previous containers keep running.
-docker compose up -d "${up_args[@]+"${up_args[@]}"}"
+# 7. Bring up WITHOUT --build: if a later step fails, the previous containers keep running. With a published
+#    image, --no-build too, so a missing image fails here instead of being built under the registry's name.
+if [ -n "$published" ]; then
+  docker compose up -d --no-build "${up_args[@]+"${up_args[@]}"}"
+else
+  docker compose up -d "${up_args[@]+"${up_args[@]}"}"
+fi
 
-# 7. Wait for every long-running service to be running (and healthy where it has a healthcheck); the
+# 8. Wait for every long-running service to be running (and healthy where it has a healthcheck); the
 #    one-shot migrate must have exited 0. One-off `compose run` containers (named *-run-*) are skipped.
 deadline=$((SECONDS + wait_s))
 while :; do

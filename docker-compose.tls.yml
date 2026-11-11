@@ -35,7 +35,7 @@ services:
   # docs/runbooks/public-tunnel.md) wins; otherwise it derives https://<BR0KR_TLS_SITE> (the direct LAN case).
   # This is the tunnel-friendly decoupling: the PUBLIC hostname is independent of the internal Caddy origin.
   oauth:
-    image: br0kr:local   # built by the base file's daemon service; never built or pulled here
+    image: ${BR0KR_IMAGE:-br0kr:local}   # the base file's image (built by its daemon, or BR0KR_IMAGE); never pulled here
     pull_policy: never
     restart: unless-stopped
     command: ["python", "-m", "br0kr.oauth"]

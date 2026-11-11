@@ -1,10 +1,9 @@
-# docker — build, CVE-scan and smoke-test the runtime image, but NEVER publish it.
+# docker — build, CVE-scan and smoke-test the runtime image on every PR and main push; never publish it.
 #
-# br0kr is pre-alpha; no image is published yet. So this workflow has NO
-# registry login, NO `docker push`, and NO `packages: write` permission. It
-# builds the image on the ephemeral GitHub-hosted runner (see ci.yml's RUNNERS
-# note), proves it runs, and deletes it. The day the broker is ready to ship,
-# add a push step gated behind a tag + an explicit visibility decision.
+# Publishing is release.yml's job, on a version tag only, behind the same Trivy gate. This workflow has
+# NO registry login, NO `docker push` and NO `packages: write` permission: it builds the image on the
+# ephemeral GitHub-hosted runner (see ci.yml's RUNNERS note), proves it runs, and deletes it. A PR can
+# therefore never ship an image, whatever its steps do.
 name: docker
 
 on:
