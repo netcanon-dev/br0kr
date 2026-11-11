@@ -5,10 +5,12 @@
 # "remote/stretched" hop is just IP routing over the mesh, which can't be unit-tested on one box;
 # everything else is exercised here.
 #
-# It layers docker-compose.yml + primary-remote.yml + standby.yml into ONE project on one network, so
-# the standby reaches the primary by service DNS (PRIMARY_HOST=pg-primary, cert SAN=pg-primary) and
-# verify-full still holds. Only pg-primary (DR/TLS mode) + pg-standby-remote are started — no Proxmox,
-# no broker services. Tears down fully.
+# It layers docker-compose.yml + primary-remote.yml + standby.yml into ONE project, plus a throwaway
+# overlay that puts pg-standby-remote on the base file's `ledger` network (review SEC-05: pg-primary is
+# on `ledger` only), so the standby reaches the primary by service DNS (PRIMARY_HOST=pg-primary, cert
+# SAN=pg-primary) and verify-full still holds. A real stretched standby runs alone on another host and
+# reaches the primary's published port instead. Only pg-primary (DR/TLS mode) + pg-standby-remote are
+# started — no Proxmox, no broker services. Tears down fully.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
@@ -22,8 +24,14 @@ PW="dr-disposable-$$"
 # A throwaway password with a space, colon, and quote to exercise the standby passfile escaping (held
 # in a non-keyworded var so the secret-scan does not flag this committed script).
 SPECIAL="re p:q'z-${PW}"
+NETFILE="$(mktemp /tmp/dr-smoke-net.XXXXXX.yml)"
+cat > "$NETFILE" <<'EOF'
+services:
+  pg-standby-remote:
+    networks: [ledger]
+EOF
 DC=(docker compose -p "$PROJECT" --env-file "$ENVFILE"
-    -f docker-compose.yml -f docker-compose.primary-remote.yml -f docker-compose.standby.yml)
+    -f docker-compose.yml -f docker-compose.primary-remote.yml -f docker-compose.standby.yml -f "$NETFILE")
 
 cat > "$ENVFILE" <<EOF
 POSTGRES_USER=broker
@@ -43,7 +51,7 @@ check() { results+=("$2"); echo "[$1] $([ "$2" -eq 0 ] && echo PASS || echo FAIL
 cleanup() {
   echo "--- teardown ---"
   "${DC[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$ENVFILE"
+  rm -f "$ENVFILE" "$NETFILE"
   [ "$CREATED_CERTS" = "1" ] && rm -rf "$CERTS"
 }
 trap cleanup EXIT INT TERM

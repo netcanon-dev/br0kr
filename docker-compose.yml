@@ -10,8 +10,10 @@
 #   docker compose logs -f daemon     # watch the reconciler
 #
 # The pg-primary/pg-standby pair is a HOMELAB STARTER topology — it demonstrates the multi-host
-# PGCONN re-homing (br0kr/db.py) that the failover harness proves, with trust replication on an
-# ISOLATED compose network. It is NOT a production HA setup: for that, point PGCONN at an
+# PGCONN re-homing (br0kr/db.py) that the failover harness proves, with trust replication on the
+# `ledger` compose network, which no container that dials or terminates the internet is on (see `networks:` at
+# the end).
+# It is NOT a production HA setup: for that, point PGCONN at an
 # operator-run cluster (Patroni / managed Postgres) and skip the pg-* services. See
 # docs/runbooks/docker-deploy.md and docs/runbooks/ledger-ha.md.
 
@@ -82,6 +84,7 @@ services:
   # ── Ledger: primary ────────────────────────────────────────────────────────────
   pg-primary:
     <<: *pg-hardening
+    networks: [ledger]
     # Pinned by digest (review SEC-02; 16.14 when pinned): a re-pushed tag cannot swap the ledger's binary under
     # `restart: unless-stopped`. Dependabot (docker-compose) proposes the bumps.
     image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54
@@ -133,6 +136,7 @@ services:
   # ── Ledger: hot standby (clones from the primary on first boot, then streams) ───
   pg-standby:
     <<: *pg-hardening
+    networks: [ledger]
     image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54   # the same pin as pg-primary: a standby must run the primary's major + build
     restart: unless-stopped
     entrypoint: ["/bin/bash", "/pg-standby-entrypoint.sh"]
@@ -162,6 +166,7 @@ services:
   # the checkout. Unhealthy when no dump is newer than two intervals. docs/runbooks/day2-operations.md "Backup schedule".
   ledger-backup:
     <<: *pg-hardening
+    networks: [ledger]
     image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54   # the same pin as pg-primary
     profiles: ["backup"]
     restart: unless-stopped
@@ -192,6 +197,7 @@ services:
   # ── Broker: schema migrations (one-shot; runs once before the services) ─────────
   migrate:
     <<: *broker
+    networks: [ledger]
     command: ["python", "-m", "br0kr.migrate"]
     environment:
       <<: *broker-env
@@ -204,6 +210,7 @@ services:
   # ── Broker: agent-facing MCP gateway (scale freely — stateless) ─────────────────
   gateway:
     <<: *broker
+    networks: [ledger, edge]   # the ledger, and Caddy (docker-compose.tls.yml) in front of it
     command: ["python", "-m", "br0kr.mcp_server"]
     environment:
       <<: *broker-env
@@ -220,7 +227,7 @@ services:
       BR0KR_GATEWAY_METRICS_PORT: ${BR0KR_GATEWAY_METRICS_PORT:-9091}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
-    # The metrics port is for a Prometheus on the compose network (gateway:9091/metrics), like daemon:9090; not
+    # The metrics port is for a Prometheus on the `ledger` network (gateway:9091/metrics), like daemon:9090; not
     # host-published, so it is not reachable from the LAN or through the tunnel.
     expose:
       - "9091"
@@ -244,6 +251,7 @@ services:
   # OPERATOR_GATEWAY_BIND sends the bearer as plain HTTP across that network.
   gateway-operator:
     <<: *broker
+    networks: [ledger]   # never routed through Caddy or the tunnel, so nothing on `edge` reaches it
     command: ["python", "-m", "br0kr.mcp_server"]
     profiles: ["operator"]
     environment:
@@ -256,7 +264,7 @@ services:
       # The per-cluster PVE token secret(s), as on the daemon: the live-PVE operator reads resolve
       # cluster.token_secret_env from here. Add a line per cluster if their secret-env names differ.
       PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}
-      BR0KR_GATEWAY_METRICS_PORT: ${BR0KR_GATEWAY_METRICS_PORT:-9091}   # as on the gateway; compose network only
+      BR0KR_GATEWAY_METRICS_PORT: ${BR0KR_GATEWAY_METRICS_PORT:-9091}   # as on the gateway; the `ledger` network only
     ports:
       - "${OPERATOR_GATEWAY_BIND:-127.0.0.1}:${OPERATOR_GATEWAY_PORT:-8082}:8080"
     expose:
@@ -274,6 +282,7 @@ services:
   # ── Broker: reconciler daemon (SINGLE leader; a 2nd replica is a hot standby) ────
   daemon:
     <<: *broker
+    networks: [ledger]   # outbound to Proxmox works from any bridge network
     build: .   # the ONE service that builds br0kr:local (see x-broker); `docker compose build daemon`
     command: ["python", "-m", "br0kr.daemon"]
     environment:
@@ -303,7 +312,7 @@ services:
       # Per-cluster PVE token secret(s): the daemon resolves cluster.token_secret_env from here, and ONLY the
       # daemon gets it. Add a line per cluster if their secret-env names differ.
       PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}
-    # Reachable on the compose network (e.g. Prometheus scrapes daemon:9090/metrics — change the scrape
+    # Reachable on the `ledger` network (e.g. Prometheus scrapes daemon:9090/metrics — change the scrape
     # target if you override BR0KR_HEALTH_PORT). Not host-published — a fixed host port would clash under
     # `--scale daemon=2`. `expose` is informational; same-network containers reach any port regardless.
     expose:
@@ -328,6 +337,7 @@ services:
   # doesn't publish an extra port unless asked.
   dashboard:
     <<: *broker
+    networks: [ledger, edge]   # the ledger, and Caddy in front of it
     command: ["python", "-m", "br0kr.dashboard"]
     profiles: ["dashboard"]
     environment:
@@ -359,3 +369,14 @@ services:
 volumes:
   pg-primary-data:
   pg-standby-data:
+
+# Two networks (review SEC-05). `ledger` carries the ledger and every process that talks to it. `edge` carries
+# what the outside reaches: the gateway and the dashboard, plus Caddy, cloudflared and the OAuth shim from
+# docker-compose.tls.yml. Caddy and cloudflared (the one container that dials the internet) are on `edge` only, so
+# they have no route to pg-primary/pg-standby, whose replication trusts any client on its network. Both are
+# ordinary bridge networks with outbound access (the daemon reaches Proxmox over the LAN). A Prometheus scraping
+# daemon:9090 / gateway:9091 joins `ledger` (named <project>_ledger, e.g. br0kr_ledger). A service added without
+# `networks:` (an override file of your own) lands on a separate <project>_default and reaches neither.
+networks:
+  ledger: {}
+  edge: {}

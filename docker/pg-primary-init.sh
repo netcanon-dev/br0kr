@@ -37,10 +37,10 @@ hostssl    replication    replicator    ${REPLICATION_CIDR:-0.0.0.0/0}    scram-
 HBA
   echo "pg-primary-init: enabled TLS+scram replication for the remote DR standby (slot br0kr_standby_dr)"
 else
-  # ── Default starter: trust replication on the isolated compose network. ──
+  # ── Default starter: trust replication on the `ledger` compose network (no internet-facing container). ──
   cat >> "$PGDATA/pg_hba.conf" <<'HBA'
 
-# br0kr: allow the hot standby to stream WAL (trust, isolated compose network only).
+# br0kr: allow the hot standby to stream WAL (trust, the `ledger` compose network only).
 host    replication    all    all    trust
 HBA
   # A persistent physical replication slot so the standby can stop/restart/lag and RESUME streaming —

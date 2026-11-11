@@ -10,7 +10,7 @@
 # NOT re-cloned on restart: it still carries the sentinel from its original clone.
 #
 # This mirrors the replication rig the failover harness proves (scripts/harness_ha_failover.py):
-# trust replication on the isolated compose network + `-R` to wire the standby config; plus a named
+# trust replication on the `ledger` compose network + `-R` to wire the standby config; plus a named
 # replication SLOT (br0kr_standby, created on the primary) so a stopped/lagging standby can resume.
 # See docs/runbooks/docker-deploy.md.
 set -e

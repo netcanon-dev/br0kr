@@ -2,7 +2,8 @@
 # TLS-override smoke: brings up the stack WITH docker-compose.tls.yml (the optional Caddy) and proves the
 # deploy gate works end to end WITHOUT any Proxmox — Caddy terminates TLS on the published port and reverse-
 # proxies to the gateway (the bearer surface), the gateway answers /healthz THROUGH Caddy over HTTPS, and
-# the gateway's PLAIN host port is UN-PUBLISHED (only the TLS front door is exposed). Then tears down.
+# the gateway's PLAIN host port is UN-PUBLISHED (only the TLS front door is exposed), and Caddy has no route to
+# the ledger (review SEC-05: it is on the `edge` network only). Then tears down.
 #
 # Uses Caddy's internal self-signed CA (BR0KR_TLS_ISSUER=internal, the default), so it needs no domain/DNS;
 # curl -k skips verification of that self-signed cert. A throwaway .env; safe to run unattended.
@@ -86,6 +87,36 @@ check gateway_healthz_over_tls "$([ "$code" = "200" ] && echo 0 || echo 1)" "htt
 # 5. It really is TLS — a PLAIN http request to the TLS port does NOT succeed as http (Caddy speaks TLS there).
 plain="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${TLSPORT}/healthz" 2>/dev/null || true)"
 check tls_port_is_not_plain_http "$([ "$plain" != "200" ] && echo 0 || echo 1)" "plain-http status=${plain:-<connect-failed>}"
+
+# 6. Caddy has no route to the ledger (review SEC-05): a probe sharing Caddy's own network namespace reaches neither
+#    ledger node by name or by its ledger address, while the same probe in the gateway's namespace (the control: the
+#    gateway is on both networks) reaches both, which also catches a probe that could not run at all. pg_isready
+#    exits 0 (accepting) or 1 (rejecting) when it reached the server.
+reached() {
+  docker run --rm --network "container:$1" "$pgimg" pg_isready -h "$2" -p 5432 -t 3 >/dev/null 2>&1
+  [ $? -le 1 ]
+}
+caddy_id="$("${DC[@]}" ps -q caddy)"; gw_id="$("${DC[@]}" ps -q gateway)"
+pgimg="$(docker inspect -f '{{.Config.Image}}' "$("${DC[@]}" ps -q pg-primary)" 2>/dev/null)"
+iso=0; detail=""
+if [ -z "$caddy_id" ] || [ -z "$gw_id" ] || [ -z "$pgimg" ]; then
+  iso=1; detail="no Caddy, gateway or ledger image; "
+fi
+# The standby clones from the primary on its first boot and does not listen until that is done: wait for it, or the
+# gateway control could catch it mid-clone.
+for _ in $(seq 1 60); do "${DC[@]}" exec -T pg-standby pg_isready -q >/dev/null 2>&1 && break; sleep 2; done
+for node in pg-primary pg-standby; do
+  [ -n "$pgimg" ] || break
+  ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${PROJECT}_ledger\").IPAddress}}" \
+        "$("${DC[@]}" ps -q "$node")" 2>/dev/null)"
+  [ -n "$ip" ] || { iso=1; detail+="$node has no ledger address; "; continue; }
+  reached "$caddy_id" "$node" && { iso=1; detail+="Caddy reached $node by name; "; }
+  reached "$caddy_id" "$ip" && { iso=1; detail+="Caddy reached $node by address; "; }
+  reached "$gw_id" "$node" || { iso=1; detail+="the gateway did NOT reach $node by name (control); "; }
+  reached "$gw_id" "$ip" || { iso=1; detail+="the gateway did NOT reach $node by address (control); "; }
+done
+check caddy_has_no_route_to_the_ledger "$iso" \
+  "${detail:-neither ledger node reachable from Caddy; both from the gateway}"
 
 echo "--------------------------------------------------------"
 fail=0; for r in "${results[@]}"; do [ "$r" -ne 0 ] && fail=1; done

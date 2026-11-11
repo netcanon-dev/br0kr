@@ -167,6 +167,25 @@ for _ in $(seq 1 40); do
 done
 check daemon_ready_and_metrics "$dr"
 
+# The edge network has no route to the ledger (review SEC-05): Caddy, cloudflared and the OAuth shim (TLS overlay)
+# share it with the gateway and the dashboard, and the ledger's replication trusts any client on its own network.
+# From a container on `edge`, neither ledger node resolves by name or answers on its ledger address; from `ledger`
+# both do, by name and by address (the controls, which also catch a probe that could not run at all). pg_isready
+# exits 0 (accepting) or 1 (rejecting) when it reached the server, 2 or 3 when it did not.
+reached() { docker run --rm --network "$1" "$pgimg" pg_isready -h "$2" -p 5432 -t 3 >/dev/null 2>&1; [ $? -le 1 ]; }
+pgimg="$(docker inspect -f '{{.Config.Image}}' "$("${DC[@]}" ps -q pg-primary)" 2>/dev/null)"
+iso=0; detail=""
+for node in pg-primary pg-standby; do
+  ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${PROJECT}_ledger\").IPAddress}}" \
+        "$("${DC[@]}" ps -q "$node")" 2>/dev/null)"
+  if [ -z "$pgimg" ] || [ -z "$ip" ]; then iso=1; detail+="no image or ledger address for $node; "; continue; fi
+  reached "${PROJECT}_edge" "$node" && { iso=1; detail+="$node reached from edge by name; "; }
+  reached "${PROJECT}_edge" "$ip" && { iso=1; detail+="$node reached from edge by address; "; }
+  reached "${PROJECT}_ledger" "$node" || { iso=1; detail+="$node NOT reached from ledger by name; "; }
+  reached "${PROJECT}_ledger" "$ip" || { iso=1; detail+="$node NOT reached from ledger by address; "; }
+done
+check edge_has_no_route_to_the_ledger "$iso" "${detail:-neither ledger node reachable from edge; both from ledger}"
+
 # the daemon's Compose healthcheck (its own /healthz liveness) flips the container to 'healthy'.
 dh=""
 for _ in $(seq 1 40); do

@@ -4,8 +4,9 @@
 #     - /etc/prometheus/br0kr-alerts.yml
 #
 # and scrape the daemon (daemon:9090/metrics) and the gateway's metrics listener (gateway:9091/metrics) from a
-# Prometheus on the compose network; neither port is host-published. docs/runbooks/alerts.md says what each alert
-# means and what to do, under a heading named after the alert, which is where every runbook_url points.
+# Prometheus on the `ledger` compose network (<project>_ledger); neither port is host-published.
+# docs/runbooks/alerts.md says what each alert means and what to do, under a heading named after the alert, which is
+# where every runbook_url points.
 #
 # The broker group aggregates with sum()/max() so a `--scale daemon=2` pair or a leader handover never doubles or
 # splits an alert: the ledger-wide gauges come from the leader only, and br0kr_leader says which instance that is.

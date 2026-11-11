@@ -25,7 +25,8 @@ The thresholds are starting points. Tune them to your queue budgets and WAL rate
 
 ## Loading the rules
 
-Run Prometheus on the stack's compose network (`<project>_default`, e.g. `br0kr_default`). Neither metrics port is
+Run Prometheus on the stack's `ledger` compose network (`<project>_ledger`, e.g. `br0kr_ledger`; before the network
+split, review SEC-05, it was `<project>_default`, and a scraper left there loses both targets). Neither metrics port is
 published on the host, so nothing on the LAN or behind the tunnel can scrape them:
 
 ```yaml

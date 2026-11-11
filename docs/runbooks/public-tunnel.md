@@ -151,8 +151,8 @@ page**; paste a project token (see [oauth-connector.md](oauth-connector.md) §2)
 
 ## Security notes (SECURITY.md C17)
 
-- The `:8081` origin is **cleartext but docker-internal only** — never a published host port. Keep the compose
-  network single-tenant (don't co-host untrusted containers on it).
+- The `:8081` origin is **cleartext but docker-internal only** — never a published host port. Keep the `edge`
+  compose network single-tenant (don't co-host untrusted containers on it).
 - The tunnel provider (Cloudflare) sits in the TLS path — it terminates public TLS and can see plaintext
   requests, including the bearer. This is the normal trust model for any managed tunnel/CDN; if that's
   unacceptable, run your **own** reverse proxy on a public host instead and point it at `caddy:8081` (or the

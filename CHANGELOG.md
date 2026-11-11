@@ -38,6 +38,8 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **The compose stack runs on two networks: Caddy and cloudflared have no route to the ledger** (SEC-05). The first
+  deploy recreates every container; a Prometheus on `<project>_default` must move to `<project>_ledger`.
 - **The PVE driver polls a task every 3 s after its first 10 s; the orphan sweep reads a node's leases in one
   query.** One session per node reuses a connection where pveproxy keeps it open and retries only a GET
   answered 502/503/504 (PERF-04).

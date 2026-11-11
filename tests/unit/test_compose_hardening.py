@@ -141,3 +141,36 @@ def test_block_ignores_commented_out_keys():
     commented-out `# read_only: true`, which is how a hardening key would most likely be disabled."""
     text = "x-broker: &broker\n  image: br0kr:local\n  # read_only: true\n\nservices:\n"
     assert not _has(_block(text, "x-broker: &broker"), "read_only: true")
+
+
+def _networks(block: str) -> set[str] | None:
+    """The service's `networks: [a, b]` list, or None when the block sets none."""
+    m = re.search(r"^    networks: \[([^\]]*)\]", block, re.M)
+    return None if m is None else {n.strip() for n in m.group(1).split(",") if n.strip()}
+
+
+def test_the_internet_facing_containers_have_no_route_to_the_ledger():
+    """Every service names its networks: the ledger and the processes that only talk to it are on `ledger` alone;
+    the gateway and the dashboard are on `ledger` and `edge`; Caddy and cloudflared are on `edge` alone, and the
+    OAuth shim on both; the TLS overlay's port overrides and the DR overlays add no network. The base file declares
+    both networks. Guards review SEC-05: with one shared default network, a compromised cloudflared (which dials
+    the internet) or Caddy could take an unauthenticated pg_basebackup of the whole ledger over the bundled
+    standby's trust replication line. scripts/run_compose_smoke.sh and run_tls_smoke.sh prove the isolation on a
+    running stack."""
+    base_text = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    base = _services(base_text)
+    tls = _services((_ROOT / "docker-compose.tls.yml").read_text(encoding="utf-8"))
+    ledger, both, edge = {"ledger"}, {"ledger", "edge"}, {"edge"}
+    assert {name: _networks(block) for name, block in base.items()} == {
+        "pg-primary": ledger, "pg-standby": ledger, "ledger-backup": ledger, "migrate": ledger, "daemon": ledger,
+        "gateway-operator": ledger, "gateway": both, "dashboard": both}
+    overrides = {"gateway", "dashboard"}   # the overlay only un-publishes their ports; the base file's networks stand
+    assert {name: _networks(block) for name, block in tls.items() if name not in overrides} == {
+        "caddy": edge, "cloudflared": edge, "oauth": both}
+    assert not any(_has(tls[name], "networks:") for name in overrides)
+    # The DR overlays touch no network: primary-remote overlays pg-primary (it must stay on `ledger` alone), and
+    # the standby file runs alone on another host, where `ledger` does not exist.
+    for name in ("docker-compose.primary-remote.yml", "docker-compose.standby.yml"):
+        for block in _services((_ROOT / name).read_text(encoding="utf-8")).values():
+            assert not _has(block, "networks:") and not _has(block, "network_mode:"), name
+    assert re.search(r"^networks:\n  ledger: \{\}\n  edge: \{\}$", base_text, re.M)

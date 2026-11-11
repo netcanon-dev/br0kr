@@ -3,7 +3,7 @@
 # service (COMPOSE_PROFILES gains `backup`; docs/runbooks/day2-operations.md "Backup schedule").
 #
 # The bundled ledger publishes no port, so a cron job on the host cannot reach it. This runs inside the stack, on the
-# compose network, in the ledger's own postgres image (pg_dump matches the server), and calls backup_ledger.sh,
+# `ledger` network, in the ledger's own postgres image (pg_dump matches the server), and calls backup_ledger.sh,
 # which keeps its guarantees: an atomic 0600 dump, retention, and the password out of argv.
 #
 #   BACKUP_EVERY_SECONDS   seconds between dumps (default 3600; at least 60).

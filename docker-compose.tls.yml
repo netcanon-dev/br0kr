@@ -17,7 +17,7 @@
 #         → a Caddy container terminates TLS on :443 (gateway) and :8443 (dashboard) and the gateway's
 #           (and dashboard's) PLAIN host ports are UN-PUBLISHED (`ports: !reset []`) — so ONLY the TLS
 #           front door is reachable from the host/LAN. The services still listen on their plain ports
-#           INSIDE the compose network (Caddy reaches gateway:8080 / dashboard:8051), and their container
+#           INSIDE the `edge` network (Caddy reaches gateway:8080 / dashboard:8051), and their container
 #           healthchecks (localhost:PORT) are unaffected.
 #         → with --profile dashboard too, the dashboard is served over TLS on :8443.
 #
@@ -35,6 +35,7 @@ services:
   # docs/runbooks/public-tunnel.md) wins; otherwise it derives https://<BR0KR_TLS_SITE> (the direct LAN case).
   # This is the tunnel-friendly decoupling: the PUBLIC hostname is independent of the internal Caddy origin.
   oauth:
+    networks: [ledger, edge]   # PGCONN reaches the ledger; Caddy reaches oauth:9100 over `edge`
     image: ${BR0KR_IMAGE:-br0kr:local}   # the base file's image (built by its daemon, or BR0KR_IMAGE); never pulled here
     pull_policy: never
     restart: unless-stopped
@@ -75,6 +76,7 @@ services:
       - "9100"   # compose-network only; Caddy reaches oauth:9100. Never a host port.
 
   caddy:
+    networks: [edge]   # no route to the ledger (review SEC-05): it reaches gateway, dashboard and oauth only
     # Pinned by digest (review SEC-02). Dependabot (docker-compose) proposes the bumps.
     image: caddy:2.11.4@sha256:af5fdcd76f2db5e4e974ee92f96ee8c0fc3edb55bd4ba5032547cbf3f65e486d
     restart: unless-stopped
@@ -89,7 +91,7 @@ services:
       - "${TLS_DASHBOARD_PORT:-8443}:8443"
     expose:
       - "8081"   # host-agnostic plain-HTTP tunnel origin (Caddyfile `http://:8081` site). NOT a published
-                 # host port — reachable only inside the compose network (cloudflared → http://caddy:8081). C17.
+                 # host port — reachable only inside the `edge` network (cloudflared → http://caddy:8081). C17.
     environment:
       BR0KR_TLS_SITE: ${BR0KR_TLS_SITE:-localhost}
       BR0KR_TLS_DASHBOARD_SITE: ${BR0KR_TLS_DASHBOARD_SITE:-localhost:8443}
@@ -115,12 +117,13 @@ services:
   # Makes br0kr reachable from the PUBLIC internet so an OAuth-only MCP host works: Claude Desktop / claude.ai
   # custom-connector OAuth discovery runs from ANTHROPIC'S CLOUD, which cannot reach a br0kr on a private LAN
   # IP. cloudflared dials OUT to Cloudflare (no inbound port / firewall change) and forwards the tunnel's
-  # public hostname to the host-agnostic plain-HTTP origin (caddy:8081) over the compose network — the cleartext
+  # public hostname to the host-agnostic plain-HTTP origin (caddy:8081) over the `edge` network — the cleartext
   # leg never leaves the docker bridge; Cloudflare terminates the PUBLIC TLS. Set BR0KR_PUBLIC_URL to the
   # tunnel's https URL so the OAuth issuer / discovery / WWW-Authenticate advertise it. NAMED tunnel: create
   # it in the Cloudflare Zero Trust dashboard, route the public hostname to service `http://caddy:8081`, copy
   # the connector TOKEN into TUNNEL_TOKEN (.env). See docs/runbooks/public-tunnel.md. SECURITY.md C17.
   cloudflared:
+    networks: [edge]   # dials the internet, so no route to the ledger (review SEC-05); it reaches Caddy only
     # Pinned by digest, never `latest` (review SEC-02): this is the one container that dials the internet while
     # holding TUNNEL_TOKEN. It runs as an unprivileged user and writes nothing, so: no capabilities, no
     # escalation, a read-only root filesystem. Dependabot (docker-compose) proposes the bumps.

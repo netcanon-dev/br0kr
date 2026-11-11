@@ -10,7 +10,8 @@ live in [`docker-compose.yml`](../../docker-compose.yml) + [`.env.example`](../.
 
 > **Scope.** The bundled `pg-primary`/`pg-standby` pair is a **homelab STARTER** ledger: it
 > demonstrates the multi-host `PGCONN` re-homing that [ledger-ha.md](ledger-ha.md) describes and the
-> failover harness proves, using **trust replication on an isolated compose network**. It is not a
+> failover harness proves, using **trust replication on the ledger's own compose network** (`ledger`; the
+> internet-facing Caddy and cloudflared sit on a separate `edge` network with no route to it). It is not a
 > production HA manager. For production, point `PGCONN` at an operator-run cluster (Patroni / managed
 > Postgres) and don't start the `pg-*` services — see [Production hardening](#8-production-hardening).
 
@@ -465,9 +466,11 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   alert rules**, [`docker/prometheus/br0kr-alerts.yml`](../../docker/prometheus/br0kr-alerts.yml):
   `Br0krLeaderTickFailing` is how a stuck-but-beating leader reaches a human (it holds the lock while
   reconciling nothing), and [alerts.md](alerts.md) says what to do for each alert. Point Prometheus at
-  `daemon:9090/metrics` and `gateway:9091/metrics` — both are published on the **compose network only**
-  (`expose`, not a host port, to avoid a fixed-port clash under `--scale daemon=2`), so scrape them from a
-  Prometheus container on the same network; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
+  `daemon:9090/metrics` and `gateway:9091/metrics` — neither is a host port (`expose`, to avoid a fixed-port
+  clash under `--scale daemon=2`); the daemon is on the `ledger` compose network only and the gateway on `ledger`
+  and `edge`, so scrape them from a Prometheus container attached to `ledger` (`<project>_ledger`, e.g.
+  `br0kr_ledger`). That network carries the bundled ledger's trust replication, so attach only a scraper you
+  trust; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
   as u; print(u.urlopen('http://localhost:9090/readyz').status)"`. The endpoints are unauthenticated plain HTTP
   exposing only counts/states (never a secret) — keep them on a trusted network ([/SECURITY.md](../../SECURITY.md) C3 (c2)).
 - **Upgrade, roll back, back up on a schedule, rotate a secret, decommission a node:**
@@ -502,7 +505,7 @@ This starter stack trades rigour for one-command bring-up. Before relying on it:
 
 - **Replace the bundled ledger** with an operator-run HA Postgres (Patroni / repmgr / a managed
   service) that guarantees a single primary and does proper failover; point `PGCONN` at it.
-- **Authenticated replication.** The bundled same-host pair uses *trust* replication on the isolated
+- **Authenticated replication.** The bundled same-host pair uses *trust* replication on the `ledger`
   compose network (`docker/pg-primary-init.sh`). For a replica on another host/segment, use the
   **stretched DR standby (§9)** — it does authenticated, TLS-encrypted replication (scram + `hostssl`)
   and adds no trust line.
@@ -521,7 +524,7 @@ This starter stack trades rigour for one-command bring-up. Before relying on it:
 
 ## 9. Stretched / DR standby (remote host over the mesh)
 
-The bundled `pg-standby` lives on the **same host** as the primary (trust replication, isolated
+The bundled `pg-standby` lives on the **same host** as the primary (trust replication on the `ledger`
 network) — fine for local HA, useless for disaster recovery. For a replica on **another host /
 cluster / network segment** (e.g. a second Proxmox node reachable over your Tailscale/Headscale
 mesh), use the stretched DR standby: it replicates over an **authenticated, TLS-encrypted** link

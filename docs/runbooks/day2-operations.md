@@ -37,6 +37,15 @@ bash scripts/deploy.sh --check && bash scripts/deploy.sh                   # bui
 ```
 
 - **The line-ending check** is there because a CRLF standby entrypoint once crash-looped the standby for 45 hours.
+- **The release that splits the compose network in two** (`ledger` and `edge`, review SEC-05; see its CHANGELOG
+  entry) moves every container to the new networks, so its first deploy recreates all of them: both ledger nodes,
+  `migrate`, the gateway, the daemon, the dashboard, and the TLS overlay's Caddy, cloudflared and OAuth shim. Expect
+  tens of seconds without the gateway; open MCP sessions and the tunnel reconnect. Take the pre-deploy dump BEFORE
+  extracting the new release, as above: run after extraction, the one-off backup runs against the new compose
+  files, outside `deploy.sh`, so it either cannot reach the ledger or recreates the ledger ahead of the deploy. A
+  Prometheus attached to `<project>_default` must move to `<project>_ledger`, or it silently loses both targets. Afterwards remove the old network with
+  `docker network rm <project>_default` (it refuses while anything is still attached). Rolling back to the
+  previous release recreates everything onto `<project>_default` again.
 - **The rollback tag** keeps the image you are leaving: building the new one moves `br0kr:local`.
 - **A release adds a migration** when its CHANGELOG says so, or its newest `db/migrations` file is above the schema
   version. Take the dump first.
