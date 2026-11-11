@@ -539,7 +539,8 @@ class Pve:
 
     def read_tags(self, vmid: int) -> str | None:
         """The guest's tags string (the fence lives here), or None if unset."""
-        return self._get(f"/nodes/{self.node}/qemu/{vmid}/config").get("tags")
+        tags: str | None = self._get(f"/nodes/{self.node}/qemu/{vmid}/config").get("tags")
+        return tags
 
     def list_fenced(self) -> list[tuple[int, int]]:
         """Every guest on this node carrying a br0kr fence tag, as ``(vmid, lease_id)``
@@ -646,7 +647,8 @@ class Pve:
         body: dict[str, Any] = {"newid": new_vmid, "name": name, "full": 1 if full else 0}
         if storage and full:
             body["storage"] = storage
-        return self._post(f"/nodes/{self.node}/qemu/{template_vmid}/clone", body)
+        upid: str = self._post(f"/nodes/{self.node}/qemu/{template_vmid}/clone", body)
+        return upid
 
     def configure(self, vmid: int, config: dict[str, Any]) -> None:
         """Set guest config params (POST .../config) — the broker uses this on a clone to stamp the fence
@@ -1075,7 +1077,8 @@ class Pve:
         never lands regardless."""
         body = {"url": url, "content": content, "filename": filename,
                 "checksum": sha256, "checksum-algorithm": "sha256"}
-        return self._post(f"/nodes/{self.node}/storage/{storage}/download-url", body)
+        upid: str = self._post(f"/nodes/{self.node}/storage/{storage}/download-url", body)
+        return upid
 
     def build_template_vm(self, vmid: int, name: str, build_id: int, import_from: str, storage: str, *,
                           cores: int = 1, memory: int = 512, extra_config: dict[str, Any] | None = None,

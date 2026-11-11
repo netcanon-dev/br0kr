@@ -54,7 +54,11 @@ not a data API.
 - **`ruff format`** is adopted for greenfield repos (no giant reflow diff if you
   start formatted); an existing unformatted tree may decline it deliberately.
 - **`mypy`** runs over the engine package (gradual: start permissive, tighten over
-  time; silence missing third-party stubs per-module, not globally).
+  time; silence missing third-party stubs per-module, not globally). br0kr has
+  tightened to `disallow_untyped_defs` and `warn_return_any`: every def is
+  annotated, and a value read from JSON or a DB row is pinned to its declared type
+  where it enters (a typed local), so an `Any` can't leak out of a typed function.
+  `tests/unit/test_repo_hygiene.py` keeps both flags on.
 - **CI pins the linter version** (e.g. `ruff>=0.15,<0.16`) so a minor bump can't
   fail an unrelated PR, and invokes it config-free (`ruff check .`) — all rules
   live in `pyproject.toml`, so local and CI can't drift.

@@ -137,10 +137,11 @@ warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
-# Gradual adoption: start permissive, then tighten. Flip these to `true` once the
-# codebase is clean, or scope `strict` to new modules via a [[tool.mypy.overrides]].
+# The engine is fully annotated, so an unannotated def or an Any leaking out of a typed function is now an
+# error: a value read from JSON or a DB row is pinned to its declared type where it enters (a typed local).
 check_untyped_defs = true
-disallow_untyped_defs = false
+disallow_untyped_defs = true
+warn_return_any = true
 
 # Third-party libs without type stubs — silence the missing-import noise per lib
 # rather than globally, so a genuinely-missing first-party import still errors.

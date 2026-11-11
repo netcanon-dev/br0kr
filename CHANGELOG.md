@@ -339,6 +339,13 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **The operator build subsystem was un-runnable on any deployment: `BR0KR_BUILD_LIMIT` (and `BR0KR_BUILD_STALE_SECONDS`/`BR0KR_BUILD_CORES`/`BR0KR_BUILD_MEMORY_MB`) were read by `daemon.main()` but never passed through the daemon service in `docker-compose.yml`** — so setting them in `.env` was the silent no-op the `.env.example` header explicitly warns about, and template builds stayed disabled regardless. Wired all four into `docker-compose.yml` (`daemon.environment`, int defaults so an empty inject can't crash `int("")`); behaviour-neutral by default (`BUILD_LIMIT` still `0`). This also unblocks `rebuild_source` replication, which requires a BUILT (source-provenanced) template. `.env.example` build block corrected to match.
 
 ### Changed
+- **mypy now rejects unannotated defs and `Any` leaking out of a typed function (`pyproject.toml`).** Why: the
+  engine was already fully annotated, but the config still said `disallow_untyped_defs = false` "until the
+  codebase is clean", so nothing stopped a regression. A JSON or DB value returned straight from a function
+  declared to return `str` or `datetime` hid from the checker exactly where a renamed key or a stray `None`
+  would. The flag flip surfaced six such returns (the PVE client's task ids and tags, the lease heartbeat's
+  expiry, the redacting log formatter); each is now pinned to its declared type in a typed local, with no
+  runtime change. `tests/unit/test_repo_hygiene.py` keeps both flags on (review CODE-03, the type-checker half).
 - **The dashboard polls only while it can use the answer (`br0kr/dashboard_page.py`).** Why: every 5 seconds an
   unlocked page sent nine reads, each a fresh ledger connection, forever, including from background tabs and
   with no backoff. A locked page on a read-gated server drew three 401s per poll, each a denied audit row, so an

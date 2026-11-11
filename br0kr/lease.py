@@ -411,8 +411,9 @@ def heartbeat(conn: psycopg.Connection[Any], lease_id: int) -> datetime | None:
         # not WARNING. The agent reacts to the None return, not to this line.
         log.info("heartbeat ignored — lease no longer live", extra={"lease_id": lease_id})
         return None
-    log.debug("lease renewed", extra={"lease_id": lease_id, "expires_at": row[0]})
-    return row[0]
+    expires_at: datetime = row[0]
+    log.debug("lease renewed", extra={"lease_id": lease_id, "expires_at": expires_at})
+    return expires_at
 
 
 def release(conn: psycopg.Connection[Any], lease_id: int, reason: str = "completed") -> bool:

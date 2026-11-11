@@ -283,10 +283,12 @@ class _RedactingTextFormatter(logging.Formatter):
     (the message itself is already redacted on the record)."""
 
     def formatException(self, ei: Any) -> str:
-        return redact_text(super().formatException(ei))
+        out: str = redact_text(super().formatException(ei))   # a str in, a str out
+        return out
 
     def formatStack(self, stack_info: str) -> str:
-        return redact_text(super().formatStack(stack_info))
+        out: str = redact_text(super().formatStack(stack_info))
+        return out
 
 
 # ===========================================================================

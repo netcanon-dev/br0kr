@@ -7,13 +7,15 @@ way the backtick-parity test in tests/unit/test_dashboard.py backstops check_das
 They guard the *policy*, not the bytes; the checker guards the bytes.
 
 The CI harness tests at the bottom guard the wiring of the real-Postgres harness job the same way:
-pure file reads, so they run everywhere, while the job itself is the only place the harnesses run."""
+pure file reads, so they run everywhere, while the job itself is the only place the harnesses run.
+The mypy test pins the strict flags the engine has earned, so they cannot quietly flip back."""
 from __future__ import annotations
 
 import importlib.util
 import io
 import re
 import tarfile
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -189,3 +191,13 @@ def test_workflows_verify_what_they_download():
             assert version and digest, f"{path.name} pins the gitleaks version or hash without the other"
             pins.add((version.group(1), digest.group(1)))
     assert len(pins) == 1, f"the workflows disagree on the gitleaks pin: {sorted(pins)}"
+
+
+def test_mypy_rejects_untyped_defs_and_any_returns():
+    """pyproject.toml keeps mypy's `disallow_untyped_defs` and `warn_return_any` on over the engine (`files =
+    ["br0kr"]`), which the gate's types step runs. Guards a quiet flip back to the permissive setting: the
+    engine is fully annotated, and an Any leaking out of a typed function (a JSON or DB value returned unpinned)
+    is how a renamed key or a stray None slips past the type checker (review CODE-03)."""
+    cfg = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["mypy"]
+    assert cfg["disallow_untyped_defs"] is True and cfg["warn_return_any"] is True
+    assert cfg["files"] == ["br0kr"]
