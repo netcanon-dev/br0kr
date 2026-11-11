@@ -3,6 +3,7 @@
 #   uv pip compile requirements.txt --universal --generate-hashes --python-version 3.11 -o requirements.lock.txt
 # tests/unit/test_dependency_lock.py fails while the two disagree.
 psycopg[binary]>=3.2
+psycopg-pool>=3.2   # in-process ledger connection pools for the gateway and dashboard (review PERF-02)
 requests>=2.32
 # PINNED EXACTLY, not `>=`. mcp 2.0.0 REMOVED `mcp.server.fastmcp`, which br0kr/mcp_server.py imports,
 # so the previous `mcp>=1.2` silently resolved to 2.0.0 the moment it was published and produced an image

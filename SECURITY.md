@@ -949,12 +949,14 @@ not evidence that what we ship is; (b) **`.env`/`.env.standby` are plaintext on
   now prefix-quotes any cell starting with a spreadsheet formula trigger (`=`/`+`/`-`/`@`/TAB/CR) via
   `_csv_safe`, neutralizing a planted macro that would execute when an operator opens the file (CWE-1236);
   covering-check = `test_audit.py`'s formula-injection assertion.
-  Each `/metrics`, `/readyz`, gateway `/healthz`, and dashboard `/api/*` hit opens a short-lived ledger
-  connection (the gateway already does this per tool call), so an unbounded unauthenticated scrape/refresh
-  storm could exhaust the ledger's connection pool — a further reason to keep the surface
-  network-restricted. Set `BR0KR_HEALTH_PORT=0` to disable the daemon surface entirely (under the
-  bundled Compose stack the daemon healthcheck reads the port at runtime, so `0` reports healthy rather
-  than wedging the container);
+  Each `/metrics`, `/readyz` and gateway `/healthz` hit opens a short-lived ledger connection, so an
+  unbounded unauthenticated scrape storm could exhaust the ledger's connections — a further reason to keep
+  the surface network-restricted. The gateway's tool calls and token lookups and the dashboard's `/api/*`
+  reads and writes instead borrow from bounded in-process pools (`db.pool`, at most 8 connections each, review
+  PERF-02), so a storm there queues for a connection rather than opening more. Still per request: the
+  dashboard's named-operator lookup and each denial record (fast-fail, throttled). Set `BR0KR_HEALTH_PORT=0`
+  to disable the daemon surface entirely (under the bundled Compose stack the daemon healthcheck reads the
+  port at runtime, so `0` reports healthy rather than wedging the container);
   (d) **no auto-failover** — the starter does not promote a standby (the clean-promote *behaviour* is
   proven by `scripts/harness_ha_failover.py`). What closes these is replacing the bundled ledger with an
   operator-run HA Postgres and following §8.

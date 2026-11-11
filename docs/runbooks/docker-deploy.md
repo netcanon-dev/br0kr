@@ -133,7 +133,7 @@ cordoned nodes, a pending fleet reload, queued requests. Each item jumps to its 
 is well. A failed build or replication stays listed until you dismiss it (×) in that browser; a newer failure
 brings it back. Your own cancels and force-fails are not listed. The Images tab's badge counts those failures, and the Tenancy tab's badge counts queued requests.
 
-**The page polls only while it can use the answer.** Every read opens a ledger connection, so:
+**The page polls only while it can use the answer.** Every read takes one of the dashboard's ledger connections, so:
 - a hidden browser tab sends nothing until it is shown again;
 - a failed refresh backs off (10 s, 20 s, 40 s, then once a minute) and the header says when the next try is;
 - the operator panels refresh every third poll (15 s), and only on the open tab.
@@ -191,8 +191,15 @@ refuse `latest` and a name with no tag.
   ([day2-operations.md](day2-operations.md#re-clone-a-dead-standby)).
 - **The broker re-homes itself.** `PGCONN` lists *both* hosts with `target_session_attrs=read-write`,
   so libpq connects to whichever is currently the **primary**. Every broker process opens its ledger
-  connection through `br0kr/db.py` (`connect_with_retry`), which rides through the brief unreachable
-  window during a failover with bounded backoff — no code or config change to fail over.
+  connections through `br0kr/db.py`: the daemon through `connect_with_retry`, which rides through the brief
+  unreachable window during a failover with bounded backoff; the gateway and dashboard from bounded
+  in-process pools (`db.pool`) that check a connection before lending it, so one that died in the failover
+  is replaced and the new one, too, goes to the primary — no code or config change to fail over. A borrow
+  waits at most 15 s, and a pooled connection gives up on an unreachable host after 4 s and tries the next. Each
+  gateway holds at most 8 tool connections and 8 token-lookup connections, plus one per `wait_for_lease`
+  in flight (8 at most); the dashboard at most 8; well inside Postgres's default `max_connections` (100).
+  Health probes, denial records and the dashboard's named-operator lookup still open short-lived connections
+  of their own.
 - **Single-writer is load-bearing under HA.** The reconciler's leader lock is a *session* advisory
   lock, which Postgres does **not** replicate — so this is safe only with **exactly one primary**. A
   split-brain (two primaries) would let two daemons each hold "the" lock and double-allocate. Keeping

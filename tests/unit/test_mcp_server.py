@@ -183,9 +183,17 @@ def test_presented_secret_falls_back_to_env_on_stdio(monkeypatch):
     assert mcp_server._presented_secret(_ctx_stdio()) is None   # neither header nor env → unauthenticated
 
 
+class _FakePool:
+    """Stands in for a gateway pool: `connection()` lends a dummy connection for the `with` block."""
+
+    def connection(self):
+        import contextlib
+        return contextlib.nullcontext(SimpleNamespace(close=lambda: None))
+
+
 def _patch_resolve(monkeypatch, principal):
-    """Make _authorize's resolution return `principal` over a dummy (closeable) auth connection."""
-    monkeypatch.setattr(db, "connect_with_retry", lambda *a, **k: SimpleNamespace(close=lambda: None))
+    """Make _authorize's resolution return `principal` over a dummy auth connection from a fake pool."""
+    monkeypatch.setattr(mcp_server, "_pool", lambda autocommit=False: _FakePool())
     monkeypatch.setattr(auth, "resolve", lambda _c, _s: principal)
 
 
@@ -1294,7 +1302,7 @@ def test_authorize_answers_busy_without_a_ledger_connection_when_every_slot_is_t
     def no_ledger(*_a, **_k):
         raise AssertionError("the token lookup must not reach the ledger when no slot is free")
 
-    monkeypatch.setattr(mcp_server.db, "connect_with_retry", no_ledger)
+    monkeypatch.setattr(mcp_server, "_pool", no_ledger)
     with gate.slot():
         assert mcp_server._authorize(_ctx_with_header("Bearer junk"), "lease_status") == {"error": "busy"}
 
@@ -1573,7 +1581,7 @@ def test_a_metrics_port_that_cannot_be_bound_stops_the_gateway_with_a_message(mo
 
     def taken(*_a, **_k):
         raise OSError(98, "Address already in use")
-    monkeypatch.setattr(mcp_server.db, "connect_with_retry", lambda: _Conn())
+    monkeypatch.setattr(mcp_server, "_conn", lambda: __import__("contextlib").nullcontext(_Conn()))
     monkeypatch.setattr(mcp_server.db, "assert_read_committed", lambda _c: None)
     monkeypatch.setattr(mcp_server.migrate, "assert_schema", lambda _c, _s: None)
     monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
@@ -1603,7 +1611,7 @@ def test_main_starts_the_metrics_listener_only_for_an_http_transport(monkeypatch
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(mcp_server.db, "connect_with_retry", lambda: _Conn())
+    monkeypatch.setattr(mcp_server, "_conn", lambda: __import__("contextlib").nullcontext(_Conn()))
     monkeypatch.setattr(mcp_server.db, "assert_read_committed", lambda _c: None)
     monkeypatch.setattr(mcp_server.migrate, "assert_schema", lambda _c, _s: None)
     monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
@@ -1711,7 +1719,7 @@ def _run_wait(monkeypatch, statuses, *, token: int = 1, conns: list | None = Non
         return item
 
     monkeypatch.setattr(mcp_server, "_authorize", authorize)
-    monkeypatch.setattr(mcp_server, "_conn", conn)
+    monkeypatch.setattr(mcp_server, "_wait_conn", conn)
     monkeypatch.setattr(mcp_server, "_owned_status", owned_status)
     monkeypatch.setattr(mcp_server, "_clock", lambda: clock[0])
     monkeypatch.setattr(mcp_server, "_sleep", sleep)
@@ -1805,7 +1813,7 @@ def test_a_cancelled_wait_closes_its_connection_and_frees_its_slot(monkeypatch):
         await anyio.sleep(30)
 
     monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _verb: auth.Principal("projA", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: conns.append(_WaitConn()) or conns[-1])
+    monkeypatch.setattr(mcp_server, "_wait_conn", lambda: conns.append(_WaitConn()) or conns[-1])
     monkeypatch.setattr(mcp_server, "_owned_status", lambda _c, _lid, _p: _status("PENDING"))
     monkeypatch.setattr(mcp_server, "_sleep", real_sleep)
     monkeypatch.setattr(mcp_server, "_wait_threads", {})
@@ -1835,7 +1843,7 @@ def test_a_wait_rides_one_lost_connection_and_frees_its_slot_on_errors(monkeypat
     def no_ledger():
         raise psycopg.OperationalError("connection refused")
 
-    monkeypatch.setattr(mcp_server, "_conn", no_ledger)
+    monkeypatch.setattr(mcp_server, "_wait_conn", no_ledger)
     import asyncio
     with pytest.raises(psycopg.OperationalError):
         asyncio.run(mcp_server.wait_for_lease(SimpleNamespace(), 7))
@@ -1909,3 +1917,58 @@ def test_wait_for_lease_is_async_so_a_wait_does_not_stall_the_gateway():
     tool = {t.name: t for t in mcp_server.mcp._tool_manager.list_tools()}["wait_for_lease"]
     assert tool.is_async and inspect.iscoroutinefunction(tool.fn)
     assert tool.parameters["properties"]["until_state"]["enum"] == list(gateway.WAIT_STATES)
+
+
+def test_the_gateway_borrows_from_two_pools_each_opened_once(monkeypatch):
+    """Tool verbs borrow from a non-autocommit pool and token lookups from an autocommit one, each opened on first
+    use and then reused, named in pg_stat_activity; _conn() lends from the verbs' pool for a `with` block; closing
+    them at exit is registered once, when the first opens. Guards a pool per call (no reuse, the connection churn
+    PERF-02 removes), the token lookup sharing the verbs' connections (auth.resolve needs autocommit; admission
+    refuses it), and pools left open at exit (the ledger sees each restart drop the gateway's sessions)."""
+    made: list[dict] = []
+    registered: list[object] = []
+    monkeypatch.setattr(mcp_server.atexit, "register", registered.append)
+
+    def fake_pool(**kw):
+        made.append(kw)
+        return SimpleNamespace(connection=lambda: ("borrowed", kw["autocommit"]))
+
+    monkeypatch.setattr(mcp_server, "_pools", {})
+    monkeypatch.setattr(mcp_server.db, "pool", fake_pool)
+    assert mcp_server._pool() is mcp_server._pool()
+    assert mcp_server._pool(autocommit=True) is not mcp_server._pool()
+    assert mcp_server._conn() == ("borrowed", False)
+    assert [(m["autocommit"], m["application_name"], m["max_size"]) for m in made] == [
+        (False, "br0kr-gateway", mcp_server.GATEWAY_POOL_MAX), (True, "br0kr-gateway-auth", mcp_server.GATEWAY_POOL_MAX)]
+    assert mcp_server._wait_conn is mcp_server.db.connect_with_retry   # a minute-long wait never takes a pool slot
+    assert registered == [mcp_server._close_pools]
+
+
+def test_a_boot_that_cannot_borrow_names_the_real_error_and_pools_close_at_exit(monkeypatch):
+    """When the boot check cannot borrow a connection (PoolTimeout), main() makes one direct connect so the boot log
+    carries the real reason (a wrong password, a refused host) instead of the pool's timeout. And the pools close
+    at exit: _close_pools closes each and forgets them. Guards a misconfigured DSN surfacing only as "couldn't get
+    a connection", and every restart dropping the gateway's sessions without ending them."""
+    import psycopg
+    from psycopg_pool import PoolTimeout
+
+    def no_pool():
+        raise PoolTimeout("couldn't get a connection after 15.00 sec")
+
+    def direct(*_a, **_k):
+        raise psycopg.OperationalError('password authentication failed for user "broker"')
+
+    monkeypatch.setattr(mcp_server, "_conn", no_pool)
+    monkeypatch.setattr(mcp_server.db, "connect", direct)
+    monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda transport: pytest.fail("must not serve"))
+    monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "stdio")
+    with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+        mcp_server.main()
+
+    closed: list[str] = []
+    pools = {False: SimpleNamespace(close=lambda: closed.append("verbs")),
+             True: SimpleNamespace(close=lambda: closed.append("auth"))}
+    monkeypatch.setattr(mcp_server, "_pools", pools)
+    mcp_server._close_pools()
+    assert sorted(closed) == ["auth", "verbs"] and pools == {}

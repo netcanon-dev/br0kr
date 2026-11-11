@@ -95,6 +95,7 @@ import hmac
 import json
 import logging
 import os
+import signal
 import threading
 import urllib.parse
 from collections.abc import Callable
@@ -1113,23 +1114,34 @@ _SECURITY_HEADERS: dict[str, str] = {
 }
 
 
+def _close(conn: psycopg.Connection[Any]) -> None:
+    conn.close()
+
+
 def make_handler(
     connect: Callable[[], psycopg.Connection[Any]],
     health_connect: Callable[[], psycopg.Connection[Any]] | None = None,
     token: str = "",
     read_token: str = "",
+    release: Callable[[psycopg.Connection[Any]], None] = _close,
 ) -> type[BaseHTTPRequestHandler]:
-    """Build the request handler over an injected `connect` (a fresh ledger connection per /api read), an
+    """Build the request handler over an injected `connect` (a ledger connection per /api request, handed back
+    through `release`: closed by default, returned to its pool when the dashboard runs one), an
     optional `health_connect` for the /healthz probe (defaults to `connect`), the operator `token`
     that gates the POST actions ("" = writes disabled, the read-only default), and the optional `read_token`
     that gates the inventory reads ("" = reads open, the backward-compatible default; when set, an /api/*
     read requires that bearer OR the operator token — see `read_authorize`). connect/health_connect are
-    split so the page reads can RIDE OUT a blip (db.connect_with_retry) while the health probe stays FAST
-    and NON-retrying (db.connect) — a liveness probe must answer promptly, not block while an outage
-    settles (the same doctrine as mcp_server._ledger_reachable). Injected so tests drive the real socket
-    with a fake/raising connect and monkeypatched inventory/admin/gateway — no DB. Every request opens,
-    reads, and CLOSES its own connection; a read commits its own txn, a write is committed by `_action`."""
+    split so the page reads can wait out a blip (a pool borrow, or db.connect_with_retry) while the health
+    probe stays FAST and NON-retrying (db.connect) — a liveness probe must answer promptly, not block while an
+    outage settles (the same doctrine as mcp_server._ledger_reachable). The probe's connection is closed when
+    `health_connect` was given, and goes back through `release` when it came from `connect`. Give a separate
+    `health_connect` whenever `connect` borrows from a pool: the denial recorders close the connections they
+    open. Injected so tests drive the real socket with a fake/raising connect and monkeypatched
+    inventory/admin/gateway — no DB. A read commits its own txn, a write is committed by `_action`."""
     probe: Callable[[], psycopg.Connection[Any]] = health_connect or connect   # /healthz's fast probe
+    # The probe's own connection is closed; one borrowed through `connect` goes back the way it came. Decided by
+    # whether a probe connector was given, not by comparing callables (two `pool.getconn` reads are not `is`).
+    probe_release: Callable[[psycopg.Connection[Any]], None] = _close if health_connect else release
     # One coalescing denial recorder for this server (0025): every rejected write/gated-read is best-effort
     # logged as an audit `outcome='denied'` row, throttled per (surface, ip, action, reason) so a brute-forcer
     # can't flood the trail. Uses `probe` (the FAST, non-retrying connector) so a denial write never stalls the
@@ -1268,7 +1280,7 @@ def make_handler(
                                            tuple[bool, str | None]] | None = None,
                     result_refused: Callable[[dict[str, Any], dict[str, Any]],
                                              tuple[bool, str | None]] | None = None) -> None:
-            """Run one operator WRITE on a fresh connection, COMMIT it, and return the result as JSON. A
+            """Run one operator WRITE on a borrowed connection, COMMIT it, and return the result as JSON. A
             connect failure or a write error is a 503 with the txn ROLLED BACK — the dashboard never
             half-applies a mutation or crashes the serving thread. The commit here is load-bearing for the
             QUOTA verb (admin.set_project_quota deliberately does NOT commit — the caller owns its txn) and
@@ -1323,7 +1335,7 @@ def make_handler(
                 self._json(200, data)
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    release(conn)
 
         def _resolve_named_operator(self, secret: str) -> tuple[int, str] | None:
             """Best-effort resolve a bearer to a LIVE named dashboard operator (0026), on a fast AUTOCOMMIT
@@ -1398,7 +1410,7 @@ def make_handler(
                 self._json(200, data)
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    release(conn)
 
         def _gated(self, what: str, reader: Callable[[psycopg.Connection[Any]], dict[str, Any]]) -> None:
             """A generic OPERATOR-GATED read (phase A4.1: the download source allowlist + the build-job
@@ -1427,7 +1439,7 @@ def make_handler(
                 self._json(200, data)
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    release(conn)
 
         def _audit_export(self) -> None:
             """Operator-gated CSV/JSON download of the FILTERED audit trail, capped at audit.EXPORT_CAP rows.
@@ -1465,7 +1477,7 @@ def make_handler(
                 return
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    release(conn)
             truncated = len(rows) > audit.EXPORT_CAP
             if truncated:
                 rows = rows[:audit.EXPORT_CAP]
@@ -1512,7 +1524,7 @@ def make_handler(
                 self._json(200, data)
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    release(conn)
 
         def _health(self) -> None:
             """A fast, NON-retrying ledger reachability probe for a load balancer / Docker healthcheck —
@@ -1532,10 +1544,10 @@ def make_handler(
                 self._json(503, {"status": "unhealthy", "reason": "ledger_unreachable"})
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    probe_release(conn)
 
         def _api(self, fn: Callable[[psycopg.Connection[Any]], dict[str, Any]]) -> None:
-            """Run one inventory read on a fresh connection and return it as JSON. A connect failure or a
+            """Run one inventory read on a borrowed connection and return it as JSON. A connect failure or a
             query error is a 503 (the ledger is momentarily away / the read failed) rather than a 500 — a
             read-only dashboard degrades to 'try again', it never crashes the server thread."""
             try:
@@ -1553,7 +1565,7 @@ def make_handler(
                 self._json(200, data)
             finally:
                 with contextlib.suppress(Exception):
-                    conn.close()
+                    release(conn)
 
         def _lease_status(self) -> None:
             """Per-lease status for the create-VM wizard's live poll (and the lease-detail view): the SAME
@@ -1626,13 +1638,13 @@ def make_handler(
 def _build(
     host: str, port: int, connect: Callable[[], psycopg.Connection[Any]],
     health_connect: Callable[[], psycopg.Connection[Any]] | None = None, token: str = "",
-    read_token: str = "",
+    read_token: str = "", release: Callable[[psycopg.Connection[Any]], None] = _close,
 ) -> ThreadingHTTPServer:
     """Bind the server (not yet serving). `ThreadingHTTPServer` + `daemon_threads` so each request reads
     on its own thread/connection and a slow read can't block shutdown or another request; 0.0.0.0 to be
     reachable outside a container. `token` gates the POST actions ("" = read-only); `read_token` gates the
     inventory reads ("" = reads open). Raises if the port can't be bound — a misconfig fails loudly."""
-    httpd = ThreadingHTTPServer((host, port), make_handler(connect, health_connect, token, read_token))
+    httpd = ThreadingHTTPServer((host, port), make_handler(connect, health_connect, token, read_token, release))
     httpd.daemon_threads = True
     return httpd
 
@@ -1640,14 +1652,14 @@ def _build(
 def start_dashboard_server(
     host: str, port: int, *, connect: Callable[[], psycopg.Connection[Any]],
     health_connect: Callable[[], psycopg.Connection[Any]] | None = None, token: str = "",
-    read_token: str = "",
+    read_token: str = "", release: Callable[[psycopg.Connection[Any]], None] = _close,
 ) -> ThreadingHTTPServer:
     """Start the dashboard on a BACKGROUND daemon thread and return it (the caller `shutdown()`s it) — for
     an embedding process / the integration test that drives the real socket. `main()` serves in the
     foreground instead. `health_connect` (the fast /healthz probe) defaults to `connect`; `token` gates
     the POST actions ("" = read-only); `read_token` gates the inventory reads ("" = reads open). Binds
     before returning, so a port clash surfaces here."""
-    httpd = _build(host, port, connect, health_connect, token, read_token)
+    httpd = _build(host, port, connect, health_connect, token, read_token, release)
     thread = threading.Thread(target=httpd.serve_forever, name="br0kr-dashboard", daemon=True)
     thread.start()
     log.info("dashboard listening on %s:%d (read-only — keep on a trusted network)", host, port,
@@ -1655,12 +1667,32 @@ def start_dashboard_server(
     return httpd
 
 
+DASHBOARD_POOL_MAX = 8
+
+
+def _return_to(pool: Any) -> Callable[[psycopg.Connection[Any]], None]:
+    """The `release` for connections borrowed from `pool`: end the transaction a read leaves open (a no-op after a
+    commit), then hand the connection back. A rollback that fails (a connection that died) still returns it: the
+    pool discards a broken connection rather than lending it again."""
+    def release(conn: psycopg.Connection[Any]) -> None:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        pool.putconn(conn)
+    return release
+
+
+def _stop_serving(_signum: int, _frame: Any) -> None:
+    """The SIGTERM handler: leave serve_forever the way Ctrl-C does, so main's cleanup (closing the pool) runs."""
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     """Run the dashboard in the foreground (`python -m br0kr.dashboard`). PGCONN must be set (the ledger
     DSN / secret — never a URL arg). Host/port from BR0KR_DASHBOARD_HOST (default 0.0.0.0) /
-    BR0KR_DASHBOARD_PORT (default 8051). Each /api read opens a fresh connection via db.connect_with_retry
-    (a brief ledger blip is ridden through rather than erroring the page); /healthz uses a fast,
-    non-retrying db.connect so the liveness probe answers promptly during an outage. BR0KR_DASHBOARD_TOKEN
+    BR0KR_DASHBOARD_PORT (default 8051). Each /api request borrows a connection from an in-process pool
+    (db.pool: a connection lost in a ledger blip is replaced when borrowed); /healthz uses a fast,
+    non-retrying db.connect so the liveness probe answers promptly during an outage. SIGTERM (`docker stop`)
+    stops it as Ctrl-C does, closing the pool's sessions. BR0KR_DASHBOARD_TOKEN
     (unset = read-only) enables the token-gated operator actions; BR0KR_DASHBOARD_READ_TOKEN (unset = reads
     open) requires a bearer on the inventory reads too. Logging goes through `logging_setup` so LOG_LEVEL /
     LOG_FORMAT are honored AND the `RedactionFilter` is attached (review S15 — a hardcoded basicConfig used to
@@ -1670,21 +1702,41 @@ def main() -> None:
     port = int(os.environ.get("BR0KR_DASHBOARD_PORT", "8051"))
     token = os.environ.get("BR0KR_DASHBOARD_TOKEN", "")
     read_token = os.environ.get("BR0KR_DASHBOARD_READ_TOKEN", "")
-    # Refuse to serve on a ledger older than this build (review ARCH-02); a boot-time blip is ridden through.
-    with contextlib.closing(db.connect_with_retry()) as c:
-        migrate.assert_schema(c, "dashboard")
-    httpd = _build(host, port, db.connect_with_retry, lambda: db.connect(autocommit=True), token, read_token)
-    log.info("dashboard listening on %s:%d (reads %s; actions %s — keep on a trusted network)",
-             host, port, "token-gated" if read_token else "open",
-             "ENABLED (token-gated)" if token else "disabled",
-             extra={"dashboard_host": host, "dashboard_port": port, "actions_enabled": bool(token),
-                    "read_auth_required": bool(read_token)})
+    from psycopg_pool import PoolTimeout  # here, not at the top: importing br0kr.dashboard must not need it
+
+    # Each /api request borrows a connection from an in-process pool and returns it, rolled back, when done
+    # (review PERF-02): the page polls several endpoints every few seconds per open tab, and a fresh connection is a
+    # backend process each. /healthz keeps its fast, non-pooled probe.
+    pool = db.pool(max_size=DASHBOARD_POOL_MAX, application_name="br0kr-dashboard")
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        # Refuse to serve on a ledger older than this build (review ARCH-02); a boot-time blip is ridden through.
+        try:
+            with pool.connection() as c:
+                migrate.assert_schema(c, "dashboard")
+        except PoolTimeout:
+            # The pool only says it got no connection; one direct connect raises the real reason (a wrong
+            # password, a refused or unknown host) for the operator reading the boot log.
+            with contextlib.closing(db.connect()):
+                pass
+            raise
+        httpd = _build(host, port, pool.getconn, lambda: db.connect(autocommit=True), token, read_token,
+                       _return_to(pool))
+        log.info("dashboard listening on %s:%d (reads %s; actions %s — keep on a trusted network)",
+                 host, port, "token-gated" if read_token else "open",
+                 "ENABLED (token-gated)" if token else "disabled",
+                 extra={"dashboard_host": host, "dashboard_port": port, "actions_enabled": bool(token),
+                        "read_auth_required": bool(read_token)})
+        # `docker stop` sends SIGTERM, and the dashboard is PID 1 in its container, where an unhandled SIGTERM is
+        # ignored until the kill after the grace period. Stop the way Ctrl-C does, so the pool closes below.
+        signal.signal(signal.SIGTERM, _stop_serving)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            log.info("dashboard stopping")
+        finally:
+            httpd.shutdown()
     finally:
-        httpd.shutdown()
+        pool.close()   # end the pool's sessions cleanly rather than dropping them
 
 
 if __name__ == "__main__":

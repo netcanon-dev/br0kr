@@ -392,3 +392,118 @@ def test_connect_preserves_dsn_and_env_options(monkeypatch):
     db.connect("host=ledger dbname=broker options='-c statement_timeout=5000'", options="-c lock_timeout=1000")
     opts3 = captured["kwargs"]["options"]
     assert "lock_timeout=1000" in opts3 and "statement_timeout" not in opts3
+
+
+def test_pool_carries_connects_policy_and_resets_the_autocommit_mode(monkeypatch):
+    """db.pool builds its connections with exactly connect()'s policy (the READ COMMITTED pin last in libpq
+    `options`, the keepalives) plus a client-side tcp_user_timeout, a shorter per-host connect_timeout, the pool's
+    autocommit mode and application_name; checks each one when it is borrowed (check_writable), opens one up front
+    and up to max_size on demand, and lets a borrower wait longer than a dead connection's check plus one dead
+    host's connect; its reset puts a returned connection back in the pool's autocommit mode. Guards a pooled
+    connection reaching admission without the isolation pin (the double-allocation race), a dead connection being
+    lent after a failover, a black-holed ledger hanging a borrow for the OS TCP timeout, the first borrow after a
+    host goes dark timing out although the next host is up, and one borrower's autocommit flip reaching the next
+    (admission refuses an autocommit connection)."""
+    from types import SimpleNamespace
+
+    import psycopg_pool
+
+    seen: dict = {}
+
+    class _Recorder(psycopg_pool.ConnectionPool):
+        def __init__(self, conninfo, **kw):   # record, open nothing
+            seen.update(kw, conninfo=conninfo)
+
+    monkeypatch.setenv("PGCONN", "host=ledger dbname=broker")
+    monkeypatch.setattr(db, "_pool_class", lambda: _Recorder)
+    db.pool(max_size=4, application_name="br0kr-test")
+    kwargs = seen["kwargs"]
+    assert seen["conninfo"] == "host=ledger dbname=broker"
+    assert kwargs["options"].endswith(r"-c default_transaction_isolation=read\ committed")
+    assert kwargs["autocommit"] is False and kwargs["application_name"] == "br0kr-test"
+    assert {k: kwargs[k] for k in db.KEEPALIVE if k != "connect_timeout"} == {
+        k: v for k, v in db.KEEPALIVE.items() if k != "connect_timeout"}
+    assert kwargs["connect_timeout"] == db.POOL_CONNECT_TIMEOUT_S < db.KEEPALIVE["connect_timeout"]
+    assert (seen["min_size"], seen["max_size"], seen["timeout"]) == (1, 4, db.POOL_BORROW_TIMEOUT_S)
+    # The wait must outlast a dead connection's check plus one dead host's connect, or the first borrow after a
+    # host is black-holed fails although the next host in PGCONN is up.
+    assert int(db.POOL_TCP_USER_TIMEOUT_MS) / 1000 + db.POOL_CONNECT_TIMEOUT_S < db.POOL_BORROW_TIMEOUT_S
+    assert kwargs["tcp_user_timeout"] == db.POOL_TCP_USER_TIMEOUT_MS
+    assert seen["check"] is db.check_writable
+    flipped = SimpleNamespace(autocommit=True)
+    seen["reset"](flipped)
+    assert flipped.autocommit is False
+    db.pool(autocommit=True)
+    kept = SimpleNamespace(autocommit=True)
+    seen["reset"](kept)
+    assert kept.autocommit is True and seen["kwargs"]["autocommit"] is True
+
+
+def test_check_writable_refuses_a_read_only_server(monkeypatch):
+    """The borrow-time check runs the pool's own liveness check, then closes and refuses a session whose server
+    reports in_hot_standby or default_transaction_read_only on (both reported by the server on change, so no extra
+    query). Guards a pool lending connections to a primary that was demoted or fenced read-only but kept its
+    sessions, and a refused session left open: psycopg_pool discards only a closed connection, so it would put the
+    live one back and lend it again, and every borrow would spin until PoolTimeout instead of reconnecting to the
+    new primary (review PERF-02 round 2, reproduced against the real pool; harness_gateway checks it on Postgres)."""
+    from types import SimpleNamespace
+
+    checked: list[object] = []
+
+    class _Pool:
+        @staticmethod
+        def check_connection(conn) -> None:
+            checked.append(conn)
+
+    monkeypatch.setattr(db, "_pool_class", lambda: _Pool)
+
+    closed: list[object] = []
+
+    def conn(**status):
+        c = SimpleNamespace(info=SimpleNamespace(parameter_status=lambda name: status.get(name, "off")))
+        c.close = lambda: closed.append(c)
+        return c
+
+    ok = conn()
+    db.check_writable(ok)
+    assert checked == [ok] and closed == []
+    for flag in ("in_hot_standby", "default_transaction_read_only"):
+        refused = conn(**{flag: "on"})
+        with pytest.raises(psycopg.OperationalError, match="read-only"):
+            db.check_writable(refused)
+        assert closed[-1] is refused   # the pool discards only a closed connection
+
+
+def test_importing_db_does_not_need_the_pool_library():
+    """`import br0kr.db` (and so br0kr.migrate, the daemon and most harnesses) loads without importing psycopg_pool;
+    only db.pool imports it. Guards the standalone harness wrappers, which install psycopg alone, dying with
+    ModuleNotFoundError before their first check."""
+    import subprocess
+    import sys
+
+    probe = "import sys, br0kr.db, br0kr.migrate; print('psycopg_pool' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
+
+
+def test_the_pool_logger_is_quietened_with_the_other_noisy_libraries():
+    """configure_logging pins psycopg.pool at WARNING, as it does urllib3 and asyncio. Guards INFO logs filling
+    with the pool's own lines (it logs connections it opens, lends and takes back), burying the broker's."""
+    import io
+    import logging
+
+    from br0kr import logging_setup
+
+    root, pool_log = logging.getLogger(), logging.getLogger("psycopg.pool")
+    saved_handlers, saved_level, saved_pool_level = list(root.handlers), root.level, pool_log.level
+    try:
+        pool_log.setLevel(logging.NOTSET)
+        logging_setup.configure_logging(level=logging.INFO, json_output=False, stream=io.StringIO())
+        assert pool_log.level == logging.WARNING
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+        pool_log.setLevel(saved_pool_level)

@@ -341,7 +341,7 @@ _PLAIN_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 # Third-party loggers pinned to WARNING so INFO stays signal (sec 3).
 # TUNE: add your noisy dependencies (br0kr e.g.: "urllib3", "requests").
-_NOISY_LOGGERS = ("urllib3", "requests", "asyncio")
+_NOISY_LOGGERS = ("urllib3", "requests", "asyncio", "psycopg.pool")   # the pool logs every borrow at INFO
 
 
 def configure_logging(

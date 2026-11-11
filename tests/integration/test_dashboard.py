@@ -1164,3 +1164,132 @@ def test_force_fail_replication_action_settles_unconditionally_after_commit(monk
                                                                          "reason": "already_terminal"})
     dashboard._force_fail_replication_action(_Conn(), replication_id=7, reason=None)
     assert order == ["force", "commit", "settle"]   # settle repairs even the no-op force
+
+
+def test_a_request_hands_its_connection_back_through_release(monkeypatch):
+    """With a pool's `release` injected, a request returns its connection through it instead of closing it, after
+    the read as after a failed one; `_return_to` rolls the connection back before putting it in the pool, and
+    still puts it back when the rollback fails. Guards the pooled dashboard closing every connection (no reuse) or
+    returning one with a read's transaction still open."""
+    released: list[object] = []
+    conn = _FakeConn()
+    monkeypatch.setattr(inventory, "list_nodes", lambda _c: [])
+    httpd = dashboard.start_dashboard_server("127.0.0.1", 0, connect=lambda: conn, release=released.append)
+    try:
+        port = httpd.server_address[1]
+        assert _get(port, "/api/nodes")[0] == 200
+        monkeypatch.setattr(inventory, "list_nodes", lambda _c: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert _get(port, "/api/nodes")[0] == 503
+    finally:
+        httpd.shutdown()
+    assert released == [conn, conn]
+
+    calls: list[str] = []
+
+    class _Pool:
+        def putconn(self, c):
+            calls.append("putconn")
+
+    class _Conn:
+        def __init__(self, fails: bool) -> None:
+            self.fails = fails
+
+        def rollback(self):
+            calls.append("rollback")
+            if self.fails:
+                raise RuntimeError("connection is closed")
+
+    release = dashboard._return_to(_Pool())
+    release(_Conn(fails=False))
+    release(_Conn(fails=True))
+    assert calls == ["rollback", "putconn", "rollback", "putconn"]
+
+
+def test_healthz_closes_its_own_probe_connection_and_never_pools_it():
+    """With a separate probe connector (the pooled dashboard's case), /healthz closes the probe connection itself
+    and never hands it to the pool's `release`; without one, the probe's connection came from `connect` and goes
+    back through `release`. Guards the probe connection being passed to the pool, which refuses a connection it
+    did not lend, so the probe's backend was never closed, once per healthcheck; and a borrowed probe connection
+    being closed instead of returned, one pool slot lost per healthcheck."""
+    released: list[object] = []
+    closed: list[int] = []
+
+    class _Probe(_FakeConn):
+        def close(self) -> None:
+            closed.append(1)
+
+    httpd = dashboard.start_dashboard_server("127.0.0.1", 0, connect=lambda: _FakeConn(),
+                                             health_connect=lambda: _Probe(), release=released.append)
+    try:
+        assert _get(httpd.server_address[1], "/healthz")[0] == 200
+    finally:
+        httpd.shutdown()
+    assert closed == [1] and released == []
+
+    borrowed = _Probe()
+    httpd = dashboard.start_dashboard_server("127.0.0.1", 0, connect=lambda: borrowed, release=released.append)
+    try:
+        assert _get(httpd.server_address[1], "/healthz")[0] == 200
+    finally:
+        httpd.shutdown()
+    assert released == [borrowed] and closed == [1]
+
+
+def test_main_closes_its_pool_on_sigterm_and_names_a_boot_error(monkeypatch):
+    """main() serves until SIGTERM (what `docker stop` sends), then stops the server and closes its ledger pool.
+    When the boot check cannot borrow a connection (PoolTimeout), one direct connect raises the real reason, and
+    the pool is still closed. Guards the dashboard, PID 1 in its container, ignoring SIGTERM until it is killed,
+    so its pooled sessions are dropped on every deploy; and a wrong password surfacing only as the pool's
+    timeout."""
+    import signal
+
+    import psycopg
+    from psycopg_pool import PoolTimeout
+
+    events: list[str] = []
+
+    class _Pool:
+        def __init__(self, reachable: bool) -> None:
+            self.reachable = reachable
+
+        def connection(self):
+            if not self.reachable:
+                raise PoolTimeout("couldn't get a connection after 15.00 sec")
+            return contextlib.nullcontext(object())
+
+        def getconn(self):
+            return object()
+
+        def putconn(self, conn) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("pool closed")
+
+    class _Httpd:
+        def serve_forever(self) -> None:
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)   # what `docker stop` delivers
+
+        def shutdown(self) -> None:
+            events.append("server stopped")
+
+    def direct(*_a, **_k):
+        raise psycopg.OperationalError('password authentication failed for user "broker"')
+
+    monkeypatch.setattr(dashboard.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(dashboard.migrate, "assert_schema", lambda c, who: None)
+    monkeypatch.setattr(dashboard, "_build", lambda *_a: _Httpd())
+    monkeypatch.setattr(dashboard.db, "connect", direct)
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        monkeypatch.setattr(dashboard.db, "pool", lambda **_k: _Pool(reachable=True))
+        dashboard.main()
+        assert events == ["server stopped", "pool closed"]
+
+        events.clear()
+        monkeypatch.setattr(dashboard.db, "pool", lambda **_k: _Pool(reachable=False))
+        with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+            dashboard.main()
+        assert events == ["pool closed"]
+    finally:
+        signal.signal(signal.SIGTERM, previous)

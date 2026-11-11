@@ -475,6 +475,10 @@ psycopg-binary==3.3.8 ; implementation_name != 'pypy' \
     --hash=sha256:fc9b9922899a3ca6193fd1d96920329c10acb72d3fad0dbc87b1ecdd8a791c14 \
     --hash=sha256:fe26e72b87ca280e538f4f78d1a956df0ae6ed51aab73ccc4c1dcf6f25256438
     # via psycopg
+psycopg-pool==3.3.3 \
+    --hash=sha256:9b9cd6a4fcec47a410f7e82d408540e7f77b478509e91b44c1a5457a13e5ff37 \
+    --hash=sha256:df87b5d9d0ad7db37f6cdad4fa8ce113d250f5997f6db38e9a99192fb67f9e1d
+    # via -r requirements.txt
 pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' \
     --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e \
     --hash=sha256:f03387877eab82ce01bbdfd0ba7252ee55a90b1c708d5129e2ce915475cf1db6
@@ -825,6 +829,7 @@ typing-extensions==4.16.0 \
     #   anyio
     #   mcp
     #   psycopg
+    #   psycopg-pool
     #   pydantic
     #   pydantic-core
     #   pydantic-settings

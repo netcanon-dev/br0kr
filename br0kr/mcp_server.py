@@ -54,6 +54,7 @@ accurate and task-focused.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import functools
 import inspect
@@ -62,12 +63,13 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import closing
+from contextlib import AbstractContextManager, closing
 from typing import Any, Literal, ParamSpec, cast
 
 import anyio
 import psycopg
 from mcp.server.fastmcp import Context, FastMCP
+from psycopg_pool import PoolTimeout
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -132,13 +134,45 @@ mcp = FastMCP("br0kr", host=os.environ.get("FASTMCP_HOST") or "127.0.0.1",
               port=int(os.environ.get("FASTMCP_PORT") or "8000"))
 
 
-def _conn() -> psycopg.Connection[Any]:
-    """A fresh DB connection per tool call (READ COMMITTED). PGCONN must be set in the
-    server's environment — it is the secret, never a tool argument. Routed through
-    `br0kr.db` so a momentarily-unreachable ledger (a failover/restart) is ridden through
-    with bounded retry instead of hard-failing the agent's tool call; a misconfigured DSN
-    still fails fast."""
-    return db.connect_with_retry()
+# The gateway's ledger connections come from two in-process pools (review PERF-02): one for the tool verbs (never
+# autocommit: admission needs a transaction) and one for the token lookups (autocommit: auth.resolve's contract), each
+# opened lazily on first use. A connection setup is 5-20 ms and a backend process; borrowing one is a check round trip.
+# The fast-fail denial connector and wait_for_lease's long-held connection stay outside the pools.
+GATEWAY_POOL_MAX = 8
+_pools: dict[bool, Any] = {}
+_pools_lock = threading.Lock()
+
+
+def _pool(autocommit: bool = False) -> Any:
+    """The gateway's pool for `autocommit` connections (psycopg_pool.ConnectionPool), opened on first use and closed
+    at exit (so the ledger sees its sessions end, not drop). PGCONN must be set in the server's environment: it is
+    the secret, never a tool argument."""
+    with _pools_lock:
+        pool = _pools.get(autocommit)
+        if pool is None:
+            if not _pools:
+                atexit.register(_close_pools)
+            pool = _pools[autocommit] = db.pool(
+                max_size=GATEWAY_POOL_MAX, autocommit=autocommit,
+                application_name="br0kr-gateway-auth" if autocommit else "br0kr-gateway")
+        return pool
+
+
+def _close_pools() -> None:
+    with _pools_lock:
+        for pool in _pools.values():
+            with contextlib.suppress(Exception):
+                pool.close()
+        _pools.clear()
+
+
+def _conn() -> AbstractContextManager[psycopg.Connection[Any]]:
+    """A ledger connection for one tool call (READ COMMITTED, not autocommit), borrowed from the gateway's pool for
+    the `with` block: committed at its end (rolled back on an exception) and returned. A connection that died in a
+    failover is replaced when borrowed, so a ledger blip is ridden through; a down ledger fails the call after the
+    pool's timeout."""
+    connection: AbstractContextManager[psycopg.Connection[Any]] = _pool().connection()
+    return connection
 
 
 def _queue_max(conn: psycopg.Connection[Any]) -> int:
@@ -177,20 +211,19 @@ _AUTH_GATE = ratelimit.LedgerGate("gateway token lookup", slots=8)
 
 
 def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
-    """Resolve + tier-check the caller for `verb`. Returns the `Principal` when allowed, else an error dict
-    {"error": "no_token" | "invalid_token" | "forbidden_scope" | "busy"} the tool returns verbatim (`busy`: every
-    token-lookup slot was taken, review SEC-01; the call may be retried). The two are
-    distinguished by `isinstance(result, dict)` (a Principal is a frozen dataclass, never a dict), which
-    also lets the type checker narrow the result to a Principal in the tool body. Resolution runs on a
-    DEDICATED autocommit connection (auth.resolve's contract: the last_used_at bump must not hold a row
-    lock inside a capacity transaction), and the capacity connection is opened by the tool ONLY after auth
-    passes — so an unauthenticated or forbidden call never reaches the capacity path. A ledger blip is
-    ridden through (connect_with_retry), as in every tool. Every denial is best-effort recorded as an audit
-    `outcome='denied'` row (0025) via `_denials` — coalesced + swallow-all, so it never delays or breaks the
-    reject. A no/invalid token is `actor='anonymous'` (no known identity); a resolved-but-forbidden token IS
-    attributed (`actor='agent'` + its token_id/project/scope) — a valid credential over-reaching is the more
-    interesting signal. The denial connector is `db.connect` (FAST-fail): a down ledger can't stall the reject
-    (unlike the retrying resolve connection)."""
+    """Resolve + tier-check the caller for `verb`. Returns the `Principal` when allowed, else an error dict {"error":
+    "no_token" | "invalid_token" | "forbidden_scope" | "busy"} the tool returns verbatim (`busy`: every token-lookup
+    slot was taken, review SEC-01; the call may be retried). The two are distinguished by `isinstance(result, dict)`
+    (a Principal is a frozen dataclass, never a dict), which also lets the type checker narrow the result to a
+    Principal in the tool body. Resolution runs on a DEDICATED autocommit connection (auth.resolve's contract: the
+    last_used_at bump must not hold a row lock inside a capacity transaction), and the capacity connection is opened
+    by the tool ONLY after auth passes — so an unauthenticated or forbidden call never reaches the capacity path.
+    The connection is borrowed from the gateway's autocommit pool, which replaces one that died in a ledger blip.
+    Every denial is best-effort recorded as an audit `outcome='denied'` row (0025) via `_denials` — coalesced +
+    swallow-all, so it never delays or breaks the reject. A no/invalid token is `actor='anonymous'` (no known
+    identity); a resolved-but-forbidden token IS attributed (`actor='agent'` + its token_id/project/scope) — a valid
+    credential over-reaching is the more interesting signal. The denial connector is `db.connect` (FAST-fail): a
+    down ledger can't stall the reject (unlike the pooled resolve connection)."""
     secret = _presented_secret(ctx)
     if not secret:
         _denials.note(_denial_connect, surface="mcp", action=verb, reason=reasons.NO_TOKEN,
@@ -201,7 +234,7 @@ def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
     # so lookups can be concurrent; the gate caps them at `_AUTH_GATE.slots`, and a caller that cannot get a slot
     # within a second is told `busy` without touching the ledger.
     try:
-        with _AUTH_GATE.slot(), closing(db.connect_with_retry(autocommit=True)) as ac:
+        with _AUTH_GATE.slot(), _pool(autocommit=True).connection() as ac:
             principal = auth.resolve(ac, secret)
     except ratelimit.Busy:
         return {"error": reasons.BUSY}
@@ -636,6 +669,7 @@ _waiting_by_token: dict[int | None, int] = {}
 _wait_threads: dict[str, anyio.CapacityLimiter] = {}
 _clock = time.monotonic
 _sleep = anyio.sleep
+_wait_conn = db.connect_with_retry   # a wait holds its connection for up to a minute: never one of the pool's
 
 
 async def _in_wait_thread(fn: Callable[..., Any], *args: Any, pool: str = "wait") -> Any:
@@ -669,12 +703,12 @@ def _owned_status(conn: psycopg.Connection[Any], lease_id: int, principal: auth.
 async def _wait(lease_id: int, principal: auth.Principal, until_state: str, budget: float,
                 want_ip: bool) -> dict[str, Any]:
     """Poll the lease every WAIT_POLL_SECONDS on one connection until gateway.wait_settled stops it or `budget`
-    seconds pass. A connection lost mid-wait (a ledger failover) is replaced once, through `_conn`'s retrying
+    seconds pass. A connection lost mid-wait (a ledger failover) is replaced once, through `_wait_conn`'s retrying
     connect (its retries are bounded by db.connect_with_retry, and can run past the budget); a second loss, or a
     loss after the budget is spent, raises. The budget always counts from the start of the wait. A wait that did
     not get there names why: wait_timeout (still on its way), lease_not_live (it ended) or unknown_lease."""
     start = _clock()
-    conn = await _in_wait_thread(_conn)
+    conn = await _in_wait_thread(_wait_conn)
     reconnected = False
     try:
         while True:
@@ -687,7 +721,7 @@ async def _wait(lease_id: int, principal: auth.Principal, until_state: str, budg
                 log.warning("wait_for_lease lost its ledger connection; reconnecting once", exc_info=True,
                             extra={"lease_id": lease_id})
                 await _close_wait_conn(conn)
-                conn = await _in_wait_thread(_conn)
+                conn = await _in_wait_thread(_wait_conn)
                 continue
             if "error" in status:
                 return status
@@ -1841,11 +1875,19 @@ def main() -> None:
     _apply_http_bind(mcp, os.environ)
     # Every admit() runs in this process, so verify the ledger session is READ COMMITTED once at
     # boot and refuse to serve otherwise — a wrong isolation silently reopens the double-allocation
-    # race (S06). connect_with_retry rides out a boot-time blip; a persistently unreachable or
-    # misconfigured ledger fails fast, which is correct — a gateway with no ledger can't serve.
-    with closing(db.connect_with_retry()) as c:
-        db.assert_read_committed(c)
-        migrate.assert_schema(c, "gateway")   # a ledger older than this build would fail inside tool calls
+    # race (S06). It is checked on a connection from the verbs' pool, the kind every admit() runs on; the pool
+    # rides out a boot-time blip, and a persistently unreachable or misconfigured ledger fails the boot, which is
+    # correct — a gateway with no ledger can't serve.
+    try:
+        with _conn() as c:
+            db.assert_read_committed(c)
+            migrate.assert_schema(c, "gateway")   # a ledger older than this build would fail inside tool calls
+    except PoolTimeout:
+        # The pool only says it got no connection; one direct connect raises the real reason (a wrong password,
+        # a refused or unknown host) for the operator reading the boot log.
+        with closing(db.connect()):
+            pass
+        raise
     if transport != "stdio":   # a stdio gateway is one per MCP client: a fixed port would clash, and none is scraped
         bind = _metrics_bind(os.environ)
         if bind is None:

@@ -159,6 +159,13 @@ def connect(explicit_dsn: str | None = None, *, autocommit: bool = False,
     an operator can retune the keepalives but no one can unpin the isolation.
     """
     resolved_dsn = dsn(explicit_dsn)
+    return psycopg.connect(resolved_dsn, autocommit=autocommit, **_policy_kwargs(resolved_dsn, kwargs))
+
+
+def _policy_kwargs(resolved_dsn: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """`connect`'s keepalives and `options` string (server keepalives, operator options, the isolation pin last),
+    for `kwargs`; shared with `pool` so a pooled connection carries exactly the same policy."""
+    kwargs = dict(kwargs)
     prior_options = kwargs.pop("options", None)
     if prior_options is None:
         try:
@@ -168,7 +175,76 @@ def connect(explicit_dsn: str | None = None, *, autocommit: bool = False,
         prior_options = prior_options or os.environ.get("PGOPTIONS")
     opts: dict[str, Any] = {**KEEPALIVE, **kwargs}
     opts["options"] = " ".join(o for o in (_SERVER_KEEPALIVE_OPT, prior_options, _READ_COMMITTED_OPT) if o)
-    return psycopg.connect(resolved_dsn, autocommit=autocommit, **opts)
+    return opts
+
+
+# A pooled connection's client-side bound on unacknowledged data (review PERF-02): without it a black-holed ledger
+# host (no RST) leaves the borrow-time check, or a query, hanging for the OS TCP timeout (minutes) on the gateway's
+# event loop. It fires only on a genuinely unacked link, never a slow-but-alive query; the daemon's leader
+# connection uses the same bound (review S17).
+POOL_TCP_USER_TIMEOUT_MS = "6000"
+
+# How long a pooled connection tries one ledger host, and how long a borrower waits for a connection (review
+# PERF-02). The wait covers the worst first borrow after a ledger host is black-holed: the check on a dead idle
+# connection fails after POOL_TCP_USER_TIMEOUT_MS (6 s), then the replacement gives up on the dead host after
+# POOL_CONNECT_TIMEOUT_S and libpq tries the next host in PGCONN. connect()'s 10 s per host would not fit. A
+# ledger that is down entirely fails a borrow after POOL_BORROW_TIMEOUT_S, where a retrying connect per call
+# took up to about a minute.
+POOL_CONNECT_TIMEOUT_S = 4
+POOL_BORROW_TIMEOUT_S = 15.0
+
+
+def _pool_class() -> Any:
+    """psycopg_pool.ConnectionPool, imported on first use: the standalone harness wrappers install only psycopg,
+    and every module that imports br0kr.db must still load for them."""
+    from psycopg_pool import ConnectionPool
+    return ConnectionPool
+
+
+def check_writable(conn: psycopg.Connection[Any]) -> None:
+    """The pool's borrow-time check: the connection answers (`ConnectionPool.check_connection`), and its server is
+    not read-only. A primary demoted, or fenced with default_transaction_read_only, can keep its sessions; the
+    server reports both settings to the client whenever they change, so this costs no round trip of its own.
+    A read-only session is closed, then refused: the pool discards only a closed connection (a live one it puts
+    back and lends again, so every borrow would spin until the pool's timeout), and opens a new one, which
+    `target_session_attrs=read-write` sends to the primary."""
+    _pool_class().check_connection(conn)
+    if "on" in (conn.info.parameter_status("in_hot_standby"),
+                conn.info.parameter_status("default_transaction_read_only")):
+        conn.close()
+        log.warning("closed a pooled ledger connection to a read-only server (a demoted or fenced primary)")
+        raise psycopg.OperationalError("the ledger session is read-only (a demoted or fenced primary)")
+
+
+def pool(explicit_dsn: str | None = None, *, max_size: int = 8, autocommit: bool = False,
+         application_name: str | None = None, timeout: float = POOL_BORROW_TIMEOUT_S, **kwargs: Any) -> Any:
+    """An in-process pool of ledger connections, for a surface that opened one per unit of work (review PERF-02).
+
+    Every connection it opens carries `connect`'s policy (the keepalives, and the READ COMMITTED pin in libpq
+    `options`, so the pin holds for each connection the pool ever makes) and the `autocommit` mode asked for. A
+    borrowed connection is checked first (`ConnectionPool.check_connection`, one round trip), so one that died in
+    a failover, or that now reaches a read-only server, is replaced, not handed out (`check_writable`); a returned
+    one is reset to the pool's autocommit mode, so a borrower can never leave the next with the other mode
+    (admission refuses an autocommit connection). Each connection also carries `tcp_user_timeout`
+    (POOL_TCP_USER_TIMEOUT_MS) and a shorter `connect_timeout` (POOL_CONNECT_TIMEOUT_S) unless `kwargs` set them,
+    and any other libpq `kwargs`. `application_name` names the pool's sessions in pg_stat_activity. The pool opens
+    one connection up front and more, up to `max_size`, on demand; a borrower waits up to `timeout` seconds
+    (POOL_BORROW_TIMEOUT_S) for one, then PoolTimeout. The returned object is a
+    psycopg_pool.ConnectionPool, imported on first use. In-process on purpose: an external pooler in transaction
+    mode could defeat the isolation pin (see `assert_read_committed`)."""
+    resolved_dsn = dsn(explicit_dsn)
+    extra: dict[str, Any] = {"tcp_user_timeout": POOL_TCP_USER_TIMEOUT_MS,
+                             "connect_timeout": POOL_CONNECT_TIMEOUT_S, **kwargs}
+    if application_name:
+        extra["application_name"] = application_name
+    conn_kwargs: dict[str, Any] = {"autocommit": autocommit, **_policy_kwargs(resolved_dsn, extra)}
+
+    def reset(conn: psycopg.Connection[Any]) -> None:
+        if conn.autocommit != autocommit:
+            conn.autocommit = autocommit
+
+    return _pool_class()(resolved_dsn, kwargs=conn_kwargs, min_size=1, max_size=max_size, open=True,
+                         check=check_writable, reset=reset, timeout=timeout, name=application_name)
 
 
 def assert_read_committed(conn: psycopg.Connection[Any]) -> None:

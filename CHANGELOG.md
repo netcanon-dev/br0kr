@@ -38,6 +38,9 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **The gateway and dashboard reuse ledger connections from in-process pools (`db.pool`).** Every tool call
+  and page read opened fresh ones; harness_gateway holds 20 concurrent callers to <= 10 backends (PERF-02).
+  The dashboard now stops on SIGTERM (`docker stop`) and closes its pool, instead of waiting to be killed.
 - **renew_lease, release_lease and cancel_lease say why they did nothing.** They answered a bare false;
   now `lease_not_live`, or `lease_queued` when releasing a still-queued lease (cancel it) (UX-03).
 - **The request path's refusal and error codes are named constants in `br0kr/reasons.py`.** A typo could ship a
