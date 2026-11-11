@@ -154,6 +154,41 @@ services:
       # generous: first boot does a full pg_basebackup before the server accepts connections
       start_period: 60s
 
+  # ── Ledger: scheduled logical backups (OPT-IN: COMPOSE_PROFILES gains `backup`) ──
+  # Runs scripts/backup_ledger.sh every BACKUP_EVERY_SECONDS from inside the stack: the bundled ledger publishes no
+  # port, so a host cron job cannot reach it. The ledger's own image, so pg_dump matches the server. Dumps land in
+  # BR0KR_BACKUP_DIR on the host (mode 0600, owned by BR0KR_BACKUP_USER, which must own that directory: a non-root
+  # user gets none of the ledger capabilities); ship them off this host yourself. deploy.sh refuses a directory inside
+  # the checkout. Unhealthy when no dump is newer than two intervals. docs/runbooks/day2-operations.md "Backup schedule".
+  ledger-backup:
+    <<: *pg-hardening
+    image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54   # the same pin as pg-primary
+    profiles: ["backup"]
+    restart: unless-stopped
+    user: "${BR0KR_BACKUP_USER:-0:0}"
+    init: true   # bash is not PID 1, so a stop or recreate ends it at once instead of after the 10 s grace
+    entrypoint: ["bash", "/opt/br0kr/scripts/ledger_backup_loop.sh", "/backups"]
+    environment:
+      PGCONN: ${PGCONN:?set PGCONN in .env}
+      BACKUP_EVERY_SECONDS: ${BACKUP_EVERY_SECONDS:-3600}
+      BACKUP_RETAIN_DAYS: ${BACKUP_RETAIN_DAYS:-2}
+    volumes:
+      - ./scripts:/opt/br0kr/scripts:ro
+      - ${BR0KR_BACKUP_DIR:-/var/backups/br0kr}:/backups
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    pids_limit: 64
+    mem_limit: 256m
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "find /backups -maxdepth 1 -name 'br0kr-ledger-*.dump' -mmin -$$(( BACKUP_EVERY_SECONDS / 30 + 5 )) | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
   # ── Broker: schema migrations (one-shot; runs once before the services) ─────────
   migrate:
     <<: *broker

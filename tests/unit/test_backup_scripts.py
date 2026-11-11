@@ -1,5 +1,6 @@
 """Unit tests for the ledger backup tooling: scripts/backup_ledger.sh, scripts/restore_ledger.sh and the
-scripts/_pgconn.sh helper they share (review OPS-05).
+scripts/_pgconn.sh helper they share (review OPS-05), and scripts/ledger_backup_loop.sh, the scheduler the
+opt-in `ledger-backup` compose service runs (review OPS-04).
 
 A ledger dump carries deployment identifiers (cluster API URLs, node names, audit actors), so it must never
 land where a `git add -A` would commit it; the password in the DSN must never reach a process's argv, which
@@ -66,7 +67,7 @@ def _repo(tmp_path: Path) -> Path:
     """A scratch checkout holding copies of the three scripts, plus a bin/ of fakes."""
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True, exist_ok=True)
-    for name in ("_pgconn.sh", "backup_ledger.sh", "restore_ledger.sh"):
+    for name in ("_pgconn.sh", "backup_ledger.sh", "restore_ledger.sh", "ledger_backup_loop.sh"):
         shutil.copy(_ROOT / "scripts" / name, repo / "scripts" / name)
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -251,6 +252,61 @@ def test_backup_retention_prunes_only_its_own_old_dumps(tmp_path):
     proc, _ = _run(tmp_path, "backup_ledger.sh", [str(out)], PGCONN="host=ledger dbname=broker",
                    BACKUP_RETAIN_DAYS="two")
     assert proc.returncode == 2
+
+
+# ── ledger_backup_loop.sh (the `backup` compose profile) ──────────────────────────────────────────────────
+_FAKE_SLEEP = """#!/usr/bin/env bash
+printf '%s\\n' "$1" >> "$SLEEP_LOG"
+kill -TERM "$PPID"
+"""
+
+
+def _loop_once_more(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], list[list[str]], list[str]]:
+    """Run the loop with a fake `sleep` that records how long it was asked to wait, then stops the loop: one pass,
+    observed. Returns (process, client-tool calls, sleep arguments)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "sleep"
+    fake.write_text(_FAKE_SLEEP, encoding="utf-8", newline="\n")
+    fake.chmod(0o755)
+    slog = tmp_path / "sleep.log"
+    slog.write_text("", encoding="utf-8")   # one pass per call: a reused tmp_path must not carry the last run's waits
+    proc, calls = _run(tmp_path, "ledger_backup_loop.sh", [str(tmp_path / "backups")], SLEEP_LOG=str(slog), **env)
+    return proc, calls, slog.read_text(encoding="utf-8").split()
+
+
+def test_backup_loop_waits_a_full_interval_after_a_dump_and_a_minute_after_a_failure(tmp_path):
+    """After a good dump the loop sleeps BACKUP_EVERY_SECONDS (default 3600); after a failed one it logs the failure and
+    retries in 60 s, so a ledger that was not up yet at start is backed up within a minute, not an hour. Guards a
+    schedule that silently stops (a loop that exits on the first failure) or hammers the ledger."""
+    proc, calls, waits = _loop_once_more(tmp_path, PGCONN="host=ledger dbname=broker")
+    assert waits == ["3600"] and [c[0] for c in calls] == ["pg_dump"]
+    assert len(list((tmp_path / "backups").glob("br0kr-ledger-*.dump"))) == 1
+    proc, calls, waits = _loop_once_more(tmp_path, PGCONN="host=ledger dbname=broker", FAKE_DUMP_FAIL="1",
+                                          BACKUP_EVERY_SECONDS="7200")
+    assert waits == ["60"] and "ledger backup FAILED" in proc.stderr
+
+
+def test_backup_loop_once_takes_one_dump_and_exits_with_its_status(tmp_path):
+    """BACKUP_ONCE=1 takes exactly one dump and exits with backup_ledger.sh's status: the pre-upgrade dump the day-2
+    runbook takes with `docker compose run --rm -e BACKUP_ONCE=1 ledger-backup`. Guards that command hanging in the
+    loop, or reporting success for a failed dump right before a migration."""
+    proc, calls = _run(tmp_path, "ledger_backup_loop.sh", [str(tmp_path / "backups")],
+                       PGCONN="host=ledger dbname=broker", BACKUP_ONCE="1")
+    assert proc.returncode == 0 and [c[0] for c in calls] == ["pg_dump"], proc.stderr
+    proc, _ = _run(tmp_path, "ledger_backup_loop.sh", [str(tmp_path / "backups")],
+                   PGCONN="host=ledger dbname=broker", BACKUP_ONCE="1", FAKE_DUMP_FAIL="1")
+    assert proc.returncode != 0
+
+
+@pytest.mark.parametrize("every", ["abc", "-5", "0", "59", "1h"])
+def test_backup_loop_refuses_a_bad_interval(tmp_path, every):
+    """A BACKUP_EVERY_SECONDS that is not a whole number, or is under a minute (0 included), exits 2 before any dump.
+    Guards a typo, or a 0 in .env meant as "once", turning the always-restarted service into a tight loop of pg_dump
+    against the live ledger (one-shot is BACKUP_ONCE=1, never set in .env)."""
+    proc, calls = _run(tmp_path, "ledger_backup_loop.sh", [str(tmp_path / "backups")],
+                       PGCONN="host=ledger dbname=broker", BACKUP_EVERY_SECONDS=every)
+    assert proc.returncode == 2 and calls == [] and "BACKUP_EVERY_SECONDS" in proc.stderr
 
 
 def test_gitignore_keeps_dumps_out():

@@ -198,6 +198,57 @@ def test_no_build_mode_only_brings_up(tmp_path):
     assert _mutating(calls) == ["compose up -d"]
 
 
+@pytest.mark.parametrize(("backup_dir", "says"), [
+    ("backups", "must be an absolute path"),
+    ("./backups", "must be an absolute path"),
+    ("{root}/backups", "inside this checkout"),
+    ("{root}/scripts/../ledger-dumps", "inside this checkout"),
+])
+def test_the_backup_profile_refuses_a_dump_directory_in_the_checkout(tmp_path, backup_dir, says):
+    """With `backup` in COMPOSE_PROFILES, deploy.sh refuses a BR0KR_BACKUP_DIR that is relative (compose resolves it
+    into the deploy checkout) or resolves under the checkout, before anything is built. backup_ledger.sh refuses
+    such a directory itself, but inside the ledger-backup container it only sees /backups. Guards a ledger dump,
+    full of deployment identifiers, landing where `git add -A` would commit it (review OPS-04)."""
+    env = (f"COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=dashboard,backup\n"
+           f"BR0KR_BACKUP_DIR={backup_dir.format(root=tmp_path)}\n")
+    proc, calls = _run(tmp_path, ["--check"], env_file=env)
+    assert proc.returncode == 1 and says in proc.stderr, proc.stderr
+    assert _mutating(calls) == []
+
+
+def test_the_backup_directory_is_checked_whenever_it_is_set(tmp_path):
+    """An absolute BR0KR_BACKUP_DIR outside the checkout passes with `backup` on. A relative one is refused even with
+    the profile off, because the one-shot `docker compose run ... ledger-backup` writes there without the profile;
+    with the profile off and the variable unset there is nothing to check. Spaces in the profile list do not hide
+    `backup`. Guards the one-shot pre-upgrade dump landing in the checkout unchecked (review OPS-04)."""
+    outside = tmp_path.parent / f"{tmp_path.name}-dumps"
+    ok = f"COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=backup\nBR0KR_BACKUP_DIR={outside}\n"
+    proc, _ = _run(tmp_path, ["--check"], env_file=ok)
+    assert proc.returncode == 0 and "preflight OK" in proc.stdout, proc.stderr
+    off = "COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=dashboard\nBR0KR_BACKUP_DIR=backups\n"
+    proc, _ = _run(tmp_path, ["--check"], env_file=off)
+    assert proc.returncode == 1 and "must be an absolute path" in proc.stderr, proc.stderr
+    unset = "COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=dashboard\n"
+    proc, _ = _run(tmp_path, ["--check"], env_file=unset)
+    assert proc.returncode == 0, proc.stderr
+    spaced = f"COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=dashboard, backup\nBR0KR_BACKUP_DIR={tmp_path}/bk\n"
+    proc, _ = _run(tmp_path, ["--check"], env_file=spaced)
+    assert proc.returncode == 1 and "inside this checkout" in proc.stderr, proc.stderr
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_the_backup_profile_refuses_a_directory_inside_a_git_work_tree(tmp_path):
+    """A BR0KR_BACKUP_DIR outside the checkout but inside another repository is refused too: any work tree is one
+    `git add -A` away from committing the dumps."""
+    repo = tmp_path.parent / f"{tmp_path.name}-repo"
+    (repo / "dumps").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for target in (repo / "dumps", repo / "not" / "created" / "yet"):   # docker would create the second one
+        env = f"COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=backup\nBR0KR_BACKUP_DIR={target}\n"
+        proc, _ = _run(tmp_path, ["--check"], env_file=env)
+        assert proc.returncode == 1 and "git work tree" in proc.stderr, (target, proc.stderr)
+
+
 def test_check_mode_changes_nothing(tmp_path):
     """--check runs the preflight (version gate, orphan check) and exits without building or bringing up."""
     proc, calls = _run(tmp_path, ["--check"], env_file=_TLS_ENV)

@@ -56,6 +56,7 @@ docs/
 - [runbooks/docker-deploy.md](runbooks/docker-deploy.md) — deploying the whole stack with Docker Compose
 - [runbooks/ledger-ha.md](runbooks/ledger-ha.md) — operating the ledger under high availability
 - [runbooks/alerts.md](runbooks/alerts.md) — the shipped Prometheus alert rules: loading them, and what to do when each fires
+- [runbooks/day2-operations.md](runbooks/day2-operations.md) — the routine tasks: upgrade, roll back, schedule backups, rotate a secret, add or remove a node, re-clone a standby
 - [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md) — relocating a lease to another cluster, race-free
 - [runbooks/operator-tier.md](runbooks/operator-tier.md) — minting/using the cross-tenant `operator` MCP token (cordon + migrate + fleet observability)
 - [runbooks/vm-access.md](runbooks/vm-access.md) — handing an agent SSH access to its VM via cloud-init (its own public key)

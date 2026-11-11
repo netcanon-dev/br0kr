@@ -2,7 +2,10 @@
 # Compose-stack smoke: brings up the FULL docker-compose deployment (HA Postgres primary+standby +
 # migrate + both gateways + daemon) with a throwaway .env, and proves the wiring end to end WITHOUT any
 # Proxmox: migrations apply, the standby streams from the primary, the daemon wins leadership and
-# ticks, the gateways serve HTTP and split the tool surface (tenant vs operator). Then tears everything down.
+# ticks, the gateways serve HTTP and split the tool surface (tenant vs operator), the gateway's metrics listener
+# serves on its own unpublished port, the opt-in ledger-backup service (as a non-root user, as documented) writes a
+# 0600 dump and turns healthy, and the day-2 runbook's standby re-clone and ledger restore work as written.
+# Then tears everything down.
 #
 # Failover itself is NOT re-proven here (scripts/harness_ha_failover.py already does, against the
 # same replication recipe) — this proves the COMPOSE wiring + HA topology come up correctly.
@@ -16,6 +19,7 @@ ENVFILE="$(mktemp /tmp/br0kr-smoke.XXXXXX.env)"
 PORT=18080
 OPORT=18082   # the operator gateway (profile `operator`, enabled through COMPOSE_PROFILES in the env file)
 DC=(docker compose -p "$PROJECT" --env-file "$ENVFILE")
+BACKUPS="$(mktemp -d /tmp/br0kr-smoke-backups.XXXXXX)"   # the ledger-backup service's BR0KR_BACKUP_DIR
 
 # A throwaway, non-secret credential for the disposable smoke ledger (kept in a variable, not a
 # literal next to a password keyword, so the secret-scan doesn't flag this committed script).
@@ -29,8 +33,10 @@ GATEWAY_PORT=${PORT}
 BR0KR_MCP_TRANSPORT=streamable-http
 BR0KR_TICK_SECONDS=2
 PVE_TOKEN_SECRET=
-COMPOSE_PROFILES=operator
+COMPOSE_PROFILES=operator,backup
 OPERATOR_GATEWAY_PORT=${OPORT}
+BR0KR_BACKUP_DIR=${BACKUPS}
+BR0KR_BACKUP_USER=$(id -u):$(id -g)
 EOF
 
 results=()
@@ -40,6 +46,7 @@ cleanup() {
   echo "--- teardown ---"
   "${DC[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "$ENVFILE"
+  rm -rf "$BACKUPS"
 }
 trap cleanup EXIT INT TERM   # tear down even on Ctrl-C / kill, not just a clean exit
 
@@ -152,6 +159,79 @@ for _ in $(seq 1 40); do
   sleep 2
 done
 check daemon_healthcheck_healthy "$([ "$dh" = "healthy" ] && echo 0 || echo 1)" "health=${dh:-?}"
+
+# the gateway's /metrics listener (review OPS-03): served on 9091 inside the stack, NOT published on the host (the
+# MCP port is what the proxy and the tunnel route to the internet).
+gm=1
+for _ in $(seq 1 20); do
+  if "${DC[@]}" exec -T gateway python -c 'import sys,urllib.request as u; sys.exit(0 if "br0kr_admit_total" in u.urlopen("http://localhost:9091/metrics",timeout=3).read().decode() else 1)' >/dev/null 2>&1; then gm=0; break; fi
+  sleep 2
+done
+check gateway_metrics_listener "$gm"
+gp="$("${DC[@]}" port gateway 9091 2>/dev/null)"
+check gateway_metrics_not_published "$({ [ -z "$gp" ] || [ "$gp" = ":0" ]; } && echo 0 || echo 1)" "port=${gp:-none}"
+
+# the opt-in ledger-backup service (profile `backup`, review OPS-04): its first dump lands in BR0KR_BACKUP_DIR,
+# mode 0600, and its healthcheck (the newest dump's age) turns healthy.
+dump=""; bh=""
+for _ in $(seq 1 60); do
+  dump="$(ls "$BACKUPS"/br0kr-ledger-*.dump 2>/dev/null | head -1)"
+  bid="$("${DC[@]}" ps -aq ledger-backup | head -1)"
+  bh="$(docker inspect -f '{{.State.Health.Status}}' "$bid" 2>/dev/null)"
+  [ -n "$dump" ] && [ "$bh" = "healthy" ] && break
+  sleep 3
+done
+check ledger_backup_dumps_and_is_healthy "$({ [ -n "$dump" ] && [ "$bh" = "healthy" ]; } && echo 0 || echo 1)" \
+  "dump=${dump:+$(basename "$dump")} health=${bh:-?}"
+mode="$(stat -c %a "$dump" 2>/dev/null)"
+check ledger_backup_dump_is_0600 "$([ "$mode" = "600" ] && echo 0 || echo 1)" "mode=${mode:-?}"
+
+# the runbook's pre-upgrade dump (day2-operations.md "Upgrade"): one run, one new dump, exit 0.
+n_before="$(ls "$BACKUPS"/br0kr-ledger-*.dump 2>/dev/null | wc -l)"
+"${DC[@]}" run --rm -e BACKUP_ONCE=1 ledger-backup >/dev/null 2>&1; orc=$?
+n_after="$(ls "$BACKUPS"/br0kr-ledger-*.dump 2>/dev/null | wc -l)"
+check ledger_backup_one_shot "$({ [ "$orc" = 0 ] && [ "$n_after" -gt "$n_before" ]; } && echo 0 || echo 1)" \
+  "rc=${orc} dumps=${n_before}->${n_after}"
+
+# the runbook's standby re-clone (day2-operations.md "Re-clone a dead standby"), command for command: remove the
+# container, drop its volume, recreate the slot, bring it back; it must stream again on a reserved slot.
+"${DC[@]}" rm -sf pg-standby >/dev/null 2>&1
+docker volume rm "${PROJECT}_pg-standby-data" >/dev/null 2>&1; vrc=$?
+printf "SELECT pg_drop_replication_slot('br0kr_standby');\nSELECT pg_create_physical_replication_slot('br0kr_standby');\n" \
+  | "${DC[@]}" exec -T pg-primary sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; src=$?
+"${DC[@]}" up -d pg-standby >/dev/null 2>&1
+rs=""; ws=""
+for _ in $(seq 1 60); do
+  rs="$(psql_p "SELECT state FROM pg_stat_replication")"
+  ws="$(psql_p "SELECT wal_status FROM pg_replication_slots WHERE slot_name = 'br0kr_standby'")"
+  [ "$rs" = "streaming" ] && [ "$ws" = "reserved" ] && break
+  sleep 3
+done
+check runbook_reclone_standby "$({ [ "$vrc" = 0 ] && [ "$src" = 0 ] && [ "$rs" = "streaming" ] && [ "$ws" = "reserved" ]; } \
+  && echo 0 || echo 1)" "volume_rm=${vrc} slot=${src} state=${rs:-?} wal_status=${ws:-?}"
+
+# the runbook's restore (day2-operations.md "Restore the ledger from a dump"), command for command: stop the writers,
+# restore the first dump through the ledger-backup service with --force and a lease-id floor, set the sweep dry-run.
+dump1="$(ls "$BACKUPS"/br0kr-ledger-*.dump | head -1)"
+"${DC[@]}" stop $("${DC[@]}" config --services | grep -vxE 'pg-primary|pg-standby|caddy|cloudflared') >/dev/null 2>&1
+"${DC[@]}" run --rm --entrypoint bash ledger-backup -c \
+  "PGCONN_TARGET=\"\$PGCONN\" bash /opt/br0kr/scripts/restore_ledger.sh --force --lease-id-floor 1000 /backups/$(basename "$dump1")" \
+  > "/tmp/br0kr-smoke-restore.$$" 2>&1; rrc=$?
+printf '%s\n' "UPDATE operator_setting SET sweep_dry_run = true WHERE id = 1;" \
+  "UPDATE lease SET expires_at = greatest(expires_at, now() + make_interval(secs => ttl_seconds)) WHERE state IN ('ADMITTED', 'PROVISIONING', 'ACTIVE');" \
+  | "${DC[@]}" exec -T pg-primary sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; drc=$?
+dry="$(psql_p "SELECT sweep_dry_run FROM operator_setting WHERE id = 1")"
+check runbook_restore_ledger "$({ [ "$rrc" = 0 ] && [ "$drc" = 0 ] && [ "$dry" = "t" ]; } && echo 0 || echo 1)" \
+  "restore=${rrc} updates=${drc} dry_run=${dry:-?} $(grep -m1 -i 'schema' "/tmp/br0kr-smoke-restore.$$" 2>/dev/null)"
+rm -f "/tmp/br0kr-smoke-restore.$$"
+# ...and step 4: the stack comes back on the restored ledger and the gateway answers again.
+"${DC[@]}" up -d >/dev/null 2>&1
+bh=1
+for _ in $(seq 1 60); do
+  curl -fsS -o /dev/null "http://127.0.0.1:${PORT}/healthz" 2>/dev/null && { bh=0; break; }
+  sleep 3
+done
+check runbook_restore_stack_comes_back "$bh"
 
 echo "--------------------------------------------------------"
 fail=0; for r in "${results[@]}"; do [ "$r" -ne 0 ] && fail=1; done

@@ -247,8 +247,8 @@ nothing.
 
 **Means.** The primary recycled WAL a standby still needed (`wal_status='lost'`). That standby cannot resume.
 
-**Fix.** Re-clone it; a restart does not help:
-`docker compose stop pg-standby && docker volume rm <project>_pg-standby-data && docker compose up -d pg-standby`.
+**Fix.** Re-clone it, and recreate its replication slot, which stays invalidated: a restart does not help.
+[day2-operations.md](day2-operations.md#re-clone-a-dead-standby) has the commands.
 
 ### Br0krLedgerStandbyStalled
 
@@ -273,6 +273,7 @@ once the standby is streaming again.
 
 ## See also
 
+- [day2-operations.md](day2-operations.md): upgrade, roll back, schedule backups, rotate a secret, add or remove a node.
 - [docker-deploy.md](docker-deploy.md): the health, readiness and metrics endpoints, and the rollback contract.
 - [ledger-ha.md](ledger-ha.md): the ledger replication gauges and what each state means.
 - [scripts/README.md](../../scripts/README.md): `check_alert_rules.sh`.

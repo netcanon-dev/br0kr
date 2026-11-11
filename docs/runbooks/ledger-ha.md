@@ -252,7 +252,10 @@ PGCONN="host=… dbname=broker user=… password=…" scripts/backup_ledger.sh [
   run into a second directory with `BACKUP_RETAIN_DAYS=30`. Tune to your RPO and disk.
 - **The password stays out of `ps`.** The script moves it from `PGCONN` into `PGPASSWORD` before
   calling `pg_dump`, so it is never in a process's argv. `~/.pgpass` works too.
-- Run it on a schedule (cron/systemd timer) and ship the files **off the database host**.
+- Run it on a schedule and ship the files **off the database host**. On the bundled Compose stack the ledger
+  publishes no port, so add `backup` to `COMPOSE_PROFILES`: the `ledger-backup` service runs this script hourly
+  from inside the stack ([day2-operations.md](day2-operations.md#backup-schedule)). Against an external ledger,
+  use cron or a systemd timer on any host that reaches it.
 
 **WAL archiving / PITR (low RPO):** for the ability to restore to *any* point in time (not just
 the last dump), enable continuous WAL archiving (`archive_mode=on`, `archive_command` to durable
@@ -300,6 +303,11 @@ below) and do the sweep dry-run before resuming teardown.
 > 2. **Dry-run the sweep first.** Point the daemon at the restored ledger with `sweep_dry_run=true` (or call
 >    `orphan_sweep(..., dry_run=True)`) and confirm the destroy list is empty / expected before allowing real
 >    teardown. Only set `allow_mass_absent` after you have confirmed a genuine teardown.
+> 3. **Give every live lease one fresh TTL.** The restored `expires_at` values are as old as the backup, so the reaper
+>    would expire every heartbeat-held lease on the daemon's first tick and destroy its VM:
+>    `UPDATE lease SET expires_at = greatest(expires_at, now() + make_interval(secs => ttl_seconds)) WHERE state IN
+>    ('ADMITTED', 'PROVISIONING', 'ACTIVE');`. Agents still at work renew within that TTL.
+> [day2-operations.md](day2-operations.md#restore-the-ledger-from-a-dump) has the whole sequence on the Compose stack.
 
 ---
 
@@ -344,6 +352,7 @@ below) and do the sweep dry-run before resuming teardown.
 
 ## See also
 - [alerts.md](alerts.md) — what each shipped alert means and what to do, the ledger DR ones included
+- [day2-operations.md](day2-operations.md) — the backup schedule, rolling back across a migration, re-cloning a standby
 - [docker-deploy.md](docker-deploy.md) — the Compose stack that wires this HA topology (the bundled primary+standby starter; §9 the stretched/DR standby over the mesh)
 - [/SECURITY.md](../../SECURITY.md) — C9 single-writer + the split-brain residual
 - [../architecture.md](../architecture.md) — roadmap item #9 (ledger HA)

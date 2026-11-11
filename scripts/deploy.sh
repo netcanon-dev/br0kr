@@ -105,6 +105,31 @@ if [ "$mode" = "pull" ] && [ -z "$published" ]; then
         BR0KR_IMAGE=ghcr.io/netcanon-dev/br0kr:0.2.0 (see .env.example)."
 fi
 
+# 4b. The ledger-backup service writes dumps into BR0KR_BACKUP_DIR on the host, on a schedule (profile `backup`) or
+#     once (`docker compose run --rm -e BACKUP_ONCE=1 ledger-backup`, which needs no profile). A dump carries
+#     deployment identifiers and must never land where a `git add -A` would commit it. backup_ledger.sh refuses such
+#     a directory itself, but inside the container it only sees /backups, so the host path is checked here whenever
+#     the profile is on or the variable is set: absolute, not under this checkout, not inside any git work tree
+#     (review OPS-04). It fails closed: a path it cannot resolve is refused, not waved through.
+bdir="$(env_val BR0KR_BACKUP_DIR)"
+case ",$(env_val COMPOSE_PROFILES | tr -d '[:space:]')," in *,backup,*) bdir="${bdir:-/var/backups/br0kr}" ;; esac
+if [ -n "$bdir" ]; then
+  case "$bdir" in /*) ;; *) die "BR0KR_BACKUP_DIR must be an absolute path outside this checkout (got '${bdir}')" ;; esac
+  real_bdir="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$bdir")" \
+    && [ -n "$real_bdir" ] || die "cannot resolve BR0KR_BACKUP_DIR (${bdir})"
+  case "${real_bdir%/}/" in
+    "$(cd "$ROOT" && pwd -P)/"*) die "BR0KR_BACKUP_DIR (${bdir}) is inside this checkout; a ledger dump carries deployment
+        identifiers and must never be committed. Pick a directory outside it, e.g. /var/backups/br0kr." ;;
+  esac
+  probe="$real_bdir"                       # a directory docker has not created yet: check where it will be
+  while [ ! -d "$probe" ]; do probe="$(dirname "$probe")"; done
+  if command -v git >/dev/null 2>&1 \
+     && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR git -c safe.directory='*' -C "$probe" \
+          rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "BR0KR_BACKUP_DIR (${bdir}) is inside a git work tree; pick a directory outside any repository."
+  fi
+fi
+
 # 5. Orphan precondition: every container of this project must be a service compose can see. Stopped
 #    containers count: the recovery path (--no-build after a failed build) runs with the stack DOWN, and
 #    bringing it back with fewer files would restart the gateway WITHOUT the TLS override. One-off

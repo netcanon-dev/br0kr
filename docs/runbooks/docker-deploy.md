@@ -187,8 +187,8 @@ refuse `latest` and a name with no tag.
   (`br0kr_standby`, created on the primary), so it can stop/restart/lag and then resume without a
   re-clone. `max_slot_wal_keep_size=2GB` (on the primary) bounds how much WAL the slot pins, so a
   standby that is gone for a long time can't fill the primary's disk — but if it stays down past that
-  window the slot is invalidated and the standby must be re-cloned: `docker compose stop pg-standby &&
-  docker volume rm <project>_pg-standby-data && docker compose up -d pg-standby`.
+  window the slot is invalidated and the standby must be re-cloned, with the slot recreated
+  ([day2-operations.md](day2-operations.md#re-clone-a-dead-standby)).
 - **The broker re-homes itself.** `PGCONN` lists *both* hosts with `target_session_attrs=read-write`,
   so libpq connects to whichever is currently the **primary**. Every broker process opens its ledger
   connection through `br0kr/db.py` (`connect_with_retry`), which rides through the brief unreachable
@@ -459,6 +459,8 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   Prometheus container on the same network; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
   as u; print(u.urlopen('http://localhost:9090/readyz').status)"`. The endpoints are unauthenticated plain HTTP
   exposing only counts/states (never a secret) — keep them on a trusted network ([/SECURITY.md](../../SECURITY.md) C3 (c2)).
+- **Upgrade, roll back, back up on a schedule, rotate a secret, decommission a node:**
+  [day2-operations.md](day2-operations.md) has each as a short command sequence.
 - **Re-run migrations** after upgrading: `bash scripts/deploy.sh` does it (its `up -d` re-runs the one-shot
   `migrate` on the new image). By hand, build first, since `run` uses whatever image already exists:
   `docker compose build daemon && docker compose run --rm migrate` (idempotent).
@@ -477,7 +479,9 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   `docker compose restart pg-standby` (and on a DR host, its `pg-standby-remote`) after deploying one.
 - **Back up the ledger**: [`scripts/backup_ledger.sh`](../../scripts/backup_ledger.sh) (a logical dump
   into `/var/backups/br0kr` by default, never inside this checkout, with retention; restore with
-  [`scripts/restore_ledger.sh`](../../scripts/restore_ledger.sh)). Replication is not a backup — see
+  [`scripts/restore_ledger.sh`](../../scripts/restore_ledger.sh)). On this stack, add `backup` to
+  `COMPOSE_PROFILES` and the `ledger-backup` service runs it hourly from inside the stack
+  ([day2-operations.md](day2-operations.md#backup-schedule)). Replication is not a backup — see
   [ledger-ha.md](ledger-ha.md).
 - **Tear down**: `docker compose down` (keep data) or `docker compose down -v` (drop the ledger volumes too).
 
@@ -543,6 +547,10 @@ bash docker/gen-replication-certs.sh 100.64.0.10        # → ./certs/{ca.crt,se
 docker compose build daemon
 docker compose up -d pg-primary migrate gateway daemon
 ```
+
+`deploy.sh` refuses this topology, so it never starts the scheduled ledger backup. To run it here, add `backup` to
+`COMPOSE_PROFILES` and `ledger-backup` to that `up -d` list
+([day2-operations.md](day2-operations.md#backup-schedule)).
 
 With built-in TLS on this host too, append `:docker-compose.tls.yml` to `COMPOSE_FILE`, run
 `bash scripts/tls-up.sh --check` first (nothing else runs the Compose ≥ 2.24 gate for this topology), and
@@ -885,6 +893,7 @@ git add -A && git checkout-index -a -f
 ```
 
 ## See also
+- [day2-operations.md](day2-operations.md) — upgrade, roll back, schedule backups, rotate a secret, add or remove a node
 - [alerts.md](alerts.md) — the shipped Prometheus alert rules: how to load them, and what to do when each fires
 - [connecting-an-agent.md](connecting-an-agent.md) — once the stack is up, pointing an agent's MCP client at the gateway (transport + token)
 - [../api.md](../api.md) — the API reference: the gateway's tools and the dashboard's routes, with who may call each

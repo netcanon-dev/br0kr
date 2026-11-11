@@ -710,7 +710,13 @@ Name the residual, why it's accepted, and what would close it.
   and a restore twin (`scripts/restore_ledger.sh`). A dump holds no usable credential but does carry deployment
   identifiers, so the backup refuses to write inside a checkout or any git work tree, writes 0600, and keeps the DSN
   password out of `pg_dump`'s argv (`scripts/_pgconn.sh` moves it to `PGPASSWORD`); the restore refuses a ledger
-  with non-terminal leases unless `--force` (review OPS-05; `tests/unit/test_backup_scripts.py`).
+  with non-terminal leases unless `--force` (review OPS-05; `tests/unit/test_backup_scripts.py`). The opt-in
+  `ledger-backup` compose service (profile `backup`) runs the same script on a schedule: the ledger's own pinned
+  image with the ledger's hardening, its scripts mounted read-only, the ledger DSN from `.env` like every broker
+  service, and dumps written 0600 to `BR0KR_BACKUP_DIR` on the host, owned by `BR0KR_BACKUP_USER`. Inside the
+  container the script sees only `/backups`, so its own checkout guard cannot see the host path; `deploy.sh` refuses
+  a `BR0KR_BACKUP_DIR` that is relative, inside the checkout or inside any git work tree instead (review OPS-04;
+  `tests/unit/test_day2_runbook.py`, `tests/unit/test_deploy_script.py`).
   *Residual:* if the operator runs replication WITHOUT guaranteeing a single primary, a split-brain
   defeats single-writer (see the C9 note above — the harness proves the CLEAN fence-then-promote case,
   not split-brain, which is by construction out of scope); and a ledger with no backups can still be

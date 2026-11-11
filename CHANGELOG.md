@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **A day-2 runbook and scheduled ledger backups.** Upgrade, rollback, rotation and decommission lived in memory;
+  `day2-operations.md` writes them down, and profile `backup` dumps the ledger hourly from inside the stack (OPS-04).
 - **Shipped alert rules, and the counters they need.** Nothing fired on no leader, failing ticks or erroring admits;
   `docker/prometheus/br0kr-alerts.yml` + `alerts.md`, promtool-tested in CI; gateway `/metrics` on :9091 (OPS-03).
 - **A version tag publishes the release.** Nothing could `docker pull` br0kr; `release.yml` gates the image on

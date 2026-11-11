@@ -150,7 +150,7 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 
 | Script | Proves | Port |
 |--------|--------|------|
-| `run_compose_smoke.sh` | The whole Compose stack: migrations, a streaming standby, a leader, both gateways and their tool split. | 18080, 18082 |
+| `run_compose_smoke.sh` | The whole Compose stack: migrations, a streaming standby, a leader, both gateways and their tool split, the gateway's unpublished metrics port, a scheduled ledger dump, and the day-2 runbook's standby re-clone and ledger restore, run as written. | 18080, 18082 |
 | `run_tls_smoke.sh` | The TLS override: Caddy terminates TLS and the plain ports are unpublished. | 18443, 18444 |
 | `run_standby_dr_smoke.sh` | The stretched-DR standby: TLS and scram replication. | 55432 |
 
@@ -162,6 +162,7 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 | `tls-up.sh` | Starts the stack with the built-in Caddy TLS front door; refuses a Compose version that would leave the plain ports published. | [docker-deploy §10](../docs/runbooks/docker-deploy.md#10-tls-termination-optional-built-in-caddy) |
 | `backup_ledger.sh` | A `pg_dump` of the ledger, mode `0600`, with retention. | [ledger-ha](../docs/runbooks/ledger-ha.md#backups-durability) |
 | `restore_ledger.sh` | Restores a dump in one transaction; refuses over live leases without `--force`. | [ledger-ha](../docs/runbooks/ledger-ha.md#restore-drill-practice-this-before-you-need-it) |
+| `ledger_backup_loop.sh` | Runs `backup_ledger.sh` every `BACKUP_EVERY_SECONDS` (`BACKUP_ONCE=1`: one dump); the entrypoint of the opt-in `ledger-backup` compose service. | [day2-operations](../docs/runbooks/day2-operations.md#backup-schedule) |
 | `bake_template_agent.sh` | Installs and enables `qemu-guest-agent` inside a cloud image before it becomes a template. | [vm-access §2](../docs/runbooks/vm-access.md#2-prepare-a-cloud-init-template-operator-once-per-cluster) |
 | `check_alert_rules.sh` | Runs `promtool check rules` and `promtool test rules` on the shipped alert rules in a digest-pinned Prometheus image (no network, no ports). CI runs it; run it after changing a rule or a threshold. | [alerts](../docs/runbooks/alerts.md) |
 
