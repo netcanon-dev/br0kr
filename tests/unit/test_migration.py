@@ -217,6 +217,19 @@ def test_run_pending_routed_routes_to_the_source_clusters_driver(monkeypatch):
     assert seen["driver"] is sentinel and seen["source"] == "srcNode" and seen["beat"] is beat
 
 
+def test_run_pending_routed_starts_no_migration_once_told_to_stop(monkeypatch):
+    """With `should_stop` True the pass drives no migration step (the heartbeat before it still fires, which is
+    what lets the daemon notice a lost leadership in the first place). Guards review REL-05: copies 2..N of a
+    batch started fresh after the daemon knows it lost the leader lock."""
+    conn = _ListConn([_PENDING_ROW])
+    stepped: list[object] = []
+    monkeypatch.setattr(migration, "run_migration_step", lambda *a, **k: stepped.append(a) or a[1])
+    beats: list[int] = []
+    out = migration.run_pending_routed(conn, lambda _src: object(), limit=10, on_progress=lambda: beats.append(1),
+                                       should_stop=lambda: True)
+    assert out == [] and stepped == [] and beats == [1]
+
+
 def test_run_pending_routed_isolates_a_failing_step(monkeypatch):
     """A migration whose step RAISES is logged + skipped (its poisoned txn rolled back) so it can retry
     next pass — one stuck migration never aborts the batch. Guards a single PDM/DB blip cascade-breaking

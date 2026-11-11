@@ -7,10 +7,11 @@ lease; `provision_lease` here takes it from ADMITTED to a running guest; the rea
 
 **Single-writer contract + a DB backstop (load-bearing).** `provision_lease` reads
 `driver.nextid()` (`/cluster/nextid`), an UNRESERVED vmid — two callers reading it in the
-~1-tick failover-overlap window could once collide two leases on one vmid at CREATE (the
+failover-overlap window (the step in flight when a dropped leader notices, REL-05) could once collide two
+leases on one vmid at CREATE (the
 per-VMID fence stops a stale DESTROY, not a colliding create). Single-writer is still the
 steady-state model: br0kr/daemon.py holds the leader advisory lock (br0kr/leader.py) and
-re-checks it each tick, so one reconciler drives provisioning. The residual overlap window
+re-checks it before and during each tick, so one reconciler drives provisioning. The residual overlap window
 is now CLOSED at the database: `begin_provisioning` stamps the vmid under a per-cluster
 UNIQUE index (`lease_cluster_vmid_uniq`, migration 0004), so a second reconciler's
 double-stamp raises `lease.VmidContended` (surfaced here as `vmid_contended`) BEFORE any

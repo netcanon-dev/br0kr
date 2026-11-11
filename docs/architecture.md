@@ -349,8 +349,8 @@ rejected as "node full" by the very lease it already created.
   blip never strands a lease or orphans a guest. Proven end-to-end **live on a real PVE node**
   (`scripts/harness_reconcile.py`: admit → real disk-backed VM → ACTIVE → release → reaper destroys →
   freed). **Single-writer contract + DB backstop:** `nextid()` is unreserved, so `provision_lease` runs
-  single-threaded — ENFORCED by the leader advisory lock (below). The residual ~1-tick failover-overlap
-  window is now also **closed at the database**: `begin_provisioning` stamps the vmid under a per-cluster
+  single-threaded — ENFORCED by the leader advisory lock (below). The residual failover-overlap window (the
+  actuation step in flight when a dropped leader notices, review REL-05) is now also **closed at the database**: `begin_provisioning` stamps the vmid under a per-cluster
   UNIQUE index (`lease_cluster_vmid_uniq`, migration `0004`), so a second reconciler's double-stamp raises
   `lease.VmidContended` (a `vmid_contended` miss; the lease retries with a fresh vmid) BEFORE any guest is
   created — two guests can no longer land on one vmid (proven `scripts/harness_vmid_race.py`, GO 14/14).
@@ -427,8 +427,9 @@ rejected as "node full" by the very lease it already created.
   daemon serves every node in its registry. On an interval it provisions ADMITTED leases — routed to
   each lease's node driver, polled only for served nodes, bounded per tick so a backlog can't starve
   teardown — runs `reap_once` (with the routing destroyer), and periodically runs the orphan sweep per
-  node. `run()` claims the leader lock before serving and re-checks it every tick
-  (`leader.still_leader`), so a network-orphaned ex-leader stops before a standby can overlap it; a
+  node. `run()` claims the leader lock before serving and re-checks it before every tick and, from the
+  heartbeat, during it at most once per interval (`leader.still_leader`, review REL-05), so a network-orphaned
+  ex-leader starts no new step once it notices and stops before a standby can overlap it for long; a
   second instance is a hot standby. Work runs on fresh autocommit connections; `python -m br0kr.daemon`
   is the entrypoint. Proven live on a real PVE node (`scripts/harness_daemon.py`: a tick provisions a real VM →
   reaps it; the sweep keeps a live guest but destroys a terminal-lease orphan; and
@@ -526,7 +527,7 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
    (`scripts/harness_reconcile.py`, disk-backed guest, full admit→provision→release→reap cycle).
 8. ✅ A long-running service: `br0kr/daemon.py` drives `provision_lease`/`reap_once` on an interval
    (provisioning bounded per tick so it can't starve teardown); a **leader advisory lock**
-   (`br0kr/leader.py`, re-checked each tick + connection keepalives) enforces the single-writer
+   (`br0kr/leader.py`, re-checked before and during each tick + connection keepalives) enforces the single-writer
    contract; an **orphan sweep** (`br0kr/sweeper.py`, fence-scan tagged guests vs the ledger, with a
    mass-absent circuit-breaker) is the teardown backstop; the gateway runs as an MCP server
    (`python -m br0kr.mcp_server`) alongside the daemon (`python -m br0kr.daemon`) — **proven live on

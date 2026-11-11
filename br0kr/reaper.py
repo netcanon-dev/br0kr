@@ -77,6 +77,7 @@ def reap_once(
     on_progress: Callable[[], None] | None = None,
     max_attempts: int = MAX_RELEASE_ATTEMPTS,
     provision_stuck_seconds: int = lease.PROVISION_STUCK_SECONDS,
+    should_stop: Callable[[], bool] | None = None,
 ) -> ReapSummary:
     """Run one reaper pass. ``destroy(claimed)`` receives the whole `ClaimedLease` (so
     a fenced driver can check `claimed.id` against the guest's fence before deleting
@@ -96,7 +97,13 @@ def reap_once(
 
     ``provision_stuck_seconds`` is the PROVISIONING budget (0048, review REL-01; the daemon threads the
     hot-applied `operator_setting.provision_stuck_seconds`): a lease still PROVISIONING this long after
-    `begin_provisioning` is reclaimed as 'provision_stuck' in step 1. 0 turns the step off."""
+    `begin_provisioning` is reclaimed as 'provision_stuck' in step 1. 0 turns the step off.
+
+    ``should_stop`` (optional) is asked before the teardown claim and before each claimed lease's teardown; True
+    ends the pass there (the daemon passes `_halted`: shutting down, or leadership lost mid-tick, review REL-05).
+    Asked first, it claims nothing, so a pass entered already stopped spends no release attempt. The leases a
+    pass claimed but did not reach keep their `reclaim_at` stamp, so any reaper re-claims them after
+    ``grace_seconds`` (that skipped hand-out counts toward ``max_attempts``, as a stalled destroyer's would)."""
     summary = ReapSummary()
     with push_context(run_id=generate_correlation_id(), op="reap"):
         # Queued (PENDING) leases past their wait deadline → REJECTED(queue_timeout). A pure state
@@ -109,9 +116,13 @@ def reap_once(
         # First, so a lease past both thresholds is labelled provision_stuck rather than expired.
         summary.provision_stuck = len(lease.claim_provisioning_stale(conn, provision_stuck_seconds, batch))
         summary.expired = len(lease.claim_expired(conn, batch))
+        if should_stop is not None and should_stop():
+            return summary   # claim no teardown we would not start: the hand-out counts toward max_attempts
         for t in lease.claim_releasing(conn, grace_seconds, batch):
             if on_progress is not None:
                 on_progress()   # heartbeat before a single slow destroy (liveness vs a long batch)
+            if should_stop is not None and should_stop():
+                break   # start no new teardown; the rest are re-claimed after the grace
             if t.vmid is None:
                 # Reaped before it ever got a guest (e.g. expired while ADMITTED):
                 # nothing to destroy, just settle the ledger.

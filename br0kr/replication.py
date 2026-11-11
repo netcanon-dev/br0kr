@@ -1640,15 +1640,22 @@ def list_advanceable(conn: psycopg.Connection[Any], limit: int = 20) -> list[Rep
 def run_pending_replications(
     conn: psycopg.Connection[Any], driver_for: Callable[[str], pve.Pve | None], *, limit: int = 20,
     stale_seconds: int = STALE_SECONDS_DEFAULT, on_progress: Callable[[], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[ReplicationJob]:
     """Advance every advanceable job one step, resolving the per-job driver by its target NODE (clone_shared
     hosts the copy on the source node, so the driver is that node's). A job with no resolvable driver (its node
     left the fleet) is skipped this pass. `stale_seconds` sizes the reservation TTL (2× the cutoff). A step that
     RAISES is logged + skipped (retried next pass) — one wedged job never stalls the batch. Returns the advanced
-    jobs. The CALLER passes a NON-autocommit connection (S11)."""
+    jobs. The CALLER passes a NON-autocommit connection (S11). `on_progress` is beaten before each job and threaded
+    into the copy. ``should_stop`` (optional) is asked before each item; True ends the pass there, starting
+    no new one (the daemon passes `_halted`: shutting down, or leadership lost mid-tick, review REL-05)."""
     reservation_ttl = RESERVATION_TTL_FACTOR * stale_seconds
     out: list[ReplicationJob] = []
     for job in list_advanceable(conn, limit):
+        if on_progress is not None:
+            on_progress()   # progress: about to drive one replication step (a copy can be slow)
+        if should_stop is not None and should_stop():
+            break
         driver = driver_for(job.target_node_id) if job.target_node_id else None
         if driver is None:
             continue
@@ -1669,6 +1676,7 @@ def run_pending_replications(
 def reclaim_stale_replications(
     conn: psycopg.Connection[Any], driver_for: Callable[[str], pve.Pve | None], *,
     stale_seconds: int = STALE_SECONDS_DEFAULT, on_progress: Callable[[], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     """Reclaim stale/wedged COPYING/CONVERTING/RECLAIMING jobs (DESTROY-first on the STAMPED node, ADOPTING an
     unfenced landed clone, then FAIL + settle) + finalize-retry a READY job whose fence strip failed + reclaim a
@@ -1677,9 +1685,17 @@ def reclaim_stale_replications(
     Returns the count reclaimed. Mirrors daemon._reclaim_builds: an INCONCLUSIVE teardown — a destroy that RAISES,
     a clone still materializing, or NO served driver for the stamped node — leaves the job non-terminal (or, for
     the leaked-guest phase, guest_settled_at NULL) for the next cutoff, never settling while a guest may be live.
-    Caller passes a NON-autocommit conn."""
+    Caller passes a NON-autocommit conn. ``should_stop`` (optional) is asked before each item; True ends the
+    pass there, starting no new one (the daemon passes `_halted`: shutting down, or leadership lost mid-tick,
+    review REL-05). A job not reached is left for the next pass."""
     wall_cap = WALL_CAP_FACTOR * stale_seconds
     reclaimed = 0
+
+    def stopping() -> bool:   # beat first: the heartbeat is what notices a lost leadership
+        if on_progress is not None:
+            on_progress()
+        return should_stop is not None and should_stop()
+
     # 1. finalize-retry: a READY job still carrying its fence (guest_settled_at NULL) is repairable — re-drive
     #    the strip so a sweep can't trip on the lingering fence (§5.3), AND settle its reservation (a crash
     #    between _mark_ready and settle leaks the byte floor until TTL — the READY instance already floors the
@@ -1689,6 +1705,8 @@ def reclaim_stale_replications(
             "WHERE job_state = 'READY' AND guest_settled_at IS NULL AND vmid IS NOT NULL "
             "ORDER BY updated_at LIMIT 20").fetchall():
         conn.commit()
+        if stopping():
+            return reclaimed
         rid, vmid, node_id = int(row[0]), int(row[1]), row[2]
         _settle_by_key(conn, rid)   # M5: leak-proof re-settle (idempotent) — runs even if the node is unserved
         driver = driver_for(node_id) if node_id else None
@@ -1720,6 +1738,8 @@ def reclaim_stale_replications(
             "WHERE job_state = 'FAILED' AND guest_settled_at IS NULL AND vmid IS NOT NULL "
             "ORDER BY updated_at LIMIT 20").fetchall():
         conn.commit()
+        if stopping():
+            return reclaimed
         rid, node_id = int(row[0]), row[1]
         if node_id is None:
             # The host NODE was deleted (target_node_id is FK ON DELETE SET NULL) — no served daemon can ever
@@ -1750,6 +1770,8 @@ def reclaim_stale_replications(
                  fresh.vmid, extra={"replication_id": rid, "vmid": fresh.vmid})
     # 2. stale / wedged reclaim.
     for job in stale_replications(conn, stale_seconds, wall_cap):
+        if stopping():
+            return reclaimed
         claim = claim_stale_for_reclaim(conn, job.id, stale_seconds, wall_cap)
         if claim is None:
             continue   # lost — the job progressed/completed since the scan

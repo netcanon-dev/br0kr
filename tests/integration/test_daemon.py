@@ -10,12 +10,16 @@ No DB, no Proxmox; the live end-to-end is scripts/harness_daemon.py.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from br0kr import daemon as daemon_mod
 from br0kr import leader, lease, ledgerhealth, nodes, observability, placement, reaper, reconciler, sweeper
 from br0kr.lease import AdmittedLease
+
+# The real held re-check, captured before the `wired` fixture patches it out (a REL-05 test drives it).
+_REAL_RECHECK_HELD = daemon_mod.Daemon._recheck_held
 
 pytestmark = pytest.mark.integration
 
@@ -118,8 +122,9 @@ def wired(monkeypatch):
     monkeypatch.setattr(reconciler, "discover_and_stamp_ip", fake_discover)
 
     def fake_reap(conn, destroy, grace_seconds=30, batch=100, on_progress=None, max_attempts=5,
-                  provision_stuck_seconds=1200):
+                  provision_stuck_seconds=1200, should_stop=None):
         rec["reap_calls"] += 1
+        rec["reap_should_stop"] = should_stop   # REL-05: the daemon threads its _halted
         rec["reap_provision_stuck_seconds"] = provision_stuck_seconds   # 0048: the daemon threads its dial
         rec["reap_on_progress"] = on_progress
         rec["reap_max_attempts"] = max_attempts   # the daemon threads its (hot-applied) release ceiling
@@ -138,8 +143,9 @@ def wired(monkeypatch):
     monkeypatch.setattr(daemon_mod.Daemon, "_apply_settings", lambda self, conn: None)
     monkeypatch.setattr(daemon_mod.settings, "take_reload", lambda conn: False)
 
-    def fake_sweep_all(conn, drivers, dry_run=False, allow_mass_absent=False, on_progress=None):
+    def fake_sweep_all(conn, drivers, dry_run=False, allow_mass_absent=False, on_progress=None, should_stop=None):
         rec["sweep_calls"] += 1
+        rec["sweep_should_stop"] = should_stop   # REL-05: the daemon threads its _halted
         rec["sweep_dry_run"] = dry_run
         rec["sweep_on_progress"] = on_progress
         rec["swept_drivers"] = [nid for nid, _ in drivers]
@@ -709,6 +715,222 @@ def test_serve_exits_when_leadership_is_lost(wired, monkeypatch):
     monkeypatch.setattr(leader, "still_leader", lambda conn, name: False)
     d.serve(_FakeConn())
     assert wired["provisioned"] == [] and wired["reap_calls"] == 0   # never ticked
+
+
+def _lose_leadership_when(monkeypatch, state: dict) -> list[int]:
+    """still_leader answers True until `state["lost"]` is set (the session dropped), then False; returns the
+    list the probes are counted into (one entry per probe)."""
+    probes: list[int] = []
+
+    def still(conn, name):
+        probes.append(1)
+        return not state["lost"]
+
+    monkeypatch.setattr(leader, "still_leader", still)
+    return probes
+
+
+def test_serve_stops_the_tick_when_leadership_is_lost_between_two_provisions(wired, monkeypatch):
+    """The leader session drops while lease 5's clone runs: the heartbeat from inside that step (a PVE task wait's
+    `on_progress`) re-checks leadership and notices, so lease 6 is never provisioned, the tick ends before the
+    reap, and serve() returns at once (no interval wait, no second tick). The lost tick is not a FAILED tick, its
+    partial summary (one provision) is still published into the counters, and serve() leaves no leader
+    connection or loss flag behind. Guards review REL-05: leadership was checked only at the top of each tick, so
+    an ex-leader finished a tick that can run for tens of minutes (clones, downloads, copies) on a lock a standby
+    may already hold."""
+    wired["admitted"] = [AdmittedLease(5, "n1", 1.0, 512), AdmittedLease(6, "n1", 1.0, 512)]
+    state = {"lost": False}
+    probes = _lose_leadership_when(monkeypatch, state)
+    real_provision = reconciler.provision_lease
+    seen: dict[str, bool] = {}
+
+    def provision_then_drop(conn, driver, lid, **kw):
+        out = real_provision(conn, driver, lid, **kw)
+        state["lost"] = True        # the session drops during this clone...
+        kw["on_progress"]()         # ...and the step's next PVE poll heartbeat notices
+        seen.setdefault("noticed_in_step", d._leadership_lost)
+        return out
+
+    monkeypatch.setattr(reconciler, "provision_lease", provision_then_drop)
+    d = _daemon(interval=0.0)       # every heartbeat is due for a re-check
+    waits: list[float] = []
+    monkeypatch.setattr(d._stop, "wait", lambda timeout=None: waits.append(timeout) or False)
+    d.serve(_FakeConn())
+    assert seen == {"noticed_in_step": True} and probes             # the step's own heartbeat noticed
+    assert [p[0] for p in wired["provisioned"]] == [5]              # lease 6 never started
+    assert wired["reap_calls"] == 0                                  # the tick ended at the phase boundary
+    assert waits == [] and d._consecutive_tick_failures == 0        # returned at once; not a failed tick
+    assert d._health.last["provisioned"] == 1                        # the partial tick still counts
+    assert (d._leader_conn, d._leadership_lost) == (None, False)    # nothing left for a standby or a bare tick
+
+
+def test_leadership_lost_during_the_reap_skips_the_rest_of_the_tick(wired, monkeypatch):
+    """A drop noticed during the reap (its per-destroy heartbeat) ends the tick at the next phase boundary: IP
+    discovery (and everything after it) does not run, and serve() re-stands-by. The reap itself was handed the
+    daemon's `_halted`, so its own loop starts no new teardown either. Guards a checkpoint that covers only the
+    provisioning loop while the later phases (promotion, builds, copies, the sweep) still run on a lost lock."""
+    state = {"lost": False}
+    _lose_leadership_when(monkeypatch, state)
+    real_reap = reaper.reap_once
+
+    def reap_then_drop(conn, destroy, **kw):
+        state["lost"] = True
+        return real_reap(conn, destroy, **kw)   # the fake calls on_progress once (a per-destroy beat)
+
+    monkeypatch.setattr(reaper, "reap_once", reap_then_drop)
+    d = _daemon(interval=0.0)
+    d.serve(_FakeConn())
+    assert wired["reap_calls"] == 1 and wired["reap_should_stop"] == d._halted
+    assert "awaiting_env_template" not in wired                  # IP discovery never ran
+
+
+def test_a_loss_in_the_last_phase_still_returns_without_waiting(wired, monkeypatch):
+    """A drop noticed in the tick's last phase (the audit prune, which has no checkpoint after it) lets the tick
+    complete, and serve() still returns at once instead of waiting out the interval and starting another tick.
+    Guards the exit check that runs after a COMPLETED tick, not only after one cut short."""
+    state = {"lost": False}
+    _lose_leadership_when(monkeypatch, state)
+    d = _daemon(interval=0.0)
+    monkeypatch.setattr(d, "_audit_prune_due", lambda: True)
+
+    def prune_then_drop(conn):
+        state["lost"] = True
+        d._beat()
+        return 0
+
+    monkeypatch.setattr(d, "_prune_audit", prune_then_drop)
+    waits: list[float] = []
+    monkeypatch.setattr(d._stop, "wait", lambda timeout=None: waits.append(timeout) or False)
+    d.serve(_FakeConn())
+    assert wired["reap_calls"] == 1 and waits == []      # the tick ran to its end, then serve returned at once
+    assert d._ticks == 1
+
+
+def test_a_shutdown_mid_tick_still_runs_the_later_phases(wired, monkeypatch):
+    """stop() during a provision ends the provisioning loop (lease 6 never starts) but is not a leadership loss:
+    the later phases are still entered (the reap is called), and the `_halted` they are handed answers True, so
+    their loops start no new item. Guards the checkpoint treating a shutdown as a leadership loss, which would
+    raise out of every stopping leader's tick and skip its cheap ledger-only phases."""
+    monkeypatch.setattr(leader, "still_leader", lambda conn, name: True)
+    wired["admitted"] = [AdmittedLease(5, "n1", 1.0, 512), AdmittedLease(6, "n1", 1.0, 512)]
+    real_provision = reconciler.provision_lease
+
+    def provision_then_stop(conn, driver, lid, **kw):
+        out = real_provision(conn, driver, lid, **kw)
+        d.stop()
+        return out
+
+    monkeypatch.setattr(reconciler, "provision_lease", provision_then_stop)
+    d = _daemon(interval=0.0)
+    d.serve(_FakeConn())
+    assert [p[0] for p in wired["provisioned"]] == [5]
+    assert wired["reap_calls"] == 1 and wired["reap_should_stop"]() is True
+
+
+def test_a_lost_leadership_starts_no_new_item_in_any_daemon_loop(wired, monkeypatch):
+    """Once a mid-tick re-check has set the loss, every item loop in the daemon starts nothing: the build loop
+    claims no build, the build reclaim claims no stale build, IP discovery queries no guest agent, the promoter
+    promotes no queued lease, and the held re-check re-checks no held lease. Each asks `_halted` before its next
+    item. Guards an item loop that still checks only the shutdown flag (the pre-REL-05 shape) and so keeps
+    actuating after the loss."""
+    touched: list[str] = []
+    monkeypatch.setattr(daemon_mod.build, "claim_next_build", lambda c: touched.append("build"))
+    monkeypatch.setattr(daemon_mod.build, "stale_builds",
+                        lambda c, s: [SimpleNamespace(id=1, vmid=None, node_id="n1", stage="clone")])
+    monkeypatch.setattr(daemon_mod.build, "claim_stale_for_reclaim", lambda *a, **k: touched.append("reclaim"))
+    monkeypatch.setattr(lease, "list_queued", lambda c, limit=100: [SimpleNamespace(id=3)])
+    monkeypatch.setattr(daemon_mod.Daemon, "_recheck_held", _REAL_RECHECK_HELD)   # wired patched it out
+    monkeypatch.setattr(lease, "list_held", lambda conn, limit=100, node_ids=None: [SimpleNamespace(id=7)])
+    wired["ip_pending"] = [lease.IpPending(id=7, node_id="n1", vmid=9007)]
+    d = _daemon(build_limit=2)
+    monkeypatch.setattr(d, "_placement_for", lambda *a, **k: touched.append("held"))
+    d._leader_conn, d._leadership_lost = _FakeConn(), True
+    assert d._build_templates(_FakeConn()) == 0
+    assert d._reclaim_builds(_FakeConn()) == 0
+    assert d._discover_ips(_FakeConn()) == 0 and "ip_discovered" not in wired
+    assert d._promote(_FakeConn()) == (0, 1)
+    d._recheck_held(_FakeConn(), daemon_mod.TickSummary())
+    assert touched == []
+
+
+def test_the_daemon_hands_halted_to_every_batch_pass(wired, monkeypatch):
+    """The daemon passes its `_halted` as `should_stop` to the sweep, the migration pass, the replication pass and
+    the replication reclaim (the reap is pinned by the reap test above), so each starts no new item once the
+    leader is lost or stopping. Guards dropping the argument at one call site, which leaves that pass running its
+    whole batch on a lost lock while every other test stays green."""
+    from br0kr import migration, replication
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(migration, "run_pending_routed", lambda *a, **k: seen.__setitem__("migrate", k) or [])
+    monkeypatch.setattr(replication, "run_pending_replications",
+                        lambda *a, **k: seen.__setitem__("replicate", k) or [])
+    monkeypatch.setattr(replication, "reclaim_stale_replications", lambda *a, **k: seen.__setitem__("reclaim", k) or 0)
+    d = _daemon(sweep_every=1)
+    d.tick(_FakeConn())
+    d._migrate(_FakeConn())
+    d._run_replications(_FakeConn())
+    d._reclaim_replications(_FakeConn())
+    assert wired["sweep_should_stop"] == d._halted
+    assert all(seen[k]["should_stop"] == d._halted for k in ("migrate", "replicate", "reclaim")), seen
+
+
+@pytest.mark.parametrize("lose_in", ["sweep", "build_reclaim"])
+def test_a_loss_in_the_sweep_block_skips_its_later_steps(lose_in, wired, monkeypatch):
+    """A drop noticed during the orphan sweep skips the stale-build reclaim, and one noticed during the build
+    reclaim skips the replication reclaim and the placement preflight: the sweep block checkpoints after each
+    step that can destroy guests. Guards the two sweep-cadence checkpoints, whose removal would let the rest of a
+    sweep tick run on a lost lock."""
+    state = {"lost": False}
+    _lose_leadership_when(monkeypatch, state)
+    ran: list[str] = []
+    real_sweep = sweeper.orphan_sweep_all
+
+    def sweep(conn, drivers, **kw):
+        if lose_in == "sweep":
+            state["lost"] = True
+            kw["on_progress"]()
+        return real_sweep(conn, drivers, **kw)
+
+    monkeypatch.setattr(sweeper, "orphan_sweep_all", sweep)
+    d = _daemon(interval=0.0, sweep_every=1, build_limit=1, replicate_connect=lambda: _FakeConn())
+    monkeypatch.setattr(daemon_mod.build, "claim_next_build", lambda c: None)
+
+    def reclaim_builds(conn):
+        ran.append("build_reclaim")
+        if lose_in == "build_reclaim":
+            state["lost"] = True
+            d._beat()
+        return 0
+
+    monkeypatch.setattr(d, "_reclaim_builds", reclaim_builds)
+    monkeypatch.setattr(d, "_reclaim_replications", lambda c: ran.append("repl_reclaim") or 0)
+    d.serve(_FakeConn())
+    assert ran == ([] if lose_in == "sweep" else ["build_reclaim"])
+
+
+def test_mid_tick_leadership_rechecks_run_at_most_once_per_interval(monkeypatch):
+    """The heartbeat re-checks leadership only while serve() holds a leader connection, and from mid-tick beats at
+    most once per `interval`; the serve loop's own beat forces one. Guards a probe on EVERY heartbeat (a PVE task
+    wait beats every few seconds, a reap per destroy) and a standby or a bare tick probing a connection that is
+    not a leader's."""
+    probes: list[int] = []
+    monkeypatch.setattr(leader, "still_leader", lambda conn, name: probes.append(1) or True)
+    clock = {"t": 100.0}
+    monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: clock["t"])
+    d = _daemon(interval=5.0)
+    d._beat()
+    assert probes == []                       # no leader connection: nothing to probe
+    d._leader_conn, d._leader_checked_at = _FakeConn(), 100.0
+    for t in (101.0, 103.0, 104.9):
+        clock["t"] = t
+        d._beat()
+    assert probes == []                       # within the interval of the last re-check
+    clock["t"] = 105.0
+    d._beat()
+    d._beat()
+    assert len(probes) == 1                   # due once, then throttled again
+    d._beat(recheck_leader=True)
+    assert len(probes) == 2                   # the serve loop's beat always re-checks
+    assert d._last_progress_at == 105.0       # and every beat still stamps progress
 
 
 def test_serve_counts_tick_failures_and_publishes_them_then_resets_on_success(wired, monkeypatch):

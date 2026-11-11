@@ -134,6 +134,7 @@ def orphan_sweep(
     dry_run: bool = False,
     allow_mass_absent: bool = False,
     on_progress: Callable[[], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> SweepSummary:
     """One reconciliation pass: destroy every fenced guest whose lease is terminal, or
     absent-and-below-the-rollback-watermark. Safe to run on an interval. ``dry_run=True``
@@ -150,8 +151,16 @@ def orphan_sweep(
     ``node_id`` (the swept node) scopes the clone-orphan reclaim's ledger guard to that node's CLUSTER, so
     a same-numbered vmid live in ANOTHER cluster can't mask a genuine orphan here (vmids are per-cluster).
     ``orphan_sweep_all`` passes it; ``None`` (a single-cluster / direct-call use) keeps the global match.
+
+    ``should_stop`` (optional) is asked before each item; True ends the pass there, starting no new one
+    (the daemon passes `_halted`: shutting down, or leadership lost mid-tick, review REL-05). A guest not
+    reached is swept next pass.
     """
     summary = SweepSummary()
+
+    def stopping() -> bool:
+        return should_stop is not None and should_stop()
+
     with push_context(run_id=generate_correlation_id(), op="orphan_sweep"):
         fenced = driver.list_fenced()
         summary.scanned = len(fenced)
@@ -232,6 +241,8 @@ def orphan_sweep(
         for vmid in clone_orphans:
             if on_progress is not None:
                 on_progress()   # heartbeat before a single slow clone-orphan reclaim
+            if stopping():
+                break
             if not lease.clone_orphan_reclaimable(conn, vmid, node_id):
                 summary.clone_spared += 1   # vmid still owned by a LIVE lease (or absent) — NOT ours-and-done
                 log.info("unfenced template-clone vmid %s SPARED — no terminal-lease evidence (still live / "
@@ -268,6 +279,8 @@ def orphan_sweep(
         for vmid, rid in repl_orphans:
             if on_progress is not None:
                 on_progress()   # heartbeat before a single slow repl-orphan reclaim
+            if stopping():
+                break
             if not replication.repl_orphan_reclaimable(conn, vmid, rid):
                 summary.repl_spared += 1   # no FAILED-job positive evidence — still live / READY / unknown
                 log.info("replication-copy vmid %s (job %s fence) SPARED — no FAILED-job positive evidence "
@@ -316,6 +329,8 @@ def orphan_sweep(
         for vmid, lease_id, state in orphans:
             if on_progress is not None:
                 on_progress()   # heartbeat before a single slow orphan destroy (liveness vs a long sweep)
+            if stopping():
+                break
             log.warning(
                 "orphan guest vmid %s fenced to lease %s (lease state=%s) — %s",
                 vmid, lease_id, state if state is not None else "absent",
@@ -346,6 +361,7 @@ def orphan_sweep_all(
     dry_run: bool = False,
     allow_mass_absent: bool = False,
     on_progress: Callable[[], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, SweepSummary]:
     """Run `orphan_sweep` once PER node (multi-node deployment), returning a
     {node_id: SweepSummary} map. Each node's scan + circuit-breaker is independent — a
@@ -353,12 +369,16 @@ def orphan_sweep_all(
     global, so per-node is the correct granularity. A driver that raises (a node's API is
     down) is logged and the other nodes are still swept. ``on_progress`` (optional) is
     forwarded to each node's sweep as a per-orphan liveness heartbeat (the daemon passes
-    its `_beat`)."""
+    its `_beat`). ``should_stop`` is asked before each node and forwarded (see `orphan_sweep`); a node not
+    reached is swept next pass."""
     out: dict[str, SweepSummary] = {}
     for node_id, driver in drivers:
+        if should_stop is not None and should_stop():
+            break
         try:
             out[node_id] = orphan_sweep(conn, driver, node_id=node_id, dry_run=dry_run,
-                                        allow_mass_absent=allow_mass_absent, on_progress=on_progress)
+                                        allow_mass_absent=allow_mass_absent, on_progress=on_progress,
+                                        should_stop=should_stop)
         except Exception:
             log.exception("orphan sweep failed for node %s — other nodes continue", node_id,
                           extra={"node_id": node_id})

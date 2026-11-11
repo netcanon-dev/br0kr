@@ -85,7 +85,7 @@ PGCONN="host=pg-a,pg-b port=5432 dbname=broker user=broker target_session_attrs=
 
 | Component | What happens | Why it's safe |
 |---|---|---|
-| **Daemon leader conn** | the leader session drops → the advisory lock auto-releases; `serve()` sees `still_leader` go false and stops serving; `run()` reconnects (retrying) and re-stands-by, re-electing on the new primary. | At most the documented ~one-tick overlap (C9 residual); never two long-lived leaders **provided there is one primary**. |
+| **Daemon leader conn** | the leader session drops → the advisory lock auto-releases; `serve()` (before a tick) or the heartbeat (during one, at most once per interval) sees `still_leader` go false, so the tick stops at its next step and the daemon stops serving; `run()` reconnects (retrying) and re-stands-by, re-electing on the new primary. | At most the step in flight when the drop is noticed (C9 residual: minutes for a template download or a copy; the ledger backstops every overlap hazard); never two long-lived leaders **provided there is one primary**. |
 | **Daemon work conn** | the per-tick connect is a single attempt (`db.connect`); a tick whose connect fails is logged by `serve()` and the loop retries on the next interval (the tick loop *is* the retry). | A transient ledger gap delays a reconcile by one interval; it never crashes the daemon. |
 | **MCP gateway** | each tool call borrows a connection from the gateway's pool, which checks it first (a dead or read-only one is discarded and replaced, the new one again on the primary) and waits at most 15 s for one (a pooled connection gives up on an unreachable host after 4 s and libpq tries the next); a short failover is transparent to the agent, a long outage surfaces as an error (not a hang). `wait_for_lease` holds its own connection and reconnects once (retrying). | Bounded — the agent gets an answer or a clear failure, never an indefinite block. |
 | **Dashboard** | each `/api/*` read borrows from the dashboard's pool the same way; `/healthz` opens and closes its own probe connection. | A read during the gap fails cleanly and the page backs off and retries. |
@@ -128,9 +128,9 @@ that long: nothing provisioned or reaped, and `/healthz` green throughout.
 - **Reading a standby's log.** While it waits, a standby logs, every poll:
   `standby: another reconciler is leader (pid 4242 from 192.0.2.7, idle 75s); retrying in 10s`, with the
   structured fields `leader_holder_pid`, `leader_holder_addr` and `leader_holder_idle_s`. A healthy
-  leader's session changes state at least once a tick, so an idle time well beyond your longest tick (a slow
-  clone can make one tick several minutes) from a host you know is gone means the ledger has not noticed
-  yet. If you cannot wait, end it by hand with `SELECT pg_terminate_backend(4242);`. br0kr never does this
+  leader's session answers a probe before every tick and about once per tick interval during one, so an idle
+  time of many intervals (a step that reports no progress for minutes is the exception) from a host you know
+  is gone means the ledger has not noticed yet. If you cannot wait, end it by hand with `SELECT pg_terminate_backend(4242);`. br0kr never does this
   itself: killing a leader that is only slow would force a needless failover.
 
 ---

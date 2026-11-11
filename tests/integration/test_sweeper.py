@@ -457,6 +457,16 @@ def test_on_progress_forwards_to_every_node_in_orphan_sweep_all(states):
     assert len(beats) == 6
 
 
+def test_should_stop_ends_the_sweep_before_the_next_destroy_and_node(states):
+    """`should_stop` is asked before every destroy and every node: turned True after the first destroy, the sweep
+    destroys nothing more on that node and does not start the next node (both are swept next pass). Guards review
+    REL-05: a sweep finishing every node after the daemon knows it lost the leader lock."""
+    states.update({6: "RELEASED", 7: "RELEASED", 5: "RELEASED"})
+    d1, d2 = _FakeDriver([(101, 6), (102, 7)]), _FakeDriver([(103, 5)])
+    out = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)], should_stop=lambda: bool(d1.destroyed))
+    assert d1.destroyed == [(101, 6)] and d2.destroyed == [] and "n2" not in out
+
+
 def test_sweep_threads_its_heartbeat_into_both_destroy_verbs(states):
     """The orphan sweep passes its on_progress into fenced_destroy AND destroy_clone_orphan (review REL-02), so
     a stop + DELETE that runs to its wait budgets during a sweep keeps the daemon's liveness fresh, as the

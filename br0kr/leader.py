@@ -87,9 +87,10 @@ def holder(conn: psycopg.Connection[Any], name: str = DEFAULT_LEADER) -> dict[st
     operator and never a decision input, so it must not break the standby loop: every error is
     swallowed (logged at DEBUG). Call it on an autocommit connection, as the leader one is.
 
-    A healthy leader's session changes state at least once a tick (`still_leader`), so an
-    ``idle_s`` far beyond the longest tick, from a ``client_addr`` whose host is gone, is the
-    signature of a dead leader the ledger has not noticed yet. The remedy is an operator's
+    A healthy leader's session runs `still_leader` before each tick and, while its steps report
+    progress, about once per tick interval during one (review REL-05), so an ``idle_s`` of many
+    intervals, from a ``client_addr`` whose host is gone, is the signature of a dead leader the
+    ledger has not noticed yet. The remedy is an operator's
     ``SELECT pg_terminate_backend(<pid>)``; br0kr never terminates it itself, because killing a
     leader that is only slow would force a needless failover.
     """
@@ -134,8 +135,9 @@ def release(conn: psycopg.Connection[Any], name: str = DEFAULT_LEADER) -> bool:
 
 
 def still_leader(conn: psycopg.Connection[Any], name: str = DEFAULT_LEADER) -> bool:
-    """Best-effort check that this session STILL holds leadership — called each tick so
-    a network-orphaned ex-leader stops serving before a standby's writes can overlap it.
+    """Best-effort check that this session STILL holds leadership — called before each tick and,
+    from the daemon's heartbeat, during it at most once per tick interval (review REL-05), so a
+    network-orphaned ex-leader stops serving before a standby's writes can overlap it.
 
     The lock is session-scoped and only ever released by `release` or the session ending
     (Postgres auto-releases on a dropped connection). Nothing else unlocks it, so for a

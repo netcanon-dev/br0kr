@@ -9,6 +9,8 @@ the level-triggered waiter sweep, and the reserved-namespace/clone-orphan drift-
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import requests
 
@@ -678,3 +680,39 @@ def test_reclaim_vmid_active_states_match_replication_live_states():
     for s in (s for s in replication.LIVE_STATES if s != "REQUESTED"):
         assert f"'{s}'" in lease._REPL_VMID_ACTIVE_SQL
     assert "'REQUESTED'" not in lease._REPL_VMID_ACTIVE_SQL
+
+
+def test_run_pending_replications_starts_no_copy_once_told_to_stop(monkeypatch):
+    """With `should_stop` True the replication pass steps no job, after beating once (the heartbeat that lets the
+    daemon notice a lost leadership). Guards review REL-05: a batch of copies started after the daemon knows it
+    no longer holds the leader lock."""
+    job = SimpleNamespace(id=1, target_node_id="n1")
+    monkeypatch.setattr(replication, "list_advanceable", lambda conn, limit: [job, job])
+    stepped: list[int] = []
+    monkeypatch.setattr(replication, "run_replication_step", lambda *a, **k: stepped.append(1))
+    beats: list[int] = []
+    out = replication.run_pending_replications(object(), lambda _n: object(), on_progress=lambda: beats.append(1),
+                                               should_stop=lambda: True)
+    assert out == [] and stepped == [] and beats == [1]
+
+
+def test_reclaim_stale_replications_stops_before_the_next_job(monkeypatch):
+    """With `should_stop` True the reclaim pass settles, destroys and claims nothing and returns 0: each of its
+    loops asks before every job, so a job not reached waits for the next pass. Guards review REL-05: a teardown
+    pass running on after the daemon knows it lost the leader lock."""
+    class _Rows:
+        def fetchall(self):
+            return [(1, 101, "n1")]
+
+    class _Conn:
+        def execute(self, *a, **k):
+            return _Rows()
+
+        def commit(self):
+            pass
+
+    touched: list[str] = []
+    monkeypatch.setattr(replication, "_settle_by_key", lambda conn, rid: touched.append("settle"))
+    monkeypatch.setattr(replication, "stale_replications", lambda *a, **k: touched.append("scan") or [])
+    assert replication.reclaim_stale_replications(_Conn(), lambda _n: object(), should_stop=lambda: True) == 0
+    assert touched == []

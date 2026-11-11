@@ -884,6 +884,7 @@ def run_pending_routed(
     limit: int = 50,
     *,
     on_progress: Callable[[], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[Migration]:
     """Drive every pending migration one step, routing each to the PDM that fronts its SOURCE cluster —
     the daemon's per-tick migration work (br0kr/daemon.py `_migrate`). `resolve_by_source_node(source_node)`
@@ -893,11 +894,15 @@ def run_pending_routed(
     logged and skipped so it can retry next pass — one stuck migration never blocks the others, exactly as
     one provision failure never aborts a tick. `on_progress` is beaten before each migration AND threaded
     into the slow actuation (see `run_migration_step`) so a long in-flight migration keeps the daemon live.
+    ``should_stop`` (optional) is asked before each item; True ends the pass there, starting no new one
+    (the daemon passes `_halted`: shutting down, or leadership lost mid-tick, review REL-05).
     Returns the migrations it advanced (their post-step state)."""
     out: list[Migration] = []
     for mig in list_pending(conn, limit=limit):
         if on_progress is not None:
             on_progress()   # progress: about to drive one migration (its actuation can be slow)
+        if should_stop is not None and should_stop():
+            break
         driver = resolve_by_source_node(mig.source_node)
         if driver is None:
             log.info("migration %s: source node %s has no PDM-capable cluster — left pending", mig.id,

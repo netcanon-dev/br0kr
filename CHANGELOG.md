@@ -65,6 +65,8 @@ resolve in this repository.
   more release, then goes (review UX-03).
 
 ### Fixed
+- **A leader that loses its ledger session stops mid-tick, not after it** (REL-05). The heartbeat re-checks leadership
+  at most once per interval; the tick ends at its next step, so the overlap is one step, not one tick (tens of min).
 - **The documented sync-standby alert paged forever on an async ledger.** It keyed on `standbys_sync == 0`, always
   true for the bundled pair; it now keys on new `br0kr_ledger_sync_required` (`synchronous_standby_names` set).
 

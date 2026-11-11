@@ -156,6 +156,31 @@ def test_on_progress_heartbeats_once_per_claimed_lease(seam):
     assert len(beats) == 3   # one heartbeat per claimed lease, before each (slow) destroy
 
 
+def test_should_stop_ends_the_pass_before_the_next_teardown(seam):
+    """When `should_stop` turns True after the first teardown (the daemon's leadership was lost mid-tick, or it is
+    shutting down), the reaper starts no further destroy: the rest of the claimed batch is left for any reaper to
+    re-claim after the grace. Guards review REL-05: a reap pass of up to a hundred destroys running on after the
+    process knows it no longer holds the leader lock."""
+    seam["releasing"] = [_claim(1, vmid=901), _claim(2, vmid=902), _claim(3, vmid=903)]
+    destroyed: list[int] = []
+    summary = reaper.reap_once(object(), lambda cl: destroyed.append(cl.vmid), grace_seconds=0,
+                               should_stop=lambda: bool(destroyed))
+    assert destroyed == [901] and seam["released"] == [1] and summary.released == 1
+
+
+def test_a_pass_entered_already_stopped_claims_no_teardown(seam, monkeypatch):
+    """With `should_stop` already True (the daemon was told to stop, or lost leadership, before the reap), the pass
+    claims no RELEASING lease at all, so no release attempt is spent on a teardown nobody starts; its ledger-only
+    steps still run. Guards a halted pass that claims the whole batch first: each such pass would bump every due
+    lease's release_attempts, and at a low max_release_attempts one restart would abandon live guests to
+    RELEASE_FAILED."""
+    claimed: list[int] = []
+    monkeypatch.setattr(lease, "claim_releasing", lambda *a, **k: claimed.append(1) or [_claim(1, vmid=901)])
+    seam["expired"] = [_claim(2, vmid=902)]
+    summary = reaper.reap_once(object(), lambda cl: None, grace_seconds=0, should_stop=lambda: True)
+    assert claimed == [] and summary.expired == 1 and summary.released == 0
+
+
 def test_reap_reclaims_stuck_provisioning_with_the_given_budget(seam):
     """reap_once runs the PROVISIONING-budget step with the budget it is given and counts what it claimed
     (0048, review REL-01). Guards the step being dropped from the pass or ignoring the operator's dial: a lease

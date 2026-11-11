@@ -3,7 +3,7 @@
 vmid double-allocation gate — proves the per-cluster vmid-uniqueness backstop (migration 0004 +
 br0kr/lease.py's VmidContended + the reconciler's vmid_contended outcome) against a REAL Postgres
 ledger with a fake PVE driver. This closes the LAST documented path to the core fear (SECURITY.md C9):
-two reconcilers in the ~1-tick failover-overlap window, provisioning DIFFERENT leases that read the
+two reconcilers in the failover-overlap window, provisioning DIFFERENT leases that read the
 SAME `nextid()` vmid, could once create two guests on one id (the per-VMID fence stops a stale DESTROY,
 not a colliding CREATE). The DB unique index now makes that impossible:
 

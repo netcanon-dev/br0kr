@@ -20,13 +20,17 @@ VMs and reclaims dead ones:
 **Single-writer (load-bearing):** provisioning reads `driver.nextid()`, an UNRESERVED
 vmid, so exactly one reconciler may run. `run()` claims a leader advisory lock
 (br0kr/leader.py) before serving; a second instance becomes a hot STANDBY that polls to
-take over. Critically, `serve()` RE-CHECKS leadership every tick on the leader
-connection (`leader.still_leader`): if that session drops (and Postgres auto-releases
-the lock so a standby could grab it), the old leader STOPS serving at the next tick
-boundary and falls back to standby — closing the window where two processes both
-provision. With aggressive TCP keepalives on the leader connection a dropped leader is
-detected in seconds. (Residual: a ~one-tick window can still overlap; bounded and
-documented in SECURITY.md.)
+take over. Critically, `serve()` RE-CHECKS leadership on the leader connection
+(`leader.still_leader`) before every tick, and `_beat()` re-checks it DURING a tick at most
+once per `interval` (review REL-05): if that session drops (and Postgres auto-releases the
+lock so a standby could grab it), the old leader starts no new step: its own item loops and
+the reap, sweep, migration and replication passes (`should_stop=self._halted`) stop at the next
+item, the tick at its next phase boundary, and it falls back to standby, closing the window
+where two processes both provision. With aggressive TCP keepalives on the leader connection a
+dropped leader is detected in seconds. (Residual: the overlap is the step in flight when the
+drop is noticed, up to one interval plus the probe's timeout after it; a step can be minutes
+with the opt-in slow ones (a template download, a migration or replication copy). Safety does
+not depend on that window: the ledger backstops every overlap hazard. SECURITY.md C9.)
 
 Connection model (three distinct roles, never shared):
   * the LEADER connection — autocommit, dedicated, holds the advisory lock; opened and
@@ -261,6 +265,16 @@ class _LedgerSnapshot:
 _DOWNLOAD_REATTACH_POLL_SECS = 5
 
 
+class _LeadershipLost(Exception):
+    """Raised at a tick's phase boundary (`Daemon._checkpoint`) once a mid-tick re-check found the leader session
+    gone, so the rest of that tick does not run (review REL-05). Internal: `serve()` catches it, folds the partial
+    tick's `summary` into the cumulative counters, and re-stands-by."""
+
+    def __init__(self, summary: TickSummary) -> None:
+        super().__init__("leadership lost mid-tick")
+        self.summary = summary
+
+
 class Daemon:
     """The reconcile loop. Dependencies are injected (`connect`/`leader_connect`
     factories and a `driver`) so the policy is hermetically testable with fakes;
@@ -436,6 +450,12 @@ class Daemon:
         # this stays valid across a hot-reload without re-wiring (see _maybe_reload).
         self._destroyer = reconciler.make_routing_destroyer(registry, on_progress=self._beat)
         self._stop = threading.Event()
+        # Mid-tick leadership (review REL-05): the leader connection while serve() runs (None otherwise, so a
+        # standby's or a bare tick's heartbeat never probes), the flag a re-check sets when the session is gone,
+        # and when the last re-check ran. Only the daemon's own thread touches them.
+        self._leader_conn: psycopg.Connection[Any] | None = None
+        self._leadership_lost = False
+        self._leader_checked_at = 0.0
         # A lock-free reload flag — deliberately NOT a threading.Event. request_reload() is a SIGHUP
         # handler running on the daemon's sole (main) thread; Event.set()/clear() take the Event's
         # internal non-reentrant lock, so a HUP delivered while the main thread held that lock in
@@ -712,7 +732,7 @@ class Daemon:
             self._hold_checks = {lid: n for lid, n in self._hold_checks.items() if lid in held_now}
         for hl in lease.list_held(conn, limit=self.provision_limit, node_ids=self.registry.node_ids()):
             self._beat()
-            if self._stop.is_set():
+            if self._halted():
                 break
             dec = self._placement_for(conn, hl.node_id, hl.template_id, hl.template_instance_id, hl.storage_id,
                                       hl.id)   # PR-3: lease id → its stamped data disks
@@ -919,8 +939,8 @@ class Daemon:
             summary.admitted_seen = len(admitted)
             for al in admitted:
                 self._beat()   # progress: about to drive a provision (a single slow step)
-                if self._stop.is_set():
-                    break  # shutting down mid-pass: stop starting NEW guests promptly
+                if self._halted():
+                    break  # shutting down, or leadership lost mid-pass (REL-05): start no NEW guest
                 driver = self.registry.get(al.node_id)
                 if driver is None:
                     # A node this daemon can't reach (capacity-only / unknown / a
@@ -978,21 +998,26 @@ class Daemon:
                 self._record_provision_outcome(conn, al, out, resolved_storage_id,
                                                logical_network_id, target_bridge, summary)
 
+            self._checkpoint(summary)   # REL-05: a re-check above found the leader session gone → end the tick here
+
             # Held-lease re-check (0033): HELD leases are excluded from the hot list above, so this sweep is
             # their ONLY path back — clear a healed hold (re-provisions next tick) or count a blocked re-check
             # toward the bounded auto-release. Cheap (a read + per-lease re-checks); runs every tick.
             self._recheck_held(conn, summary)
             self._beat()   # progress: held re-check done
+            self._checkpoint(summary)
 
             reap = reaper.reap_once(conn, self._destroyer, grace_seconds=self.reap_grace,
                                     batch=self.batch, on_progress=self._beat,
                                     max_attempts=self.max_release_attempts,
-                                    provision_stuck_seconds=self.provision_stuck_seconds)
+                                    provision_stuck_seconds=self.provision_stuck_seconds,
+                                    should_stop=self._halted)
             summary.expired, summary.reaped = reap.expired, reap.released
             summary.release_failed = reap.failed
             summary.provision_stuck = reap.provision_stuck
             summary.queue_expired = reap.queue_expired
             self._beat()   # progress: reap done
+            self._checkpoint(summary)
 
             # Promote queued (PENDING) leases that now fit — strict per-scope FIFO. Runs AFTER reap so
             # capacity freed THIS tick is reusable, on its OWN non-autocommit connection (promote_pinned's
@@ -1002,6 +1027,7 @@ class Daemon:
                 with closing(self._promote_connect()) as pconn:
                     summary.promoted, summary.queued_seen = self._promote(pconn)
                 self._beat()   # progress: promote done
+                self._checkpoint(summary)
 
             # PR-5 replication coupling — cheap, every tick, on the work conn: (1) PUBLISH whether the engine is
             # advancing jobs (its effective limit > 0) so the gateway's request surface tells a requester the
@@ -1018,6 +1044,7 @@ class Daemon:
             # work connection — set_ip_address self-commits per lease.
             summary.ip_discovered = self._discover_ips(conn)
             self._beat()   # progress: IP discovery done
+            self._checkpoint(summary)
 
             # Operator-driven template downloads (phase A4.1). Opt-in (build_limit > 0); a build BLOCKS the
             # tick for its download, so it runs LAST and at most build_limit per tick, the heartbeat threaded
@@ -1026,6 +1053,7 @@ class Daemon:
             if self.build_limit > 0:
                 summary.builds_done = self._build_templates(conn)
                 self._beat()   # progress: builds done
+                self._checkpoint(summary)
 
             # Cross-cluster migration (PDM pre-wire). OFF unless BOTH opted in (migrate_limit > 0) AND some
             # cluster has PDM config (non-empty pdm_registry). A migration's cross-cluster copy can block for
@@ -1037,6 +1065,7 @@ class Daemon:
                 with closing(self._migrate_connect()) as mconn:
                     summary.migrations_advanced = self._migrate(mconn)
                 self._beat()   # progress: migration step done
+                self._checkpoint(summary)
 
             # Replication DATA PLANE (PR-5). OFF unless opted in (replicate_limit > 0). A clone_shared copy blocks
             # the tick for its clone, so it runs alongside migrate on its OWN non-autocommit connection
@@ -1046,13 +1075,16 @@ class Daemon:
                 with closing(self._replicate_connect()) as rconn:
                     summary.replications_advanced = self._run_replications(rconn)
                 self._beat()   # progress: replication step done
+                self._checkpoint(summary)
 
             if self.sweep_every and self._ticks % self.sweep_every == 0:
-                per_node = sweeper.orphan_sweep_all(conn, self.registry.items(),
-                                                    dry_run=self.sweep_dry_run, on_progress=self._beat)
+                per_node = sweeper.orphan_sweep_all(conn, self.registry.items(), dry_run=self.sweep_dry_run,
+                                                    on_progress=self._beat, should_stop=self._halted)
                 summary.swept = sum(s.destroyed for s in per_node.values())
+                self._checkpoint(summary)
                 if self.build_limit > 0:
                     summary.builds_reclaimed = self._reclaim_builds(conn)
+                    self._checkpoint(summary)
                 # Reclaim stale/wedged replication copy jobs (PR-5) + finalize-retry a READY job whose fence
                 # strip failed + reclaim a FAILED job's leaked guest — on the sweep cadence, on the OWN
                 # non-autocommit conn (the settle path + the destroy). Runs whenever a replicate conn exists,
@@ -1068,6 +1100,7 @@ class Daemon:
                 # per-tick-critical. Sets summary.unbound_instances for /metrics.
                 self._placement_preflight(conn, summary)
                 self._beat()   # progress: sweep done (it can scan many nodes)
+                self._checkpoint(summary)
 
             # Audit-trail retention (0024): OPT-IN + coarse. When due (retention on + the throttled cadence),
             # prune operator_audit rows older than audit_retention_days. The ONE sanctioned delete on the
@@ -1094,6 +1127,11 @@ class Daemon:
                     self._last_discovery_drift = drift
                     summary.discovery_drift = drift
                     summary.discovery_ran = True
+        return self._finish_summary(summary)
+
+    def _finish_summary(self, summary: TickSummary) -> TickSummary:
+        """Close a tick's summary (the PVE stop-failure delta since the last one): a full tick's, or the partial
+        one a mid-tick leadership loss carries out (`_checkpoint`), so the work that tick did still counts."""
         stop_total = pve.stop_failures_total()
         summary.stop_errors = stop_total - self._stop_failures_seen
         self._stop_failures_seen = stop_total
@@ -1182,8 +1220,8 @@ class Daemon:
         promoted = 0
         for q in queued:
             self._beat()   # progress: about to attempt one (locked) promotion
-            if self._stop.is_set():
-                break  # shutting down mid-pass: stop promoting promptly
+            if self._halted():
+                break  # shutting down or leadership lost mid-pass: stop promoting promptly
             keys = _queue_block_keys(q)
             if keys & blocked:
                 blocked |= keys   # an older waiting request holds a shared scope → this one waits too
@@ -1239,7 +1277,7 @@ class Daemon:
         stamped = 0
         for ip_lease in pending:
             self._beat()   # progress: about to query one guest agent (a single networked step)
-            if self._stop.is_set():
+            if self._halted():
                 break
             driver = self.registry.get(ip_lease.node_id)
             if driver is None:
@@ -1312,9 +1350,9 @@ class Daemon:
         AUTOCOMMIT work conn."""
         done = 0
         for _ in range(self.build_limit):
-            if self._stop.is_set():
-                break
             self._beat()   # progress: about to claim/drive one build (a single long step)
+            if self._halted():
+                break
             job = build.claim_next_build(conn)
             if job is None:
                 break
@@ -1393,7 +1431,7 @@ class Daemon:
         reclaimed = 0
         for job in build.stale_builds(conn, self.build_stale_seconds):
             self._beat()   # progress: about to reclaim one stale build (its destroy is an up-to-~180s step)
-            if self._stop.is_set():
+            if self._halted():
                 break
             # Claim atomically right before acting (F1): CAS → RECLAIMING. A build that FINISHED (→READY) or made
             # progress (fresh updated_at) since the scan loses the claim → skip, so we never destroy a completed
@@ -1521,7 +1559,7 @@ class Daemon:
                 return None
             return self.pdm_registry.get(self.registry.cluster_of(source_node))
         advanced = migration.run_pending_routed(
-            mconn, resolve, limit=self.migrate_limit, on_progress=self._beat)
+            mconn, resolve, limit=self.migrate_limit, on_progress=self._beat, should_stop=self._halted)
         return len(advanced)
 
     def _driver_for_node(self, node_id: str) -> pve.Pve | None:
@@ -1537,7 +1575,7 @@ class Daemon:
         heartbeat is threaded through the slow clone. Returns the count advanced this tick."""
         advanced = replication.run_pending_replications(
             rconn, self._driver_for_node, limit=self.replicate_limit,
-            stale_seconds=self.repl_stale_seconds, on_progress=self._beat)
+            stale_seconds=self.repl_stale_seconds, on_progress=self._beat, should_stop=self._halted)
         return len(advanced)
 
     def _reclaim_replications(self, rconn: psycopg.Connection[Any]) -> int:
@@ -1545,16 +1583,20 @@ class Daemon:
         finalize-retry a READY job whose fence strip failed, on the NON-autocommit ``rconn``. Mirrors
         _reclaim_builds on the sweep cadence. Returns the count reclaimed this tick."""
         return replication.reclaim_stale_replications(
-            rconn, self._driver_for_node, stale_seconds=self.repl_stale_seconds, on_progress=self._beat)
+            rconn, self._driver_for_node, stale_seconds=self.repl_stale_seconds, on_progress=self._beat,
+            should_stop=self._halted)
 
     # ── the loop ─────────────────────────────────────────────────────────────────
     def serve(self, leader_conn: psycopg.Connection[Any]) -> None:
         """Tick on an interval until `stop()` OR leadership is lost. Each tick first
         re-checks that this process is still the leader (the leader session is alive);
         if not, it RETURNS so `run()` can re-stand-by — this is what stops a
-        network-orphaned ex-leader from provisioning alongside the new one. Each tick
-        gets a fresh work connection; a tick that RAISES is logged and the loop
-        continues — a transient fault must not kill the only reconciler."""
+        network-orphaned ex-leader from provisioning alongside the new one. While it serves,
+        the heartbeat re-checks too (`_beat`, at most once per interval, review REL-05), so a
+        session that drops during a long tick ends that tick at its next item or phase
+        boundary (`_halted` / `_checkpoint`) and serve() returns without waiting out the
+        interval. Each tick gets a fresh work connection; a tick that RAISES is logged and the
+        loop continues — a transient fault must not kill the only reconciler."""
         log.info("leader: entering reconcile loop (interval=%ss, provision_limit=%d, sweep every %d ticks)",
                  self.interval, self.provision_limit, self.sweep_every)
         self._consecutive_tick_failures = 0   # fresh leadership — a prior streak (ours or an ex-leader's) is void
@@ -1563,9 +1605,20 @@ class Daemon:
         # gauge counts from taking the lock, so a first tick that never completes still shows (review OPS-03).
         self._last_tick_at = time.monotonic()
         self._publish_health(observability.ROLE_LEADER, None)
+        self._leader_conn, self._leadership_lost = leader_conn, False
+        try:
+            self._serve_loop()
+        finally:
+            # A standby's heartbeat must not probe this connection, and the flag means "lost while serving": a
+            # bare tick() after it (a test, a harness) must not read it.
+            self._leader_conn, self._leadership_lost = None, False
+        log.info("reconcile loop stopped")
+
+    def _serve_loop(self) -> None:
+        """serve()'s loop, run while `_leader_conn` is set: re-check leadership, tick, publish, wait."""
         while not self._stop.is_set():
-            self._beat()   # progress: the reconcile loop is iterating (covers the still_leader probe)
-            if not leader.still_leader(leader_conn, self.leader_name):
+            self._beat(recheck_leader=True)   # progress + the per-iteration leadership re-check
+            if self._leadership_lost:
                 log.warning("lost leadership (leader session dropped) — leaving the reconcile loop to re-stand-by")
                 return
             try:
@@ -1574,6 +1627,10 @@ class Daemon:
                 self._last_tick_at = time.monotonic()
                 self._consecutive_tick_failures = 0
                 self._publish_health(observability.ROLE_LEADER, summary)
+            except _LeadershipLost as lost:
+                # The tick stopped at a phase boundary (reported just below). Its partial summary still counts toward
+                # the cumulative totals; run() publishes STANDBY right after this returns.
+                self._publish_health(observability.ROLE_LEADER, lost.summary)
             except Exception:
                 # A tick that keeps RAISING must degrade readiness, not read stale-but-green. The loop-top
                 # _beat() keeps _last_progress_at fresh (the thread IS alive — liveness stays green, which is
@@ -1585,8 +1642,11 @@ class Daemon:
                 log.exception("reconcile tick failed (%d in a row) — continuing",
                               self._consecutive_tick_failures)
                 self._publish_health(observability.ROLE_LEADER, None)
+            if self._leadership_lost:
+                log.warning("lost leadership during a tick (leader session dropped) — the tick stopped at its next "
+                            "step boundary; leaving the reconcile loop to re-stand-by")
+                return
             self._stop.wait(self.interval)
-        log.info("reconcile loop stopped")
 
     def run(self) -> None:
         """Become the single leader, serve, and keep the role healthy. Opens a dedicated
@@ -1645,12 +1705,41 @@ class Daemon:
                 log.info("health/metrics server stopped")
 
     # ── health / metrics ─────────────────────────────────────────────────────────
-    def _beat(self) -> None:
+    def _beat(self, recheck_leader: bool = False) -> None:
         """Stamp the loop's progress time (a single atomic float store under the GIL — no lock, safe to
         call from the hot tick path). Called per loop-iteration and mid-tick (after each provision/reap/
-        sweep); the health thread reads it live for the liveness/readiness stall check, so a long-but-
-        healthy tick stays alive while a wedged thread (which stops stamping) is detected."""
-        self._last_progress_at = time.monotonic()
+        sweep, and from every PVE task wait via `on_progress`); the health thread reads it live for the
+        liveness/readiness stall check, so a long-but-healthy tick stays alive while a wedged thread (which
+        stops stamping) is detected.
+
+        While serve() runs it also re-checks leadership (review REL-05): forced once per loop iteration
+        (`recheck_leader`), and otherwise at most once per `interval`, so a session that drops in the middle
+        of a long tick is noticed within an interval (plus the probe's own timeout) and sets
+        `_leadership_lost`, which ends the tick at its next item or phase boundary. A re-check is one
+        `SELECT 1` on the leader connection (`leader.still_leader`, which never raises and logs the loss).
+        Outside serve() (a standby, a bare tick in a test) there is no leader connection and nothing is probed."""
+        now = time.monotonic()
+        self._last_progress_at = now
+        conn = self._leader_conn
+        if conn is None or self._leadership_lost:
+            return
+        if recheck_leader or now - self._leader_checked_at >= self.interval:
+            self._leader_checked_at = now
+            if not leader.still_leader(conn, self.leader_name):
+                self._leadership_lost = True
+
+    def _halted(self) -> bool:
+        """True when an item loop must start no new item: shutting down, or leadership lost mid-tick (REL-05)."""
+        return self._stop.is_set() or self._leadership_lost
+
+    def _checkpoint(self, summary: TickSummary) -> None:
+        """A tick's phase boundary: once a mid-tick re-check found the leader session gone, raise
+        `_LeadershipLost` (carrying the closed partial `summary`) so the rest of the tick (reap, promote, IP
+        discovery, builds, copies, the sweep) does not run on a lock this process no longer holds (review REL-05);
+        serve() catches it and re-stands-by. A shutdown is NOT a reason: a stopping leader still runs its later
+        phases, whose loops only start no new item (`_halted`)."""
+        if self._leadership_lost:
+            raise _LeadershipLost(self._finish_summary(summary))
 
     def _start_health_server(self) -> ThreadingHTTPServer | None:
         """Start the health/metrics HTTP server (None if `health_port` is 0 = disabled). It serves on a

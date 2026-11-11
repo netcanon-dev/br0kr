@@ -507,7 +507,7 @@ def _held_ns(*, routable, hold_checks=None, holds=None):
     return SimpleNamespace(
         _hold_checks=dict(hold_checks or {7: 3}), provision_limit=10,
         registry=SimpleNamespace(node_ids=lambda: ["n1"]),
-        _beat=lambda: None, _stop=SimpleNamespace(is_set=lambda: False),
+        _beat=lambda: None, _halted=lambda: False,
         _placement_for=lambda conn, node_id, tid, tiid, sid, lease_id=None: placement.PlacementDecision(
             True, None, source_node_id="n2"),
         _cross_node_routable=lambda dec, node_id: routable,
