@@ -1,0 +1,166 @@
+# br0kr alert rules for Prometheus (review OPS-03). Load this file from prometheus.yml:
+#
+#   rule_files:
+#     - /etc/prometheus/br0kr-alerts.yml
+#
+# and scrape the daemon (daemon:9090/metrics) and the gateway's metrics listener (gateway:9091/metrics) from a
+# Prometheus on the compose network; neither port is host-published. docs/runbooks/alerts.md says what each alert
+# means and what to do, under a heading named after the alert, which is where every runbook_url points.
+#
+# The broker group aggregates with sum()/max() so a `--scale daemon=2` pair or a leader handover never doubles or
+# splits an alert: the ledger-wide gauges come from the leader only, and br0kr_leader says which instance that is.
+# Thresholds are starting points; tune them to your queue budgets and WAL rate, then re-run
+# `bash scripts/check_alert_rules.sh` (promtool check + the unit tests in br0kr-alerts.test.yml).
+groups:
+  - name: br0kr-broker
+    rules:
+      # Nothing reconciles: no daemon holds the leader lock, so no lease provisions, expires or is reaped. Also fires
+      # when no daemon is scraped at all, which is the same blindness.
+      - alert: Br0krNoLeader
+        expr: (sum(br0kr_leader) or vector(0)) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: No br0kr daemon holds the reconciler leader lock.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krnoleader
+
+      # The leader holds the lock but reconciles nothing: its tick keeps raising (the loop still beats, so /healthz
+      # stays green and Compose never restarts it), or no tick has completed in an hour. A healthy tick can run for
+      # half an hour (a template download waits up to 30 minutes inside it), hence the hour; a loop that has stopped
+      # making progress at all is Br0krDaemonStalled.
+      - alert: Br0krLeaderTickFailing
+        expr: max(br0kr_consecutive_tick_failures) > 0 or max(br0kr_last_tick_age_seconds) > 3600
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: The br0kr leader's reconcile tick keeps failing or has stopped completing.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krleadertickfailing
+
+      # A daemon's loop has stamped no progress for over 5 minutes (a deadlock, a call that never returns). The gauge
+      # is already an age, so `for` only absorbs one late scrape. Waits beat once a second, so a long but healthy
+      # tick never trips this. Any role: a wedged standby cannot take over. /healthz fails too, but Compose never
+      # restarts an unhealthy container, so this is how it reaches a human.
+      - alert: Br0krDaemonStalled
+        expr: max(br0kr_last_progress_age_seconds) > 300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A br0kr daemon's reconcile loop has stopped making progress.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krdaemonstalled
+
+      # The reaper gave up destroying a guest: the lease went terminal RELEASE_FAILED and its VM may still exist on
+      # PVE, holding real resources the ledger no longer counts.
+      - alert: Br0krReleaseFailedGrowing
+        expr: sum(increase(br0kr_release_failed_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A br0kr lease went RELEASE_FAILED in the last hour; its guest may be orphaned on PVE.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krreleasefailedgrowing
+
+      # A lease the placement re-check held (ADMITTED, never clonable where it was placed) ran out of re-checks and was
+      # released: an agent was admitted and then dropped. Keyed on the release, not on the held count, because a
+      # hold lives about five minutes (60 re-checks at the default 5 s tick), so a held count stays above 0 for long
+      # only while new holds keep arriving.
+      - alert: Br0krHeldLeasesReleased
+        expr: sum(increase(br0kr_placement_released_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: br0kr released a held lease it could not place in the last hour.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krheldleasesreleased
+
+      # The head of the admission queue has waited 30 minutes (half the default max_wait_seconds of an hour): the
+      # fleet is short of room, or something is not promoting.
+      - alert: Br0krQueueOldestAgeHigh
+        expr: max(br0kr_queue_oldest_age_seconds) > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The oldest queued br0kr lease has waited more than 30 minutes.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krqueueoldestagehigh
+
+      # A template build stalled or was abandoned and the daemon reclaimed it (marked FAILED, destroyed the partial
+      # guest). One is a failed download; a run of them is a broken image source or storage.
+      - alert: Br0krBuildsReclaimed
+        expr: sum(increase(br0kr_builds_reclaimed_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: br0kr reclaimed a stale template build in the last hour.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krbuildsreclaimed
+
+      # request_lease / schedule_lease RAISED rather than answering, three times in 15 minutes (2.5: increase()
+      # extrapolates to the window's edges, so two errors can read 2.1). The gateway's /healthz is a SELECT 1 and
+      # stays green through this (a schema gap, lock timeouts, a bug in a verb). A value the ledger refuses is
+      # counted as invalid_input, not error, so bad input from an agent never pages.
+      - alert: Br0krAdmitErroring
+        expr: sum(increase(br0kr_admit_total{outcome="error"}[15m])) > 2.5
+        labels:
+          severity: critical
+        annotations:
+          summary: br0kr gateway admission calls are raising errors instead of answering.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0kradmiterroring
+
+  # The ledger's own replication posture (br0kr/ledgerhealth.py, docs/runbooks/ledger-ha.md). Every gauge but
+  # br0kr_ledger_replication_readable is emitted only when the read succeeded, so an unreadable window makes the
+  # others ABSENT: Br0krLedgerPostureUnknown covers that gap and keep_firing_for stops a flapping read from
+  # resolving (and re-arming) Br0krLedgerStandbyGone.
+  - name: br0kr-ledger-dr
+    rules:
+      # The 45-hour incident: a configured ledger whose physical slot has no consumer.
+      - alert: Br0krLedgerStandbyGone
+        expr: br0kr_ledger_replication_configured == 1 and br0kr_ledger_slots_inactive > 0
+        for: 10m
+        keep_firing_for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A br0kr ledger replication slot has no standby attached.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerstandbygone
+
+      # Unreadable is its OWN alert, not silence; the rule above means nothing without it.
+      - alert: Br0krLedgerPostureUnknown
+        expr: br0kr_ledger_replication_readable == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: br0kr cannot read the ledger's replication posture.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerpostureunknown
+
+      # Unrecoverable in place: the WAL is gone and the standby needs a re-clone.
+      - alert: Br0krLedgerSlotLost
+        expr: br0kr_ledger_slots_lost > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A br0kr ledger standby lost its WAL and must be re-cloned.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerslotlost
+
+      # A standby can be streaming with an active slot and still replay NOTHING (replay paused, a recovery conflict,
+      # a dying disk); only the lag shows it. 1 GiB is "further behind than a normal burst"; tune it to your WAL rate.
+      - alert: Br0krLedgerStandbyStalled
+        expr: br0kr_ledger_replay_lag_bytes > 1073741824
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A br0kr ledger standby is more than 1 GiB behind the primary.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerstandbystalled
+
+      # Commits WAIT for a synchronous standby (synchronous_commit on, the default) and none is connected, so writes
+      # block. Keyed on sync_required: an asynchronous ledger (the bundled pair) has no sync standby by design and
+      # must not page. One minute absorbs a standby restart.
+      - alert: Br0krLedgerSyncStandbyLost
+        expr: br0kr_ledger_sync_required == 1 and br0kr_ledger_standbys_sync == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: The br0kr ledger requires a synchronous standby and has none, so commits wait.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgersyncstandbylost

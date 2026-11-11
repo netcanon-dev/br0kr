@@ -154,6 +154,8 @@ class TickSummary:
     # PROVISIONING leases past the budget the reaper flipped to RELEASING(provision_stuck) (0048, review REL-01)
     provision_stuck: int = field(default=0, metadata=_COUNTER)
     reaped: int = field(default=0, metadata=_COUNTER)            # guests the reaper destroyed (or settled) → RELEASED
+    # leases the reaper gave up on → terminal RELEASE_FAILED (an orphan guest to triage); br0kr_release_failed_total
+    release_failed: int = field(default=0, metadata=_COUNTER)
     swept: int = field(default=0, metadata=_COUNTER)             # orphan guests the sweep destroyed
     # the node registry was rebuilt this tick (SIGHUP / cadence); the cumulative metric is br0kr_reloads_total
     reloaded: bool = field(default=False, metadata={"metric": "counter", "cum_key": "reloads"})
@@ -431,8 +433,13 @@ class Daemon:
         # directly (an atomic float load under the GIL) for the stall check, so a long-but-healthy tick
         # stays live while a wedged thread (which stops stamping) is detected.
         self._last_progress_at: float | None = None
-        self._cum: dict[str, int] = {}
-        self._health = observability.HealthState()
+        # Every cumulative counter exists at 0 from start-up, on a standby too (review OPS-03): a series born at 1 on
+        # the first tick that counts something reads as no increase, so an alert on increase() would miss exactly
+        # the first event after a restart or a failover (e.g. the backlog the first tick reaps).
+        self._cum: dict[str, int] = {
+            f.metadata.get("cum_key", f.name): 0
+            for f in fields(TickSummary) if f.metadata.get("metric", "counter") == "counter"}
+        self._health = observability.HealthState(cumulative=dict(self._cum))
         # The placement-REFUSAL recorder (0033/PR-3): a coalescing DenialLog stamping outcome='refused' with its
         # OWN 100/window ceiling (the auth denial ceiling of 200 is untouched). Fired from _hold on the hold
         # edge; opens its own short-lived connection via self._connect only when the throttle admits a write.
@@ -957,6 +964,7 @@ class Daemon:
                                     max_attempts=self.max_release_attempts,
                                     provision_stuck_seconds=self.provision_stuck_seconds)
             summary.expired, summary.reaped = reap.expired, reap.released
+            summary.release_failed = reap.failed
             summary.provision_stuck = reap.provision_stuck
             summary.queue_expired = reap.queue_expired
             self._beat()   # progress: reap done
@@ -1525,6 +1533,11 @@ class Daemon:
         log.info("leader: entering reconcile loop (interval=%ss, provision_limit=%d, sweep every %d ticks)",
                  self.interval, self.provision_limit, self.sweep_every)
         self._consecutive_tick_failures = 0   # fresh leadership — a prior streak (ours or an ex-leader's) is void
+        # Say so NOW, not after the first tick: that tick can run for many minutes (clones, a template download), and
+        # until it ends /metrics would read br0kr_leader 0 on every instance (a false Br0krNoLeader). The tick-age
+        # gauge counts from taking the lock, so a first tick that never completes still shows (review OPS-03).
+        self._last_tick_at = time.monotonic()
+        self._publish_health(observability.ROLE_LEADER, None)
         while not self._stop.is_set():
             self._beat()   # progress: the reconcile loop is iterating (covers the still_leader probe)
             if not leader.still_leader(leader_conn, self.leader_name):
@@ -1632,6 +1645,7 @@ class Daemon:
             get_slo=self._scrape_slo,
             get_repl=self._scrape_ledger_replication,
             max_tick_failures=self._max_tick_failures,
+            families=(pve.PVE_REQUEST_SECONDS,),   # this process's PVE call timings (review OPS-03)
         )
 
     def _publish_health(self, role: str, summary: TickSummary | None) -> None:

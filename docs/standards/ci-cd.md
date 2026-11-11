@@ -12,7 +12,7 @@ PR fast.
 
 | Workflow | Trigger | What it gates |
 |---|---|---|
-| `ci.yml` | PR + push to `main` | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (Python matrix) + `harness` (real-Postgres race and saga proofs) |
+| `ci.yml` | PR + push to `main` | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (Python matrix) + `harness` (real-Postgres race and saga proofs) + `alert-rules` (promtool on the shipped alert rules) |
 | `security.yml` | PR + push + weekly | gitleaks full-history secret scan + pip-audit dependency CVEs |
 | `pii-guard.yml` | PR + push to `main` | no maintainer identifier in a tracked file or in a merged commit's identity or message |
 | `zizmor.yml` | `.github/**` changes + weekly | GitHub-Actions-specific supply-chain audit (blocking; SARIF to Code scanning) |
@@ -81,6 +81,13 @@ enforces most of them, and a PR that drops one should be rejected in review.
   entry names a real harness. Run it locally against any throwaway server (the
   script header shows how); never point it at a real ledger, since every harness
   truncates tables.
+- **`alert-rules` job** runs `scripts/check_alert_rules.sh`: `promtool check rules`
+  and `promtool test rules` on `docker/prometheus/br0kr-alerts.yml`, in a
+  digest-pinned Prometheus image with no network. The unit tests in
+  `br0kr-alerts.test.yml` prove each alert fires on its condition and stays quiet
+  on the near-misses (a leader handover, a counter reset, an async ledger);
+  `tests/unit/test_alert_rules.py` keeps every alert tested, documented and keyed
+  on a metric the code emits.
 
 ## security.yml — secret + dependency hygiene
 

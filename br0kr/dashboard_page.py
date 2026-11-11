@@ -1767,7 +1767,7 @@ function renderLedger(d){
     `<div class="card"><h3>Standbys streaming</h3>`
     + `<div class="qdepth"${streaming?'':' style="color:var(--bad)"'}>${streaming}</div>`
     + row('connected', d.standbys_total||0, false)
-    + row('synchronous', sync, false)
+    + row('synchronous', sync, d.sync_required === true && sync === 0)
     + row('replay lag', fbytes(d.max_replay_lag_bytes), bigLag(d.max_replay_lag_bytes))
     + `</div>`
     + `<div class="card"><h3>Replication slots</h3>`

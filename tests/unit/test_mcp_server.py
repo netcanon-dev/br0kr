@@ -1457,3 +1457,164 @@ def test_request_and_schedule_lease_forward_pinned_and_audit_it(monkeypatch):
     mcp_server.request_lease(object(), idem_key="a", node_id="n1", req_cpu=1, req_mem_mb=512, pinned=True)
     mcp_server.schedule_lease(object(), idem_key="b", req_cpu=1, req_mem_mb=512, pinned=True)
     assert seen == [True, True] and [p["pinned"] for p in audited] == [True, True]
+
+
+# ── the admission counter at the tool boundary (review OPS-03) ────────────────────────────────────────
+def _admits(tool: str, outcome: str) -> float:
+    return gateway.ADMIT_OUTCOMES.snapshot().get((tool, outcome), 0.0)
+
+
+def _tenant(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("p", "consume", 1))
+    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_server, "_queue_max", lambda _c: 1000)
+    monkeypatch.setattr(auth, "template_allowed", lambda *_a: (True, None))
+    monkeypatch.setattr(mcp_server, "_audit_write", lambda *_a, **_k: None)
+    monkeypatch.setattr(mcp_server, "_audit_refused", lambda *_a, **_k: None)
+
+
+def test_the_tools_count_every_answer_the_agent_gets(monkeypatch):
+    """request_lease counts its verdict, a refusal the MCP layer gives before admission (`{"error": code}`), and a
+    raise ANYWHERE in the tool (here the audit write, after the verb succeeded) as `error`, re-raised; schedule_lease
+    counts under its own tool label. Guards the counter missing failures around the verb that /healthz cannot see
+    (review M4), and both verbs folding into one series."""
+    _tenant(monkeypatch)
+    answers = iter([
+        {"lease_id": 1, "admitted": True, "queued": False, "idempotent": False, "reason": None, "pinned": False},
+        {"lease_id": None, "admitted": False, "queued": False, "idempotent": False, "reason": "insufficient_node_cpu",
+         "pinned": False},
+    ])
+    monkeypatch.setattr(gateway, "request_lease", lambda _c, **_k: next(answers))
+    kw = {"idem_key": "k", "node_id": "n1", "req_cpu": 1, "req_mem_mb": 512}
+    keys = ("admitted", "insufficient_node_cpu", "project_forbidden", "error")
+    before = {o: _admits("request_lease", o) for o in keys}
+    assert mcp_server.request_lease(object(), **kw)["admitted"] is True
+    assert mcp_server.request_lease(object(), **kw)["reason"] == "insufficient_node_cpu"
+    monkeypatch.setattr(mcp_server.auth, "bind_project", lambda _p, _pid: (None, "project_forbidden"))
+    assert mcp_server.request_lease(object(), project_id="other", **kw) == {"error": "project_forbidden"}
+    monkeypatch.setattr(mcp_server.auth, "bind_project", lambda p, _pid: (p.project_id, None))
+    monkeypatch.setattr(gateway, "request_lease", lambda _c, **_k: {"lease_id": 2, "admitted": True,
+                                                                     "idempotent": False, "reason": None})
+
+    def audit_fails(*_a, **_k):
+        raise RuntimeError("audit insert failed")
+    monkeypatch.setattr(mcp_server, "_audit_write", audit_fails)
+    with pytest.raises(RuntimeError):
+        mcp_server.request_lease(object(), **kw)
+    assert {o: _admits("request_lease", o) - n for o, n in before.items()} == {
+        "admitted": 1, "insufficient_node_cpu": 1, "project_forbidden": 1, "error": 1}
+    monkeypatch.setattr(mcp_server, "_audit_write", lambda *_a, **_k: None)
+    monkeypatch.setattr(gateway, "schedule_lease", lambda _c, **_k: {"lease_id": None, "node_id": None,
+                                                                      "admitted": False, "queued": False,
+                                                                      "idempotent": False, "reason": "no_capacity"})
+    before = (_admits("schedule_lease", "no_capacity"), _admits("request_lease", "no_capacity"))
+    mcp_server.schedule_lease(object(), idem_key="s", req_cpu=1, req_mem_mb=512)
+    assert (_admits("schedule_lease", "no_capacity"), _admits("request_lease", "no_capacity")) == (
+        before[0] + 1, before[1])
+
+
+def test_a_value_the_ledger_refuses_counts_as_invalid_input_not_error(monkeypatch):
+    """A psycopg DataError (the ledger refusing a value the caller sent, e.g. a NUL in a string) counts as
+    `invalid_input` and still raises; it never counts as `error`. Guards a consume-tier agent paging the operator
+    critical (Br0krAdmitErroring) at will by sending bad input (review M3)."""
+    import psycopg
+    _tenant(monkeypatch)
+
+    def refuse(_c, **_k):
+        raise psycopg.DataError("PostgreSQL text fields cannot contain NUL (0x00) bytes")
+    monkeypatch.setattr(gateway, "request_lease", refuse)
+    before = (_admits("request_lease", "invalid_input"), _admits("request_lease", "error"))
+    with pytest.raises(psycopg.DataError):
+        mcp_server.request_lease(object(), idem_key="k\x00", node_id="n1", req_cpu=1, req_mem_mb=512)
+    assert (_admits("request_lease", "invalid_input"), _admits("request_lease", "error")) == (before[0] + 1, before[1])
+
+
+def test_the_counted_tools_keep_their_mcp_signature():
+    """The registered request_lease / schedule_lease tools still take the agent's parameters (not *args/**kwargs)
+    and keep their description, because functools.wraps carries the signature, annotations and docstring that
+    FastMCP builds the tool from. Guards the wrapper silently changing the agent-facing schema (docs/api.md's
+    drift test would also go red)."""
+    tools = {t.name: t for t in mcp_server.mcp._tool_manager.list_tools()}
+    for name, must in (("request_lease", {"idem_key", "node_id", "req_cpu", "pinned"}),
+                       ("schedule_lease", {"idem_key", "req_cpu", "cluster_id", "pinned"})):
+        props = set(tools[name].parameters["properties"])
+        assert must <= props and "args" not in props and "kwargs" not in props, name
+        assert tools[name].description and tools[name].description.startswith(
+            getattr(mcp_server, name).__doc__.strip()[:40])
+
+
+# ── the gateway's metrics listener (review OPS-03) ─────────────────────────────────────────────────────
+def test_metrics_bind_defaults_to_9091_on_the_gateways_own_host():
+    """With nothing set, the listener binds port 9091 on FASTMCP_HOST (the gateway's own bind), else on loopback;
+    BR0KR_GATEWAY_METRICS_HOST overrides the host. Guards a listener wider than the gateway it belongs to (a
+    loopback-bound gateway publishing its counts on every interface)."""
+    assert mcp_server._metrics_bind({"FASTMCP_HOST": "0.0.0.0"}) == ("0.0.0.0", 9091)
+    assert mcp_server._metrics_bind({}) == ("127.0.0.1", 9091)
+    assert mcp_server._metrics_bind({"FASTMCP_HOST": "0.0.0.0", "BR0KR_GATEWAY_METRICS_HOST": "10.9.9.9",
+                                     "BR0KR_GATEWAY_METRICS_PORT": "9300"}) == ("10.9.9.9", 9300)
+
+
+def test_metrics_port_zero_turns_the_listener_off_and_a_bad_value_stops_the_gateway():
+    """BR0KR_GATEWAY_METRICS_PORT=0 means no listener (None). A value that is not a port number stops the gateway
+    with a message naming the variable, rather than running without metrics nobody notices are gone."""
+    assert mcp_server._metrics_bind({"BR0KR_GATEWAY_METRICS_PORT": "0"}) is None
+    for bad in ("nine", "-1", "70000"):
+        with pytest.raises(SystemExit, match="BR0KR_GATEWAY_METRICS_PORT"):
+            mcp_server._metrics_bind({"BR0KR_GATEWAY_METRICS_PORT": bad})
+
+
+def test_a_metrics_port_that_cannot_be_bound_stops_the_gateway_with_a_message(monkeypatch):
+    """When the metrics listener cannot bind (a second gateway in the same network namespace on 9091), main() exits
+    with a message naming BR0KR_GATEWAY_METRICS_PORT instead of a raw OSError traceback. Guards an operator meeting
+    an opaque crash on upgrade."""
+    class _Conn:
+        def close(self) -> None:
+            pass
+
+    def taken(*_a, **_k):
+        raise OSError(98, "Address already in use")
+    monkeypatch.setattr(mcp_server.db, "connect_with_retry", lambda: _Conn())
+    monkeypatch.setattr(mcp_server.db, "assert_read_committed", lambda _c: None)
+    monkeypatch.setattr(mcp_server.migrate, "assert_schema", lambda _c, _s: None)
+    monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda transport: pytest.fail("must not serve without metrics"))
+    monkeypatch.setattr(mcp_server.metrics, "serve", taken)
+    monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.delenv("BR0KR_GATEWAY_METRICS_PORT", raising=False)
+    with pytest.raises(SystemExit, match="BR0KR_GATEWAY_METRICS_PORT"):
+        mcp_server.main()
+
+
+def test_gateway_metrics_body_carries_the_admission_counter():
+    """The listener's body renders br0kr_admit_total (its fixed outcomes exist from import), which the shipped
+    Br0krAdmitErroring alert keys on. Guards the listener serving an empty body."""
+    body = mcp_server._gateway_metrics()
+    assert "# TYPE br0kr_admit_total counter" in body
+    assert 'br0kr_admit_total{tool="request_lease",outcome="error"}' in body
+
+
+def test_main_starts_the_metrics_listener_only_for_an_http_transport(monkeypatch):
+    """An HTTP gateway starts the listener after its boot checks; a stdio gateway (one per MCP client, where a fixed
+    port would clash) never does. Guards the listener never starting in production, and stdio clients colliding
+    on 9091."""
+    started: list[tuple[str, int]] = []
+
+    class _Conn:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mcp_server.db, "connect_with_retry", lambda: _Conn())
+    monkeypatch.setattr(mcp_server.db, "assert_read_committed", lambda _c: None)
+    monkeypatch.setattr(mcp_server.migrate, "assert_schema", lambda _c, _s: None)
+    monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda transport: None)
+    monkeypatch.setattr(mcp_server.metrics, "serve",
+                        lambda host, port, _render, *, name: started.append((host, port)))
+    monkeypatch.setenv("FASTMCP_HOST", "127.0.0.1")
+    monkeypatch.delenv("BR0KR_GATEWAY_METRICS_PORT", raising=False)
+    monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "stdio")
+    mcp_server.main()
+    assert started == []
+    monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "streamable-http")
+    mcp_server.main()
+    assert started == [("127.0.0.1", 9091)]

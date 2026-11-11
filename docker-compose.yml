@@ -180,8 +180,15 @@ services:
       # agent would otherwise carry in every turn only to be refused. Operators use `gateway-operator` below.
       # Set BR0KR_MCP_OPERATOR_TOOLS=1 in .env to serve them here too (the behaviour before UX-02).
       BR0KR_MCP_OPERATOR_TOOLS: ${BR0KR_MCP_OPERATOR_TOOLS:-0}
+      # /metrics (br0kr_admit_total + PVE call timings) on its OWN port, never on 8080: Caddy and the tunnel route
+      # 8080 to the internet. 0 turns it off (review OPS-03, docs/runbooks/alerts.md).
+      BR0KR_GATEWAY_METRICS_PORT: ${BR0KR_GATEWAY_METRICS_PORT:-9091}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
+    # The metrics port is for a Prometheus on the compose network (gateway:9091/metrics), like daemon:9090; not
+    # host-published, so it is not reachable from the LAN or through the tunnel.
+    expose:
+      - "9091"
     # /healthz (FastMCP custom_route) probes the ledger with a fast SELECT 1 → 200/503.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8080/healthz',timeout=3).status==200 else 1)"]
@@ -214,8 +221,11 @@ services:
       # The per-cluster PVE token secret(s), as on the daemon: the live-PVE operator reads resolve
       # cluster.token_secret_env from here. Add a line per cluster if their secret-env names differ.
       PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-}
+      BR0KR_GATEWAY_METRICS_PORT: ${BR0KR_GATEWAY_METRICS_PORT:-9091}   # as on the gateway; compose network only
     ports:
       - "${OPERATOR_GATEWAY_BIND:-127.0.0.1}:${OPERATOR_GATEWAY_PORT:-8082}:8080"
+    expose:
+      - "9091"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8080/healthz',timeout=3).status==200 else 1)"]
       interval: 15s

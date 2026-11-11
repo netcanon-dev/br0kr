@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **Shipped alert rules, and the counters they need.** Nothing fired on no leader, failing ticks or erroring admits;
+  `docker/prometheus/br0kr-alerts.yml` + `alerts.md`, promtool-tested in CI; gateway `/metrics` on :9091 (OPS-03).
 - **A version tag publishes the release.** Nothing could `docker pull` br0kr; `release.yml` gates the image on
   Trivy, pushes it signed with SBOM + provenance, attaches the wheel; `deploy.sh --pull` runs it (TEST-03).
 - **Pinned leases (migration 0049).** A long-lived VM needed a heartbeat sidecar or a huge TTL; a pinned one is
@@ -31,6 +33,10 @@ resolve in this repository.
 - **Admission's race-critical core is written once (`br0kr/admission.py`).** `admit()` and `promote_pinned()` carried
   copies that had to change in lockstep; both now run `_lock_scopes` + `_locked_fit`, and `admit()` logs every
   refusal. Harnesses unchanged and GO; a unit test pins the shared path (review ARCH-01).
+
+### Fixed
+- **The documented sync-standby alert paged forever on an async ledger.** It keyed on `standbys_sync == 0`, always
+  true for the bundled pair; it now keys on new `br0kr_ledger_sync_required` (`synchronous_standby_names` set).
 
 ## [0.1.0] — 2026-11-11
 

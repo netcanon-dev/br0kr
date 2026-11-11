@@ -15,7 +15,8 @@ doing?" This adds a tiny stdlib `http.server` listener on a side thread exposing
                               of ticks holds the lock but reconciles nothing → not_ready)? A standby is
                               alive-but-not-ready (503). Probes the ledger.
     GET /metrics   Prometheus text exposition — per-instance process/leader/tick gauges + cumulative
-                              counters + (leader only) the ledger-wide leases-by-state (one scrape query).
+                              counters + (leader only) the ledger-wide leases-by-state (one scrape query) + any
+                              process-local `br0kr.metrics` families the daemon passes (its PVE call timings).
 
 Design (mirrors the registry's lock-free swap so it composes with the single-writer model):
   * The daemon publishes an IMMUTABLE `HealthState` snapshot after each tick / on a role change; the
@@ -33,10 +34,12 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+from br0kr import metrics
 
 log = logging.getLogger(__name__)
 
@@ -134,12 +137,9 @@ def readiness(role: str, ledger_ok: bool, progress: float | None, now: float,
     return True, "ready"
 
 
-def _label(value: str) -> str:
-    """Escape a Prometheus label VALUE (backslash, double-quote, newline) per the text-exposition
-    spec. Slot names are already restricted by Postgres to `[a-z0-9_]`, so this is belt-and-braces —
-    but a label value is the one place unvalidated text reaches the exposition format, and an
-    unescaped quote there corrupts the whole scrape, not just its own line."""
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+# Slot names are already restricted by Postgres to `[a-z0-9_]`, so escaping them is belt-and-braces; one escaper
+# serves every family (br0kr/metrics.py).
+_label = metrics.escape_label
 
 
 def _slot_family(out: list[str], name: str, help_: str, samples: list[tuple[Any, int]]) -> None:
@@ -157,13 +157,18 @@ def _slot_family(out: list[str], name: str, help_: str, samples: list[tuple[Any,
 
 
 def render_metrics(state: HealthState, ledger_ok: bool, counts: dict[str, int], now: float,
-                   slo: dict[str, Any] | None = None, repl: dict[str, Any] | None = None) -> str:
+                   slo: dict[str, Any] | None = None, repl: dict[str, Any] | None = None,
+                   families: Iterable[metrics.Family] = (), progress: float | None = None) -> str:
     """Render the Prometheus text-exposition (v0.0.4) by hand — no client library. Emits process/leader
     gauges, the last-tick-age, the latest TickSummary as `br0kr_last_*` gauges, running totals as
     `br0kr_*_total` counters, the ledger's leases-by-state (0-filled over LEASE_STATES, plus any unexpected
     state the scrape returned), and — when `slo` is provided (leader only) — the fleet admission-SLO gauges
-    (oldest-pending age + queue-wait / provision-latency percentiles from `inventory.fleet_stats`). `now` is
-    injected so the age sample is deterministic to test."""
+    (oldest-pending age + queue-wait / provision-latency percentiles from `inventory.fleet_stats`). `families` are
+    process-local `br0kr.metrics` families rendered last, on every instance (the daemon passes its PVE call
+    timings: per-process facts, so a standby emits its own too). `progress` is the loop's live progress stamp
+    (the one liveness reads): its age is `br0kr_last_progress_age_seconds`, on every role, so a wedged loop is
+    alertable even under Compose, which never restarts an unhealthy container. `now` is injected so the age
+    samples are deterministic to test."""
     out: list[str] = []
 
     def metric(name: str, value: float | int, help_: str, typ: str) -> None:
@@ -188,7 +193,12 @@ def render_metrics(state: HealthState, ledger_ok: bool, counts: dict[str, int], 
     if state.last_tick_monotonic is not None:
         age = max(0.0, now - state.last_tick_monotonic)
         metric("br0kr_last_tick_age_seconds", round(age, 3),
-               "Seconds since the last completed reconcile tick (leader only).", "gauge")
+               "Seconds since the last completed reconcile tick, or since this instance became leader if none has "
+               "completed since (leader only).", "gauge")
+    if progress is not None:
+        metric("br0kr_last_progress_age_seconds", round(max(0.0, now - progress), 3),
+               "Seconds since the loop last stamped progress (every role; a long but healthy tick keeps it small, a "
+               "wedged loop lets it grow; /healthz fails past the stall threshold).", "gauge")
 
     for key in sorted(state.last):
         metric(f"br0kr_last_{key}", state.last[key], f"{key} from the most recent reconcile tick.", "gauge")
@@ -287,6 +297,10 @@ def render_metrics(state: HealthState, ledger_ok: bool, counts: dict[str, int], 
                    "Connected standbys in a SYNCHRONOUS sync_state (sync/quorum). Losing one is not "
                    "merely a DR degradation — commits BLOCK on a missing sync standby, so a drop here "
                    "is urgent in a way a lost async replica is not.", "gauge")
+            metric("br0kr_ledger_sync_required", int(bool(repl.get("sync_required"))),
+                   "1 if the primary's synchronous_standby_names is set, so commits WAIT for a synchronous "
+                   "standby; 0 = asynchronous replication, where br0kr_ledger_standbys_sync 0 is normal.",
+                   "gauge")
             metric("br0kr_ledger_slots_inactive", int(repl.get("slots_inactive") or 0),
                    "Replication slots with NO consumer attached. A slot outlives its standby, so this "
                    "is what stays >0 through a standby crash-loop while the primary pins WAL.", "gauge")
@@ -313,6 +327,8 @@ def render_metrics(state: HealthState, ledger_ok: bool, counts: dict[str, int], 
                          [(s.get("name", ""), int(s["retained_wal_bytes"])) for s in slots
                           if s.get("retained_wal_bytes") is not None])
 
+    for family in families:
+        out.extend(family.render())
     return "\n".join(out) + "\n"
 
 
@@ -327,6 +343,7 @@ def make_handler(
     get_slo: Callable[[], dict[str, Any]] | None = None,
     get_repl: Callable[[], dict[str, Any]] | None = None,
     max_tick_failures: int = 0,
+    families: Iterable[metrics.Family] = (),
 ) -> type[BaseHTTPRequestHandler]:
     """Build the request handler class over injected providers: `get_state()` returns the current
     HealthState (an atomic read of the daemon's published snapshot), `get_progress()` is a LIVE read of
@@ -334,8 +351,10 @@ def make_handler(
     as alive), `get_ledger()` probes the ledger (reachable + leases-by-state) on a fresh connection,
     `clock()` is the monotonic time source. `get_slo()` (optional) returns the fleet admission-SLO dict for
     /metrics on a fresh connection — omitted → no SLO gauges. `max_tick_failures` (>0) is the consecutive
-    tick-failure streak past which a leader reads not_ready on /readyz. Only /readyz and /metrics call
+    tick-failure streak past which a leader reads not_ready on /readyz. `families` are process-local
+    `br0kr.metrics` families appended to every /metrics. Only /readyz and /metrics call
     `get_ledger()` (and /metrics `get_slo()`); /healthz never does (liveness is ledger-independent)."""
+    families = tuple(families)
 
     class _Handler(BaseHTTPRequestHandler):
         # Silence BaseHTTPRequestHandler's default stderr access log — scrapes would flood it; the
@@ -361,7 +380,8 @@ def make_handler(
                 ledger_ok, counts = get_ledger()
                 slo = get_slo() if get_slo is not None else None
                 repl = get_repl() if get_repl is not None else None
-                self._text(200, render_metrics(state, ledger_ok, counts, now, slo, repl))
+                self._text(200, render_metrics(state, ledger_ok, counts, now, slo, repl, families,
+                                               progress=get_progress()))
             else:
                 self._json(404, {"error": "not_found", "path": path})
 
@@ -393,15 +413,17 @@ def start_health_server(
     get_slo: Callable[[], dict[str, Any]] | None = None,
     get_repl: Callable[[], dict[str, Any]] | None = None,
     max_tick_failures: int = 0,
+    families: Iterable[metrics.Family] = (),
 ) -> ThreadingHTTPServer:
     """Start the health/metrics HTTP server on a daemon thread and return it (the caller `shutdown()`s
     it on exit). `ThreadingHTTPServer` + `daemon_threads` so a slow scrape can't block shutdown and the
     thread never outlives the process. Binds `host:port` (0.0.0.0 to be reachable from outside a
     container). `get_slo` (optional) feeds /metrics the fleet admission-SLO gauges. `max_tick_failures`
-    (>0) is the consecutive tick-failure streak past which a leader reads not_ready. Raises if the port
-    can't be bound (a misconfig should fail loudly at startup)."""
+    (>0) is the consecutive tick-failure streak past which a leader reads not_ready. `families` (process-local
+    `br0kr.metrics` families) are appended to every /metrics. Raises if the port can't be bound (a misconfig
+    should fail loudly at startup)."""
     handler = make_handler(get_state, get_ledger, get_progress, stall_after, clock=clock, get_slo=get_slo,
-                           get_repl=get_repl, max_tick_failures=max_tick_failures)
+                           get_repl=get_repl, max_tick_failures=max_tick_failures, families=families)
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, name="br0kr-health", daemon=True)

@@ -22,6 +22,8 @@ it never STOPS or deletes the wrong guest — all three destroyers share
 
 The fence DECISION is a pure function (`destroy_decision`), unit-tested exhaustively;
 the HTTP methods are thin and proven live against a real PVE node (scripts/harness_pve_fence.py).
+Every API call goes through ONE seam (`Pve._request`), which times it and counts its outcome in
+`PVE_REQUEST_SECONDS` (`br0kr_pve_request_seconds{op,outcome}`, review OPS-03).
 `fenced_destroy` RAISES on a transient API error or a failed DELETE task (the caller retries); a
 mismatch is a normal, logged "not ours" outcome the reaper treats as settled.
 """
@@ -37,7 +39,8 @@ from typing import Any
 
 import requests
 
-from br0kr import imgbuild  # the driver refuses to reap-DELETE anything but a broker-owned import artifact (below)
+# imgbuild: the driver refuses to reap-DELETE anything but a broker-owned import artifact (below)
+from br0kr import imgbuild, metrics
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +62,23 @@ def _count_stop_failure() -> None:
     global _stop_failures
     with _stop_failures_lock:
         _stop_failures += 1
+
+
+# Every PVE API call this process makes, by HTTP method and outcome, with its wall-clock time (review OPS-03). `op` is
+# the method only: a path carries vmids, UPIDs and volume ids, an unbounded label. A GET includes the once-a-second
+# task-status polls of every task wait, so GET latency is mostly poll latency. Outcomes: ok (2xx/3xx), denied
+# (401/403: an ACL gap, never transient), http_error (any other 4xx/5xx), bad_reply (a 2xx whose body is not the
+# API's JSON `data`), timeout, unreachable (no HTTP answer). PDM calls (br0kr/pdm.py) are not PVE and not counted.
+PVE_REQUEST_SECONDS = metrics.LabelledSummary(
+    "br0kr_pve_request_seconds",
+    "Wall-clock seconds of PVE API calls by HTTP method and outcome; _count is the number of calls.",
+    ("op", "outcome"))
+
+
+def _http_outcome(status: int) -> str:
+    if status in (401, 403):
+        return "denied"
+    return "http_error" if status >= 400 else "ok"
 
 # A bare PVE storage id, SAFE to interpolate into a storage-API request PATH — no `/`, `?`, `#`, `:`, whitespace,
 # or control char that could rewrite the reap DELETE URL into an arbitrary-volume delete. Mirrors nodes._STORAGE_RE
@@ -476,25 +496,39 @@ class Pve:
         self.timeout = timeout
         self._h = {"Authorization": f"PVEAPIToken={token_id}={token_secret}"}
 
+    def _request(self, method: str, path: str, data: dict[str, Any] | None = None) -> Any:
+        """The one PVE API seam: send `method path` (form `data` for POST/PUT), raise for an HTTP error, return the
+        reply's `data`. Times the call and counts its outcome in PVE_REQUEST_SECONDS whatever happens, so a slow or
+        refusing PVE shows on /metrics, not only in the caller's log line."""
+        started = time.monotonic()
+        outcome = "unreachable"
+        try:
+            r = requests.request(method, self.base + path, headers=self._h, data=data, verify=False,
+                                 timeout=self.timeout)
+            outcome = _http_outcome(r.status_code)
+            r.raise_for_status()
+            try:
+                return r.json()["data"]
+            except (ValueError, KeyError, TypeError):
+                outcome = "bad_reply"
+                raise
+        except requests.Timeout:
+            outcome = "timeout"
+            raise
+        finally:
+            PVE_REQUEST_SECONDS.observe(method.lower(), outcome, seconds=time.monotonic() - started)
+
     def _get(self, path: str) -> Any:
-        r = requests.get(self.base + path, headers=self._h, verify=False, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()["data"]
+        return self._request("GET", path)
 
     def _post(self, path: str, data: dict[str, Any]) -> Any:
-        r = requests.post(self.base + path, headers=self._h, data=data, verify=False, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()["data"]
+        return self._request("POST", path, data)
 
     def _delete(self, path: str) -> Any:
-        r = requests.delete(self.base + path, headers=self._h, verify=False, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()["data"]
+        return self._request("DELETE", path)
 
     def _put(self, path: str, data: dict[str, Any]) -> Any:
-        r = requests.put(self.base + path, headers=self._h, data=data, verify=False, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()["data"]
+        return self._request("PUT", path, data)
 
     def nextid(self) -> int:
         return int(self._get("/cluster/nextid"))

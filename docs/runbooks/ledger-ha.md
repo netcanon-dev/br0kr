@@ -169,6 +169,7 @@ visible without pretending to be a replica. Known residual: a `pg_receivewal` ar
 | `br0kr_ledger_replication_configured` | `0` = no slots and no walsenders. A single-node ledger, **legitimate** |
 | `br0kr_ledger_standbys_streaming` | connected standbys actually keeping up |
 | `br0kr_ledger_standbys_sync` | of those, how many are SYNCHRONOUS — losing one **blocks commits**, not just DR |
+| `br0kr_ledger_sync_required` | `1` = the primary's `synchronous_standby_names` is set, so commits WAIT for a sync standby; `0` = async |
 | `br0kr_ledger_slots_inactive` | slots with **no consumer** — the dead-standby signal |
 | `br0kr_ledger_slots_lost` | `wal_status='lost'`: WAL already recycled, the standby needs a **re-clone**, not a restart |
 | `br0kr_ledger_slot_retained_wal_bytes{slot}` | WAL the primary is holding for that slot; the disk-pressure side |
@@ -179,42 +180,21 @@ rendered differently, and only the third is ever red. A signal that cried wolf o
 single-node ledger would get muted — and would then be muted on the day a real standby died. That is
 the same class of mistake as logging the failure at `debug`.
 
-**The rules worth having.** Real alerting-rule YAML, not a one-liner — `for` is a rule field, not part
-of the expression, and pasting it into `expr` is a parse error:
+**The rules.** They ship as the `br0kr-ledger-dr` group of
+[`docker/prometheus/br0kr-alerts.yml`](../../docker/prometheus/br0kr-alerts.yml), checked and unit-tested with
+`promtool` (`bash scripts/check_alert_rules.sh`); [alerts.md](alerts.md) says what to do for each.
 
-```yaml
-groups:
-  - name: br0kr-ledger-dr
-    rules:
-      # The 45-hour incident. A configured ledger whose physical slot has no consumer.
-      - alert: Br0krLedgerStandbyGone
-        expr: br0kr_ledger_replication_configured == 1 and br0kr_ledger_slots_inactive > 0
-        for: 10m
-        # See the staleness note below: without this, an unreadable window RESOLVES this alert.
-        keep_firing_for: 15m
+| alert | expression | for |
+|---|---|---|
+| `Br0krLedgerStandbyGone` (the 45-hour incident) | `br0kr_ledger_replication_configured == 1 and br0kr_ledger_slots_inactive > 0` | 10m, `keep_firing_for: 15m` |
+| `Br0krLedgerPostureUnknown` | `br0kr_ledger_replication_readable == 0` | 10m |
+| `Br0krLedgerSlotLost` (re-clone, don't restart) | `br0kr_ledger_slots_lost > 0` | 0m |
+| `Br0krLedgerStandbyStalled` (streaming, replaying nothing) | `br0kr_ledger_replay_lag_bytes > 1073741824` | 15m |
+| `Br0krLedgerSyncStandbyLost` (commits wait) | `br0kr_ledger_sync_required == 1 and br0kr_ledger_standbys_sync == 0` | 1m |
 
-      # Unreadable is its OWN alert, not silence. Required for the rule above to mean anything.
-      - alert: Br0krLedgerPostureUnknown
-        expr: br0kr_ledger_replication_readable == 0
-        for: 10m
-
-      # Unrecoverable in place: the WAL is gone, the standby needs a re-clone.
-      - alert: Br0krLedgerSlotLost
-        expr: br0kr_ledger_slots_lost > 0
-        for: 0m
-
-      # A standby can be state='streaming' with an active slot and still replay NOTHING (replay paused,
-      # a recovery conflict, a dying disk). Neither rule above sees it; only the lag does. Tune the
-      # threshold to your WAL rate — this is "further behind than a normal burst".
-      - alert: Br0krLedgerStandbyStalled
-        expr: br0kr_ledger_replay_lag_bytes > 1073741824
-        for: 15m
-
-      # A SYNCHRONOUS standby is not a DR nicety: commits BLOCK on it. Page immediately.
-      - alert: Br0krLedgerSyncStandbyLost
-        expr: br0kr_ledger_replication_configured == 1 and br0kr_ledger_standbys_sync == 0
-        for: 0m
-```
+`Br0krLedgerSyncStandbyLost` keys on `br0kr_ledger_sync_required`, not on `configured`: an asynchronous ledger
+(the bundled pair has no `synchronous_standby_names`) has no synchronous standby by design, and a rule on the sync
+count alone would page on it forever.
 
 > **⚠️ Why `Br0krLedgerPostureUnknown` and `keep_firing_for` are not optional.** Every posture gauge
 > except `br0kr_ledger_replication_readable` is emitted **only when the read succeeded** — deliberately,
@@ -224,9 +204,8 @@ groups:
 > ledger that flaps in and out of readability would therefore flap straight through the incident. The
 > `readable == 0` rule covers the gap and `keep_firing_for` stops the flap.
 
-`Br0krLedgerSlotLost`'s remedy differs from the others — re-clone, don't restart:
-`docker compose stop pg-standby && docker volume rm <project>_pg-standby-data && docker compose up -d
-pg-standby`.
+`Br0krLedgerSlotLost`'s remedy differs from the others — re-clone, don't restart (see
+[alerts.md](alerts.md#br0krledgerslotlost)).
 
 **On an external / managed Postgres, grant `pg_monitor` first.** `pg_stat_replication` does not refuse
 a least-privilege role — it returns the rows with every column but `pid` set to **NULL**. br0kr detects
@@ -364,6 +343,7 @@ below) and do the sweep dry-run before resuming teardown.
   not reimplement that infra; it is built (and now proven) to ride through the window it creates.
 
 ## See also
+- [alerts.md](alerts.md) — what each shipped alert means and what to do, the ledger DR ones included
 - [docker-deploy.md](docker-deploy.md) — the Compose stack that wires this HA topology (the bundled primary+standby starter; §9 the stretched/DR standby over the mesh)
 - [/SECURITY.md](../../SECURITY.md) — C9 single-writer + the split-brain residual
 - [../architecture.md](../architecture.md) — roadmap item #9 (ledger HA)

@@ -11,7 +11,11 @@ So this harness stands in front of a live pair and does the outage on purpose:
 
     A  read against the STANDBY's own port          -> is_primary=False, reason='in_recovery',
                                                        and the primary-only terms are absent (not wrong)
-    B  read against the primary, standby streaming  -> configured, standbys_streaming=1, slot ACTIVE
+    B  read against the primary, standby streaming  -> configured, standbys_streaming=1, slot ACTIVE,
+                                                       an ASYNC pair: sync_required=False
+    S  synchronous_standby_names='*', then reset     -> sync_required=True + 1 sync standby; a role with
+                                                       no grants reads stats_masked (the setting read
+                                                       never raises), then async again before C
     C  docker stop the standby, then churn WAL      -> standbys_streaming=0, slots_inactive=1, and
                                                        retained WAL GROWS  <-- the 45-hour signature
     D  docker start the standby again               -> re-streams, slot ACTIVE again, retention drops
@@ -34,6 +38,7 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import psycopg  # noqa: E402
+from psycopg.conninfo import make_conninfo  # noqa: E402
 
 from br0kr import ledgerhealth  # noqa: E402
 
@@ -113,6 +118,31 @@ def main() -> int:
     # a pre-stop baseline is the only assertion that actually attributes retention to an ABSENT consumer.
     baseline = b.max_retained_wal_bytes or 0
     print(f"  -- baseline retained WAL while healthy: {baseline} bytes --")
+    # The bundled pair is ASYNC: no synchronous standby by design, which must not read as one lost (review OPS-03).
+    check("async_pair_does_not_require_sync", b.sync_required is False and b.standbys_sync == 0,
+          f"sync_required={b.sync_required} standbys_sync={b.standbys_sync}")
+
+    print("== S. make the pair SYNCHRONOUS, read it, then restore async before the outage ==")
+    with closing(psycopg.connect(PRIMARY_DSN, autocommit=True)) as conn:
+        conn.execute("ALTER SYSTEM SET synchronous_standby_names = '*'")
+        conn.execute("SELECT pg_reload_conf()")
+        conn.execute("DROP ROLE IF EXISTS lr_plain")
+        conn.execute("CREATE ROLE lr_plain LOGIN")   # no grants at all: pg_stat_replication is masked for it
+    ok_s = wait(lambda: read(PRIMARY_DSN).standbys_sync == 1)
+    s = read(PRIMARY_DSN)
+    check("sync_names_set_reads_sync_required", s.sync_required is True, f"sync_required={s.sync_required}")
+    check("the_standby_reports_as_synchronous", ok_s and s.standbys_sync == 1, f"standbys_sync={s.standbys_sync}")
+    plain = read(make_conninfo(PRIMARY_DSN, user="lr_plain"))
+    check("a_role_with_no_grants_reads_stats_masked_not_a_failed_setting_read",
+          plain.readable is False and plain.reason == "stats_masked", plain.reason)
+    with closing(psycopg.connect(PRIMARY_DSN, autocommit=True)) as conn:
+        # Reset BEFORE scenario C stops the standby: with a sync standby required and gone, every commit
+        # (churn_wal's included) would block forever.
+        conn.execute("ALTER SYSTEM RESET synchronous_standby_names")
+        conn.execute("SELECT pg_reload_conf()")
+        conn.execute("DROP ROLE lr_plain")
+    ok_async = wait(lambda: not read(PRIMARY_DSN).sync_required and read(PRIMARY_DSN).standbys_sync == 0)
+    check("reset_reads_async_again", ok_async)
 
     print(f"== C. stop the standby ({STANDBY_CONTAINER}) and churn WAL — the outage signature ==")
     docker("stop", STANDBY_CONTAINER)

@@ -134,6 +134,25 @@ def test_a_leader_failing_every_tick_is_alive_but_not_ready_over_the_real_socket
         assert _get(port, "/readyz")[0] == 200
 
 
+def test_metrics_carries_the_families_the_server_was_started_with():
+    """start_health_server's `families`, and the live progress stamp's age, reach every /metrics over the real socket
+    (review OPS-03: the daemon's PVE call timings and Br0krDaemonStalled's gauge ride this path). Guards a refactor
+    dropping either between start_health_server, make_handler and do_GET, which would leave them filled but never
+    scraped."""
+    from br0kr import metrics
+    fam = metrics.LabelledCounter("br0kr_test_total", "h", ("outcome",))
+    fam.inc("ok")
+    httpd = observability.start_health_server(
+        "127.0.0.1", 0, get_state=lambda: _leader(age=2.0), get_ledger=lambda: (True, {}),
+        get_progress=lambda: 998.0, stall_after=180.0, clock=lambda: 1000.0, families=(fam,))
+    try:
+        body = _get(httpd.server_address[1], "/metrics")[1]
+        assert 'br0kr_test_total{outcome="ok"} 1' in body
+        assert "br0kr_last_progress_age_seconds 2.0" in body.splitlines()   # the LIVE stamp reaches /metrics too
+    finally:
+        httpd.shutdown()
+
+
 def test_a_stalled_loop_fails_liveness():
     """When the loop's progress stamp is far older than stall_after (a hung/wedged reconcile thread that
     stopped stamping progress), /healthz answers 503 unhealthy — so an orchestrator restarts it and a

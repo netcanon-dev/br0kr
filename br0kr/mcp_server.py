@@ -39,18 +39,24 @@ the standard FastMCP/uvicorn env, e.g. FASTMCP_HOST / FASTMCP_PORT). The bearer 
 sent in cleartext, so an HTTP gateway beyond a trusted LAN MUST sit behind TLS
 termination (SECURITY.md C3 / the agent-auth control).
 
+**Metrics.** An HTTP gateway also serves `GET /metrics` on a SEPARATE port, `BR0KR_GATEWAY_METRICS_PORT` (default
+9091, `0` turns it off), never on its MCP port: that one is reached through the TLS proxy and the public tunnel's
+catch-all route. It carries `br0kr_admit_total{tool,outcome}`, counted here at the tool boundary
+(`_counts_admission`), and this process's PVE call timings (review OPS-03).
+
 The tool DOCSTRINGS are what an agent sees as each tool's description — keep them
 accurate and task-focused.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import closing
-from typing import Any, Literal, cast
+from typing import Any, Literal, ParamSpec, cast
 
 import anyio
 import psycopg
@@ -67,11 +73,13 @@ from br0kr import (
     gateway,
     inventory,
     logging_setup,
+    metrics,
     migrate,
     multidisk,
     nodes,
     pin,
     placement,
+    pve,
     ratelimit,
     replication,
     settings,
@@ -244,7 +252,38 @@ def _audit_refused(
                            actor="agent", actor_token_id=who.token_id, project_id=who.project_id)
 
 
+_P = ParamSpec("_P")
+
+
+def _counts_admission(tool: str) -> Callable[[Callable[_P, dict[str, Any]]], Callable[_P, dict[str, Any]]]:
+    """Count every answer the wrapped MCP verb gives in `gateway.ADMIT_OUTCOMES` under `tool` (review OPS-03).
+
+    At the TOOL boundary, so it counts what the agent actually got: the admission verdict, a refusal this layer gives
+    before admission (`{"error": "project_forbidden"}`, `data_disk_malformed`), and a call that RAISES anywhere in it
+    (token lookup, template governance, the verb, the audit write), as `error`, re-raised. A gateway whose admits
+    raise answers /healthz green (that probe is a SELECT 1), so this is how it reaches Br0krAdmitErroring. A
+    psycopg DataError is the ledger refusing a value the caller sent (a NUL in a string), so it counts as
+    `invalid_input`: an agent must not be able to page the operator by sending bad input. `functools.wraps` keeps
+    the signature, annotations and docstring FastMCP builds the tool from."""
+    def wrap(fn: Callable[_P, dict[str, Any]]) -> Callable[_P, dict[str, Any]]:
+        @functools.wraps(fn)
+        def counted(*args: _P.args, **kwargs: _P.kwargs) -> dict[str, Any]:
+            try:
+                answer = fn(*args, **kwargs)
+            except psycopg.DataError:
+                gateway.ADMIT_OUTCOMES.inc(tool, "invalid_input")
+                raise
+            except Exception:
+                gateway.ADMIT_OUTCOMES.inc(tool, "error")
+                raise
+            gateway.ADMIT_OUTCOMES.inc(tool, gateway.admit_outcome(answer))
+            return answer
+        return counted
+    return wrap
+
+
 @mcp.tool()
+@_counts_admission("request_lease")
 def request_lease(
     ctx: Context,
     idem_key: str,
@@ -364,6 +403,7 @@ def request_lease(
 
 
 @mcp.tool()
+@_counts_admission("schedule_lease")
 def schedule_lease(
     ctx: Context,
     idem_key: str,
@@ -1581,11 +1621,41 @@ def _apply_http_bind(server: FastMCP, env: Mapping[str, str]) -> None:
         server.settings.port = int(port)
 
 
+_METRICS_PORT_ENV = "BR0KR_GATEWAY_METRICS_PORT"
+_DEFAULT_METRICS_PORT = "9091"
+
+
+def _metrics_bind(env: Mapping[str, str]) -> tuple[str, int] | None:
+    """Where an HTTP gateway's metrics listener binds, or None when `BR0KR_GATEWAY_METRICS_PORT` is 0 (off).
+
+    The host is `BR0KR_GATEWAY_METRICS_HOST`, else the gateway's own `FASTMCP_HOST`, else loopback, so the listener
+    is never wider than the gateway. The port is a SEPARATE one on purpose: the MCP port is reached through the TLS
+    proxy and the public tunnel's catch-all route, and admission counts must not be served to the internet. A value
+    that is not a port number stops the gateway (SystemExit) rather than silently running without metrics."""
+    raw = (env.get(_METRICS_PORT_ENV) or _DEFAULT_METRICS_PORT).strip()
+    try:
+        port = int(raw)
+    except ValueError:
+        port = -1
+    if not 0 <= port <= 65535:
+        raise SystemExit(f"{_METRICS_PORT_ENV} must be a port number (0 turns the metrics listener off), got {raw!r}")
+    if port == 0:
+        return None
+    host = env.get("BR0KR_GATEWAY_METRICS_HOST") or env.get("FASTMCP_HOST") or "127.0.0.1"
+    return host, port
+
+
+def _gateway_metrics() -> str:
+    """The gateway's /metrics body: its admission verdicts, then its PVE call timings (an operator gateway has some)."""
+    return metrics.render((gateway.ADMIT_OUTCOMES, pve.PVE_REQUEST_SECONDS))
+
+
 def main() -> None:
     """Run the MCP server. Transport from BR0KR_MCP_TRANSPORT (default stdio); an invalid value
     fails loudly rather than silently picking a default. For the HTTP transports, FASTMCP_HOST /
     FASTMCP_PORT set the bind address (the Docker stack uses 0.0.0.0:8080) — see `_apply_http_bind`
-    and docs/runbooks/docker-deploy.md."""
+    and docs/runbooks/docker-deploy.md. The HTTP transports also start the metrics listener (`_metrics_bind`)
+    once the boot checks pass; a port that cannot be bound stops the gateway."""
     # Configure logging through logging_setup so LOG_LEVEL / LOG_FORMAT are honored AND the RedactionFilter is
     # attached — the gateway ran with NO logging config, so a stray token/DSN in a log line had no redaction
     # backstop and an operator's LOG_LEVEL was ignored (review S15). For stdio transport, logs go to stderr
@@ -1605,6 +1675,16 @@ def main() -> None:
     with closing(db.connect_with_retry()) as c:
         db.assert_read_committed(c)
         migrate.assert_schema(c, "gateway")   # a ledger older than this build would fail inside tool calls
+    if transport != "stdio":   # a stdio gateway is one per MCP client: a fixed port would clash, and none is scraped
+        bind = _metrics_bind(os.environ)
+        if bind is None:
+            log.info("gateway: metrics listener off (%s=0)", _METRICS_PORT_ENV)
+        else:
+            try:
+                metrics.serve(bind[0], bind[1], _gateway_metrics, name="gateway")
+            except OSError as exc:   # e.g. a second gateway in the same network namespace on the same port
+                raise SystemExit(f"gateway: cannot bind the metrics listener on {bind[0]}:{bind[1]} ({exc}); set "
+                                 f"{_METRICS_PORT_ENV} to a free port, or 0 to turn it off") from exc
     mcp.run(transport=cast(Literal["stdio", "sse", "streamable-http"], transport))
 
 

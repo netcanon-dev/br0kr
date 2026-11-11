@@ -134,7 +134,7 @@ done
 check operator_gateway_healthz_ok "$ogh"
 
 # daemon health surface on the internal port 9090 (not host-published; probe from inside the container).
-# /readyz must be 'ready' (the daemon is the leader, ledger reachable, ticking) and /metrics must carry
+# /readyz must be 'ready' (the daemon holds the leader lock, its ledger is reachable) and /metrics must carry
 # the leader gauge. Proves /readyz + /metrics + the leases-by-state scrape end to end in the real stack.
 dr=1
 for _ in $(seq 1 40); do

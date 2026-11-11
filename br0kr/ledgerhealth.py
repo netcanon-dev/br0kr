@@ -14,6 +14,7 @@ primary's own catalogs.
                            (`wal_status` — 'lost' means WAL was recycled and the standby CANNOT
                            resume without a re-clone), and how much WAL the primary is pinning for it
     pg_stat_replication    per connected standby: `state`, `sync_state`, and replay distance
+    synchronous_standby_names   non-empty = commits WAIT for a synchronous standby (`sync_required`)
 
 Replay distance is measured in WAL BYTES (`pg_current_wal_lsn() - replay_lsn`), so it only grows while the
 primary writes. An idle broker writes almost nothing (the leader's per-tick `replication_enabled` publish is
@@ -96,6 +97,11 @@ STATE_BACKUP = "backup"
 # degradation, it stalls writes, so it is surfaced separately and warrants a no-delay alert.
 SYNC_STATES = ("sync", "quorum")
 
+# Whether commits wait for a synchronous standby at all. An ASYNC ledger (the bundled pair) has
+# standbys_sync 0 by design, so "no sync standby" is only an emergency when this is true; an alert on
+# standbys_sync alone would page forever on every async deployment (review OPS-03).
+_SYNC_REQUIRED = "SELECT current_setting('synchronous_standby_names') <> ''"
+
 # The grant a least-privilege role needs before pg_stat_replication returns anything but NULLs.
 MONITOR_GRANT_HINT = "GRANT pg_monitor TO <the role in PGCONN>"
 
@@ -133,7 +139,9 @@ class LedgerReplication:
 
     `reason` is a short machine code, never a driver message: 'ok', 'not_configured', 'in_recovery',
     'stats_masked', or 'query_failed:<ExceptionClass>'. The standby counts exclude `pg_basebackup`
-    sessions; the slot-derived aggregates count PHYSICAL slots only."""
+    sessions; the slot-derived aggregates count PHYSICAL slots only. `sync_required` is True when the
+    primary's `synchronous_standby_names` is set (commits wait for a sync standby); False on an async
+    ledger and on a standby connection, where it is not read."""
 
     readable: bool
     reason: str
@@ -141,6 +149,7 @@ class LedgerReplication:
     standbys_total: int = 0
     standbys_streaming: int = 0
     standbys_sync: int = 0
+    sync_required: bool = False
     max_replay_lag_bytes: int | None = None
     slots: tuple[SlotHealth, ...] = ()
 
@@ -225,8 +234,11 @@ def read(conn: psycopg.Connection[Any]) -> LedgerReplication:
         )
 
         standbys_total = standbys_streaming = standbys_sync = 0
+        sync_required = False
         lags: list[int] = []
         if not in_recovery:
+            sync_row = conn.execute(_SYNC_REQUIRED).fetchone()
+            sync_required = bool(sync_row[0]) if sync_row else False
             for state, sync_state, lag in conn.execute(_STANDBYS).fetchall():
                 if state is None:
                     # Privilege masking, NOT a stopped standby: Postgres NULLs every column but `pid`
@@ -254,6 +266,7 @@ def read(conn: psycopg.Connection[Any]) -> LedgerReplication:
             standbys_total=standbys_total,
             standbys_streaming=standbys_streaming,
             standbys_sync=standbys_sync,
+            sync_required=sync_required,
             max_replay_lag_bytes=max(lags) if lags else None,
             slots=slots,
         )
@@ -287,8 +300,8 @@ def _with_reason(result: LedgerReplication, reason: str) -> LedgerReplication:
     return LedgerReplication(
         readable=result.readable, reason=reason, is_primary=result.is_primary,
         standbys_total=result.standbys_total, standbys_streaming=result.standbys_streaming,
-        standbys_sync=result.standbys_sync, max_replay_lag_bytes=result.max_replay_lag_bytes,
-        slots=result.slots,
+        standbys_sync=result.standbys_sync, sync_required=result.sync_required,
+        max_replay_lag_bytes=result.max_replay_lag_bytes, slots=result.slots,
     )
 
 
@@ -304,6 +317,7 @@ def as_dict(result: LedgerReplication) -> dict[str, Any]:
         "standbys_total": result.standbys_total,
         "standbys_streaming": result.standbys_streaming,
         "standbys_sync": result.standbys_sync,
+        "sync_required": result.sync_required,
         "max_replay_lag_bytes": result.max_replay_lag_bytes,
         "max_retained_wal_bytes": result.max_retained_wal_bytes,
         "slots_inactive": result.slots_inactive,

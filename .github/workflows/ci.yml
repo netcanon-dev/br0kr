@@ -171,3 +171,18 @@ jobs:
 
       - name: Run the real-Postgres harnesses (each on a fresh database)
         run: bash scripts/run_ci_harnesses.sh
+
+  alert-rules:
+    # The shipped Prometheus rules: promtool checks them and runs their unit tests
+    # (each alert fires on its condition, stays quiet on the near-misses). The
+    # image is digest-pinned in the script; Dependabot cannot see it, so bump it there.
+    name: alert rules (promtool)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: promtool check + test the alert rules
+        run: bash scripts/check_alert_rules.sh

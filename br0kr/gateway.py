@@ -14,11 +14,18 @@ reconciler provisioning step) is roadmap #6 — so `request_lease` returns the l
 and state, and an agent heartbeats/releases it; provisioning happens out of band until
 that lands. The status tool surfaces the lease state so a caller can see ADMITTED
 (reserved) vs ACTIVE (provisioned, once the reconciler is wired).
+
+ADMIT_OUTCOMES (`br0kr_admit_total{tool,outcome}`) counts the request_lease / schedule_lease answers. The MCP
+tools increment it at the agent-facing boundary (br0kr/mcp_server.py), so a failure in the layer around these
+verbs (token lookup, template governance, the audit write) is counted too; the gateway serves it on its metrics
+listener (review OPS-03).
 """
 from __future__ import annotations
 
 import logging
 import math
+import re
+from collections.abc import Mapping
 from typing import Any
 
 import psycopg
@@ -29,6 +36,7 @@ from br0kr import (
     build,
     imgbuild,
     lease,
+    metrics,
     migration,
     multidisk,
     pin,
@@ -39,6 +47,35 @@ from br0kr import (
 from br0kr.admission import AdmissionRequest
 
 log = logging.getLogger(__name__)
+
+# Admission answers by MCP verb (review OPS-03). `outcome` is admitted | queued | replay (an idempotent retry answered
+# from the existing lease) | error (the call raised) | invalid_input (it raised on a value the ledger cannot store) |
+# the refusal reason or `{"error": code}`. A reason is a short snake_case code; anything else is folded into `other`,
+# so a label value can never be free text. No project or tenant label: the listener is unauthenticated
+# (SECURITY.md C3 (c2)). The four fixed outcomes start at 0, so an alert sees the first one. mcp_server increments it.
+ADMIT_OUTCOMES = metrics.LabelledCounter(
+    "br0kr_admit_total",
+    "Admission answers from request_lease / schedule_lease by verb and outcome (admitted, queued, replay, error, "
+    "or the refusal reason).",
+    ("tool", "outcome"))
+_FIXED_OUTCOMES = ("admitted", "queued", "replay", "error")
+ADMIT_OUTCOMES.preset((tool, o) for tool in ("request_lease", "schedule_lease") for o in _FIXED_OUTCOMES)
+_REASON_LABEL = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def admit_outcome(answer: Mapping[str, Any]) -> str:
+    """The `outcome` label for one request_lease / schedule_lease answer: `admitted` or `queued` for a fresh verdict,
+    `replay` for an idempotent retry of either, else the refusal `reason` (or the code of an `{"error": code}`
+    answer, such as `forbidden_scope`), or `other` when that is missing or not a short snake_case code (an answer can
+    never put free text into a label)."""
+    if answer.get("admitted") or answer.get("queued"):
+        if answer.get("idempotent"):
+            return "replay"
+        return "admitted" if answer.get("admitted") else "queued"
+    reason = answer["error"] if "error" in answer else answer.get("reason")
+    if isinstance(reason, str) and _REASON_LABEL.fullmatch(reason) and reason not in _FIXED_OUTCOMES:
+        return reason
+    return "other"
 
 
 def _reserved_key(idem_key: str) -> bool:

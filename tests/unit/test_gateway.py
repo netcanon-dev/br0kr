@@ -433,3 +433,39 @@ def test_every_request_answer_carries_pinned_and_a_pinned_admission_is_settled(m
     out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1, req_mem_mb=512, project_id="p",
                                 pinned=True)
     assert out["pinned"] is True and settled == [9]
+
+
+# ── the admission verdict counter, br0kr_admit_total (review OPS-03) ──────────────────────────────────
+@pytest.mark.parametrize("answer,outcome", [
+    ({"admitted": True, "queued": False, "idempotent": False, "reason": None}, "admitted"),
+    ({"admitted": True, "queued": False, "idempotent": True, "reason": None}, "replay"),
+    ({"admitted": True, "idempotent": True, "reason": "pin_refused_on_replay"}, "replay"),
+    ({"admitted": False, "queued": True, "idempotent": False, "reason": "queued"}, "queued"),
+    ({"admitted": False, "queued": True, "idempotent": False, "reason": "no_reachable_instance_replicating"},
+     "queued"),
+    ({"admitted": False, "queued": True, "idempotent": True, "reason": "queued"}, "replay"),
+    ({"admitted": False, "queued": False, "idempotent": False, "reason": "insufficient_node_cpu"},
+     "insufficient_node_cpu"),
+    ({"admitted": False, "queued": False, "reason": "queue_full"}, "queue_full"),
+    ({"admitted": False, "reason": None}, "other"),
+    ({"admitted": False, "reason": "Free text, with spaces"}, "other"),
+    ({"admitted": False, "reason": "error"}, "other"),          # a reason may not impersonate a fixed outcome
+    ({"admitted": False, "reason": "x" * 65}, "other"),
+    ({"error": "project_forbidden"}, "project_forbidden"),        # a refusal the MCP layer gives before admission
+    ({"error": "bad token: Bearer abc"}, "other"),
+])
+def test_admit_outcome_maps_every_answer_to_a_bounded_label(answer, outcome):
+    """A fresh admission is `admitted`, a fresh park `queued`, an idempotent retry of either `replay`, a refusal its
+    reason, and anything that is not a short snake_case code `other`. Guards the alerts keying on these exact
+    values, and an answer putting free text (or an unbounded value) into a label on an unauthenticated scrape."""
+    assert gateway.admit_outcome(answer) == outcome
+
+
+def test_the_fixed_outcomes_exist_at_zero_before_any_call():
+    """Both verbs' admitted/queued/replay/error series exist from import, at 0 or more, so the FIRST raised admit
+    after a restart is an increase `increase()` can see (a series born at 1 hides it). Guards
+    Br0krAdmitErroring missing the error that starts an outage."""
+    snap = gateway.ADMIT_OUTCOMES.snapshot()
+    for tool in ("request_lease", "schedule_lease"):
+        for outcome in ("admitted", "queued", "replay", "error"):
+            assert (tool, outcome) in snap

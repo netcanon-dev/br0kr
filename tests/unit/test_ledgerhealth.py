@@ -38,12 +38,14 @@ class _FakeConn:
 
     `standbys` rows are `(state, sync_state, replay_lag)` and `slots` rows are
     `(slot_name, slot_type, active, wal_status, retained)` — the shapes the real queries select.
+    `sync_names` is whether `synchronous_standby_names` is set (the sync-required read).
     `autocommit` defaults True (the daemon's connection) so the rollback path is opt-in per test."""
 
     def __init__(self, *, in_recovery: bool = False, slots: list[tuple] | None = None,
                  standbys: list[tuple] | None = None, boom: bool = False,
-                 autocommit: bool = True) -> None:
+                 autocommit: bool = True, sync_names: bool = False) -> None:
         self.in_recovery = in_recovery
+        self.sync_names = sync_names
         self.slots = slots or []
         self.standbys = standbys or []
         self.boom = boom
@@ -61,6 +63,8 @@ class _FakeConn:
             return _FakeCursor(self.standbys)
         if "pg_is_in_recovery" in sql:
             return _FakeCursor([(self.in_recovery,)])
+        if "synchronous_standby_names" in sql:
+            return _FakeCursor([(self.sync_names,)])
         raise AssertionError(f"unexpected SQL: {sql}")
 
     def rollback(self) -> None:
@@ -183,6 +187,23 @@ def test_a_synchronous_standby_is_counted_separately():
     assert result.max_replay_lag_bytes == 128        # the WORST lag, not the first
 
 
+def test_sync_required_follows_synchronous_standby_names():
+    """`sync_required` is the primary's `synchronous_standby_names` being set, read separately from the standbys.
+
+    An ASYNC ledger (the bundled compose pair) has standbys_sync 0 by design, so an alert on that count alone
+    paged forever on every async deployment; the sync-lost alert needs to know commits actually wait. Pins
+    both values, that a standby connection never reads the setting (it is the primary's), and that the flag
+    survives the reason rewrite of a slotless ledger."""
+    assert ledgerhealth.read(_FakeConn(slots=[_slot()], standbys=[("streaming", "async", 0)])).sync_required is False
+    sync = ledgerhealth.read(_FakeConn(slots=[_slot()], standbys=[("streaming", "sync", 0)], sync_names=True))
+    assert sync.sync_required is True and sync.standbys_sync == 1
+    lost = ledgerhealth.read(_FakeConn(sync_names=True))   # sync configured, no standby left at all
+    assert lost.sync_required is True and lost.reason == "not_configured"
+    replica = _FakeConn(in_recovery=True, slots=[_slot()], sync_names=True)
+    assert ledgerhealth.read(replica).sync_required is False
+    assert not any("synchronous_standby_names" in sql for sql in replica.seen)
+
+
 # ── recovery + slot states ──────────────────────────────────────────────────────────────────────────
 def test_a_standby_connection_skips_the_primary_only_terms():
     """Read against a connection in recovery: slots are still read, primary-only terms are skipped.
@@ -248,7 +269,7 @@ def test_as_dict_materialises_the_derived_fields_for_the_dashboard():
     assert payload["readable"] is True and payload["configured"] is True
     assert payload["slots_inactive"] == 1 and payload["slots_lost"] == 1
     assert payload["max_retained_wal_bytes"] == 1024
-    assert payload["standbys_sync"] == 0
+    assert payload["standbys_sync"] == 0 and payload["sync_required"] is False
     assert payload["slots"] == [{
         "name": "br0kr_standby", "slot_type": "physical", "active": False,
         "wal_status": "lost", "retained_wal_bytes": 1024, "lost": True, "physical": True,

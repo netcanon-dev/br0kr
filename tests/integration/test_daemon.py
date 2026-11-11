@@ -125,7 +125,8 @@ def wired(monkeypatch):
         rec["reap_max_attempts"] = max_attempts   # the daemon threads its (hot-applied) release ceiling
         if on_progress is not None:
             on_progress()   # simulate one claimed-lease heartbeat (the per-destroy beat)
-        return reaper.ReapSummary(expired=1, released=2, provision_stuck=rec.get("stuck_claimed", 0))
+        return reaper.ReapSummary(expired=1, released=2, provision_stuck=rec.get("stuck_claimed", 0),
+                                  failed=rec.get("failed_claimed", 0))
 
     monkeypatch.setattr(reaper, "reap_once", fake_reap)
 
@@ -194,6 +195,15 @@ def test_tick_threads_the_provisioning_budget_into_the_reaper_and_counts_it(wire
     summary = d.tick(_FakeConn())
     assert wired["reap_provision_stuck_seconds"] == 900
     assert summary.provision_stuck == 2
+
+
+def test_tick_counts_the_leases_the_reaper_gave_up_on(wired):
+    """The reaper's `failed` count (leases moved to terminal RELEASE_FAILED, a guest possibly orphaned on PVE) is
+    copied into the tick summary, so /metrics shows br0kr_release_failed_total and Br0krReleaseFailedGrowing can
+    fire (review OPS-03). Guards the count being computed by the reaper and dropped by the daemon, which left a
+    growing pile of orphan guests invisible to every alert."""
+    wired["failed_claimed"] = 2
+    assert _daemon().tick(_FakeConn()).release_failed == 2
 
 
 def test_tick_reports_the_increase_in_failed_guest_stops(wired, monkeypatch):
@@ -705,8 +715,9 @@ def test_serve_counts_tick_failures_and_publishes_them_then_resets_on_success(wi
     """S05: a tick that RAISES keeps the loop beating (the thread isn't wedged → liveness stays green, and
     the stall check can't see it), so serve() COUNTS the consecutive failure and PUBLISHES it — that published
     streak is what flips /readyz to not_ready once it crosses _max_tick_failures. A subsequent successful tick
-    resets the streak to 0 (ready again). Asserts each failing tick publishes an incrementing streak and the
-    success publishes 0. Guards a persistently-failing leader that reconciles NOTHING advertising ready."""
+    resets the streak to 0 (ready again). Asserts the leader publish on entry (streak 0, before any tick), each
+    failing tick publishing an incrementing streak, and the success publishing 0. Guards a persistently-failing
+    leader that reconciles NOTHING advertising ready."""
     d = _daemon(interval=0.01)          # tiny interval so the 3 failing passes don't each sleep the default
     monkeypatch.setattr(leader, "still_leader", lambda conn, name: True)
     real_tick = d.tick
@@ -730,7 +741,7 @@ def test_serve_counts_tick_failures_and_publishes_them_then_resets_on_success(wi
     monkeypatch.setattr(d, "_publish_health", spy_publish)
 
     d.serve(_FakeConn())
-    assert published == [1, 2, 3, 0]    # 3 failing ticks publish an incrementing streak; the success resets it
+    assert published == [0, 1, 2, 3, 0]   # entry; 3 failing ticks publish an incrementing streak; success resets it
     assert d._health.consecutive_tick_failures == 0   # final published state is healthy again
 
 
@@ -747,6 +758,55 @@ def test_start_health_server_forwards_the_tick_failure_threshold(monkeypatch):
     d._max_tick_failures = 7
     d._start_health_server()
     assert captured["max_tick_failures"] == 7
+
+
+def test_serve_publishes_leadership_before_the_first_tick(wired, monkeypatch):
+    """serve() publishes ROLE_LEADER (br0kr_leader 1) and restarts the tick-age clock BEFORE its first tick, which can
+    run for many minutes (clones, a template download). Until it ended, every instance read br0kr_leader 0 and a
+    healthy new leader paged Br0krNoLeader (review OPS-03). The age is from taking the lock, so a first tick that
+    never completes still shows on br0kr_last_tick_age_seconds."""
+    d = _daemon(interval=0.01)
+    monkeypatch.setattr(leader, "still_leader", lambda conn, name: True)
+    d._last_tick_at = 1.0          # a stale stamp from an earlier leadership
+    seen: dict = {}
+
+    def first_tick(conn):
+        seen["leader"], seen["tick_at"] = d._health.leader, d._health.last_tick_monotonic
+        d.stop()
+        raise RuntimeError("stop after one look")
+    monkeypatch.setattr(d, "tick", first_tick)
+    d.serve(_FakeConn())
+    assert seen["leader"] is True and seen["tick_at"] is not None and seen["tick_at"] > 1.0
+
+
+def test_a_fresh_daemon_publishes_every_counter_at_zero(monkeypatch):
+    """Every cumulative counter (br0kr_release_failed_total, br0kr_builds_reclaimed_total, ...) is in the published state at
+    0 from construction and through a standby publish, before any tick. A series born at 1 on the first tick that
+    counts something reads as no increase, so Br0krReleaseFailedGrowing missed exactly the backlog a restarted or
+    newly elected daemon reaps first (review OPS-03)."""
+    from dataclasses import fields
+    d = _daemon()
+    counters = {f.metadata.get("cum_key", f.name) for f in fields(daemon_mod.TickSummary)
+                if f.metadata.get("metric", "counter") == "counter"}
+    assert {"release_failed", "builds_reclaimed", "placement_released", "reloads"} <= counters
+    assert d._health.cumulative == dict.fromkeys(counters, 0)
+    d._publish_health(daemon_mod.observability.ROLE_STANDBY, None)
+    assert d._health.cumulative == dict.fromkeys(counters, 0)
+    out = daemon_mod.observability.render_metrics(d._health, True, {}, now=1.0)
+    assert "br0kr_release_failed_total 0" in out.splitlines()
+
+
+def test_start_health_server_serves_the_pve_call_timings(monkeypatch):
+    """The daemon hands its process's PVE call family (br0kr_pve_request_seconds) to the health server, so the
+    daemon's /metrics carries PVE latency and outcomes (review OPS-03). Guards the family being defined and filled
+    but never rendered anywhere."""
+    captured: dict = {}
+    monkeypatch.setattr(daemon_mod.observability, "start_health_server",
+                        lambda host, port, **kw: captured.update(kw) or object())
+    d = _daemon()
+    d.health_port = 9099
+    d._start_health_server()
+    assert tuple(captured["families"]) == (daemon_mod.pve.PVE_REQUEST_SECONDS,)
 
 
 # ── registry hot-reload (SIGHUP + periodic) ──────────────────────────────────────

@@ -818,13 +818,19 @@ not evidence that what we ship is; (b) **`.env`/`.env.standby` are plaintext on
   not a repo one); (c) the **gateway is published as plain HTTP** — it now requires a per-project token
   (C12), but the bearer travels in CLEARTEXT, so put it behind TLS + access control or keep it on a trusted
   network; (c2) the **daemon's health/metrics surface
-  (`br0kr/observability.py`, `/healthz` · `/readyz` · `/metrics`, `BR0KR_HEALTH_PORT`) and the gateway's
-  `/healthz` are unauthenticated plain HTTP** — they expose only liveness/readiness, lease COUNTS by
-  state, and fleet admission-SLO AGGREGATES (queue depth, oldest-pending age, and queue-wait / provision
+  (`br0kr/observability.py`, `/healthz` · `/readyz` · `/metrics`, `BR0KR_HEALTH_PORT`), the gateway's
+  `/healthz`, and the gateway's metrics listener (`br0kr/metrics.py`, `/metrics` on `BR0KR_GATEWAY_METRICS_PORT`)
+  are unauthenticated plain HTTP** — they expose only liveness/readiness, lease COUNTS by state, admission
+  verdict COUNTS by verb and outcome (no project, tenant or free-text label: a refusal reason that is not a short
+  snake_case code is counted as `other`), PVE call COUNTS and DURATIONS by HTTP method and outcome, and fleet
+  admission-SLO AGGREGATES (queue depth, oldest-pending age, and queue-wait / provision
   latency percentiles — derived from the 0019 transition timestamps, which debit no scope and take no lock;
   never a secret, never a token, never a lease's payload, never a per-tenant figure), but keep them on a
   trusted network or behind the same proxy as the gateway. The same aggregate is available to an agent as
   the read-tier MCP `fleet_stats` verb (shared-infra observability, like `list_nodes` — no per-tenant data).
+  The gateway's metrics are on their OWN port, never on its MCP port: Caddy's catch-all route and the public
+  tunnel send every MCP-port path to the gateway, so a `/metrics` route there would be internet-reachable.
+  Compose `expose`s the metrics port only (no host port), and `BR0KR_GATEWAY_METRICS_PORT=0` turns it off.
   The same surface also carries the **ledger's replication posture** (`br0kr/ledgerhealth.py`: the
   `br0kr_ledger_*` gauges and the dashboard's `GET /api/ledger`) — replication slot NAMES plus lag/retention
   BYTE COUNTS and connected-standby counts. That is DR topology, not a secret: it is derived from

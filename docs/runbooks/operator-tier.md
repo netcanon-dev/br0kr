@@ -93,6 +93,11 @@ To retire it later, remove the container while the profile is still in `.env`, t
 `docker compose rm -sf gateway-operator`, edit `COMPOSE_PROFILES`, `bash scripts/deploy.sh`. (Dropping the
 profile first leaves a container `deploy.sh` treats as an orphan, and it refuses to run.)
 
+Every HTTP gateway also opens a metrics listener on `BR0KR_GATEWAY_METRICS_PORT` (default `9091`;
+[alerts.md](alerts.md)). In Compose each gateway has its own network namespace, so there is no clash. Two gateways
+run by hand on one host must be given different ports (or `0` on one), or the second stops at boot naming the
+variable.
+
 `verify_declarations`, `discover_reachability` and `detect_template_bridge` read live PVE, so they need the
 PVE token secret in the gateway's environment. Only `gateway-operator` (and the daemon) receives it; on a
 gateway without it they answer `checked_nodes: []` or `node_unroutable`.

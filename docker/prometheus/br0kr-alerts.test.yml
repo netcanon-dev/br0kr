@@ -1,0 +1,401 @@
+# promtool unit tests for br0kr-alerts.yml: each alert fires on the condition it names and stays quiet on the
+# near-misses (a leader handover, a counter reset, an async ledger, one stray error). Run with
+# `bash scripts/check_alert_rules.sh`, which CI does too. Expected annotations must match the rules exactly.
+rule_files:
+  - br0kr-alerts.yml
+evaluation_interval: 1m
+tests:
+  # A leader handover does not page; ten leaderless minutes do.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_leader{instance="daemon-1"}'
+        values: '1x10 0x30'
+      - series: 'br0kr_leader{instance="daemon-2"}'
+        values: '0x20 1x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: Br0krNoLeader
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: Br0krNoLeader
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krnoleader'
+              summary: 'No br0kr daemon holds the reconciler leader lock.'
+      - eval_time: 25m
+        alertname: Br0krNoLeader
+        exp_alerts: []
+  # No daemon scraped at all is the same blindness as no leader.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="other"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: Br0krNoLeader
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krnoleader'
+              summary: 'No br0kr daemon holds the reconciler leader lock.'
+  # A leader whose tick raises on every pass for 10 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_consecutive_tick_failures{instance="daemon-1"}'
+        values: '0x4 1+1x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: Br0krLeaderTickFailing
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: Br0krLeaderTickFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krleadertickfailing'
+              summary: 'The br0kr leader''s reconcile tick keeps failing or has stopped completing.'
+  # Occasional failed ticks between successes never page.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_consecutive_tick_failures{instance="daemon-1"}'
+        values: '0 3 0 2 0 1 0 0 0 0 0 4 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: Br0krLeaderTickFailing
+        exp_alerts: []
+  # A 30-minute tick (a template download) is healthy; no completed tick for an hour is not.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_consecutive_tick_failures{instance="daemon-1"}'
+        values: '0x80'
+      - series: 'br0kr_last_tick_age_seconds{instance="daemon-1"}'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: Br0krLeaderTickFailing
+        exp_alerts: []
+      - eval_time: 68m
+        alertname: Br0krLeaderTickFailing
+        exp_alerts: []
+      - eval_time: 73m
+        alertname: Br0krLeaderTickFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krleadertickfailing'
+              summary: 'The br0kr leader''s reconcile tick keeps failing or has stopped completing.'
+  # A loop that stops stamping progress pages; a healthy one never does.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_last_progress_age_seconds{instance="daemon-1"}'
+        values: '2x5 60+60x20'
+      - series: 'br0kr_last_progress_age_seconds{instance="daemon-2"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: Br0krDaemonStalled
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: Br0krDaemonStalled
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: Br0krDaemonStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krdaemonstalled'
+              summary: 'A br0kr daemon''s reconcile loop has stopped making progress.'
+  # A new RELEASE_FAILED lease pages for an hour after it happens.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_release_failed_total{instance="daemon-1"}'
+        values: '0x9 1x70'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: Br0krReleaseFailedGrowing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: Br0krReleaseFailedGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krreleasefailedgrowing'
+              summary: 'A br0kr lease went RELEASE_FAILED in the last hour; its guest may be orphaned on PVE.'
+      - eval_time: 75m
+        alertname: Br0krReleaseFailedGrowing
+        exp_alerts: []
+  # A daemon restart resets the counter to 0: that is not growth.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_release_failed_total{instance="daemon-1"}'
+        values: '2x10 0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: Br0krReleaseFailedGrowing
+        exp_alerts: []
+  # A held lease auto-released pages for an hour after it happens.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_placement_released_total{instance="daemon-1"}'
+        values: '0x9 1x70'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: Br0krHeldLeasesReleased
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: Br0krHeldLeasesReleased
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krheldleasesreleased'
+              summary: 'br0kr released a held lease it could not place in the last hour.'
+      - eval_time: 75m
+        alertname: Br0krHeldLeasesReleased
+        exp_alerts: []
+  # Holds that heal before their re-checks run out are the system working: never paged.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_held_leases{instance="daemon-1"}'
+        values: '0x4 2x40'
+      - series: 'br0kr_placement_released_total{instance="daemon-1"}'
+        values: '0x45'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: Br0krHeldLeasesReleased
+        exp_alerts: []
+  # The queue's head-of-line wait passes 30 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_queue_oldest_age_seconds{instance="daemon-1"}'
+        values: '0+120x30'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: Br0krQueueOldestAgeHigh
+        exp_alerts: []
+      - eval_time: 23m
+        alertname: Br0krQueueOldestAgeHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krqueueoldestagehigh'
+              summary: 'The oldest queued br0kr lease has waited more than 30 minutes.'
+  # A reclaimed build.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_builds_reclaimed_total{instance="daemon-1"}'
+        values: '0x4 1x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: Br0krBuildsReclaimed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: Br0krBuildsReclaimed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krbuildsreclaimed'
+              summary: 'br0kr reclaimed a stale template build in the last hour.'
+  # Three raised admissions in a few minutes page; the verb label is aggregated away.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_admit_total{instance="gateway-1",outcome="error",tool="request_lease"}'
+        values: '0x4 1 2 3x20'
+      - series: 'br0kr_admit_total{instance="gateway-1",outcome="admitted",tool="request_lease"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: Br0krAdmitErroring
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0kradmiterroring'
+              summary: 'br0kr gateway admission calls are raising errors instead of answering.'
+  # A single raised admission does not page.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_admit_total{instance="gateway-1",outcome="error",tool="schedule_lease"}'
+        values: '0x4 1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: Br0krAdmitErroring
+        exp_alerts: []
+  # Two raised admissions on top of an older one do not page: increase() extrapolates them to about 2.1.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_admit_total{instance="gateway-1",outcome="error",tool="request_lease"}'
+        values: '1x10 2 3x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: Br0krAdmitErroring
+        exp_alerts: []
+  # Bad input from an agent (invalid_input) never pages.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_admit_total{instance="gateway-1",outcome="invalid_input",tool="request_lease"}'
+        values: '0+3x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: Br0krAdmitErroring
+        exp_alerts: []
+  # The dead-standby signature pages, and keeps paging through an unreadable window (absent series).
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_replication_configured{instance="daemon-1"}'
+        values: '1x45'
+      - series: 'br0kr_ledger_slots_inactive{instance="daemon-1"}'
+        values: '0x4 1x15 stale stale stale stale stale 1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: Br0krLedgerStandbyGone
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: Br0krLedgerStandbyGone
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerstandbygone'
+              summary: 'A br0kr ledger replication slot has no standby attached.'
+      - eval_time: 23m
+        alertname: Br0krLedgerStandbyGone
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerstandbygone'
+              summary: 'A br0kr ledger replication slot has no standby attached.'
+  # A healed standby resolves once keep_firing_for has run out.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_replication_configured{instance="daemon-1"}'
+        values: '1x45'
+      - series: 'br0kr_ledger_slots_inactive{instance="daemon-1"}'
+        values: '0x4 1x20 0x20'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: Br0krLedgerStandbyGone
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerstandbygone'
+              summary: 'A br0kr ledger replication slot has no standby attached.'
+      - eval_time: 42m
+        alertname: Br0krLedgerStandbyGone
+        exp_alerts: []
+  # An unreadable posture pages on its own.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_replication_readable{instance="daemon-1"}'
+        values: '1x5 0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: Br0krLedgerPostureUnknown
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: Br0krLedgerPostureUnknown
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerpostureunknown'
+              summary: 'br0kr cannot read the ledger''s replication posture.'
+  # A lost slot pages at once.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_slots_lost{instance="daemon-1"}'
+        values: '0x3 1x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: Br0krLedgerSlotLost
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: Br0krLedgerSlotLost
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerslotlost'
+              summary: 'A br0kr ledger standby lost its WAL and must be re-cloned.'
+  # A standby 2 GiB behind for 15 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_replay_lag_bytes{instance="daemon-1"}'
+        values: '0x4 2147483648x30'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: Br0krLedgerStandbyStalled
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: Br0krLedgerStandbyStalled
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: warning
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerstandbystalled'
+              summary: 'A br0kr ledger standby is more than 1 GiB behind the primary.'
+  # An asynchronous ledger has no sync standby by design: never pages.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_sync_required{instance="daemon-1"}'
+        values: '0x10'
+      - series: 'br0kr_ledger_standbys_sync{instance="daemon-1"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: Br0krLedgerSyncStandbyLost
+        exp_alerts: []
+  # A synchronous ledger losing its sync standby pages within a minute.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_sync_required{instance="daemon-1"}'
+        values: '1x10'
+      - series: 'br0kr_ledger_standbys_sync{instance="daemon-1"}'
+        values: '1x3 0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: Br0krLedgerSyncStandbyLost
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: Br0krLedgerSyncStandbyLost
+        exp_alerts:
+          - exp_labels:
+              instance: daemon-1
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgersyncstandbylost'
+              summary: 'The br0kr ledger requires a synchronous standby and has none, so commits wait.'
+  # A sync standby restarting (one scrape without it) does not page.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_ledger_sync_required{instance="daemon-1"}'
+        values: '1x10'
+      - series: 'br0kr_ledger_standbys_sync{instance="daemon-1"}'
+        values: '1x3 0 1x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: Br0krLedgerSyncStandbyLost
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: Br0krLedgerSyncStandbyLost
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: Br0krLedgerSyncStandbyLost
+        exp_alerts: []

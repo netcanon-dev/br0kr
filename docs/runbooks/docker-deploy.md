@@ -445,14 +445,18 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   a few times in a row reads **not_ready** even though the thread stays alive, since it holds the lock but
   reconciles nothing; a standby is alive-but-not-ready, so with `--scale daemon=2` exactly one is ready), and
   **`/metrics`** Prometheus (process/leader gauges, last-tick age, `br0kr_consecutive_tick_failures`, the
-  latest tick's provision/reap/sweep counts, cumulative `*_total`, and `br0kr_leases{state="…"}`). The
-  gateway has its own **`/healthz`** (a fast ledger `SELECT 1` → 200/503). Both services carry a Compose
-  `healthcheck` — but it probes **`/healthz`** only, so a leader that is *alive but not_ready* (its tick keeps
-  raising) will NOT self-restart; **alert on `br0kr_consecutive_tick_failures > 0`** so a stuck-but-beating
-  leader reaches a human (it holds the lock while reconciling nothing). Point Prometheus at
-  `daemon:9090/metrics` — note the daemon's `9090` is published on the **compose network only** (`expose`, not
-  a host port, to avoid a fixed-port clash under `--scale daemon=2`), so scrape it from a Prometheus container on
-  the same network; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
+  latest tick's provision/reap/sweep counts, cumulative `*_total`, `br0kr_leases{state="…"}`, the loop's
+  `br0kr_last_progress_age_seconds`, and its PVE call timings `br0kr_pve_request_seconds`). The gateway has its own **`/healthz`** (a fast ledger `SELECT 1` →
+  200/503) and serves its **`/metrics`** (`br0kr_admit_total{tool,outcome}`, the admission verdicts) on a
+  separate port, `BR0KR_GATEWAY_METRICS_PORT` (default `9091`, `0` = off), never on `8080`, which Caddy and the
+  tunnel route to the internet. Both services carry a Compose `healthcheck` — but it probes **`/healthz`** only,
+  so a leader that is *alive but not_ready* (its tick keeps raising) will NOT self-restart. **Load the shipped
+  alert rules**, [`docker/prometheus/br0kr-alerts.yml`](../../docker/prometheus/br0kr-alerts.yml):
+  `Br0krLeaderTickFailing` is how a stuck-but-beating leader reaches a human (it holds the lock while
+  reconciling nothing), and [alerts.md](alerts.md) says what to do for each alert. Point Prometheus at
+  `daemon:9090/metrics` and `gateway:9091/metrics` — both are published on the **compose network only**
+  (`expose`, not a host port, to avoid a fixed-port clash under `--scale daemon=2`), so scrape them from a
+  Prometheus container on the same network; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
   as u; print(u.urlopen('http://localhost:9090/readyz').status)"`. The endpoints are unauthenticated plain HTTP
   exposing only counts/states (never a secret) — keep them on a trusted network ([/SECURITY.md](../../SECURITY.md) C3 (c2)).
 - **Re-run migrations** after upgrading: `bash scripts/deploy.sh` does it (its `up -d` re-runs the one-shot
@@ -881,6 +885,7 @@ git add -A && git checkout-index -a -f
 ```
 
 ## See also
+- [alerts.md](alerts.md) — the shipped Prometheus alert rules: how to load them, and what to do when each fires
 - [connecting-an-agent.md](connecting-an-agent.md) — once the stack is up, pointing an agent's MCP client at the gateway (transport + token)
 - [../api.md](../api.md) — the API reference: the gateway's tools and the dashboard's routes, with who may call each
 - [oauth-connector.md](oauth-connector.md) + [public-tunnel.md](public-tunnel.md) — the OAuth-only (Claude Desktop) connector and how to make it reachable from the cloud

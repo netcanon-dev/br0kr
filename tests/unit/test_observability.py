@@ -304,6 +304,38 @@ def test_sync_standby_count_is_surfaced_separately():
     assert "br0kr_ledger_standbys_sync 1" in out.splitlines()
 
 
+def test_process_local_families_render_after_the_tick_gauges_on_every_instance():
+    """`families` (br0kr.metrics families such as the PVE call timings) are appended to /metrics on a leader AND
+    on a standby: they are per-process facts, unlike the leader-only ledger gauges. Guards a standby's own PVE
+    calls disappearing, and the family being dropped from the render."""
+    from br0kr import metrics
+    fam = metrics.LabelledSummary("br0kr_test_seconds", "h", ("op",))
+    fam.observe("get", seconds=0.5)
+    for state in (_leader(), HealthState(role=observability.ROLE_STANDBY)):
+        lines = observability.render_metrics(state, True, {}, now=1000.0, families=(fam,)).splitlines()
+        assert lines[-2:] == ['br0kr_test_seconds_sum{op="get"} 0.5', 'br0kr_test_seconds_count{op="get"} 1']
+
+
+def test_progress_age_is_rendered_on_every_role_and_only_when_stamped():
+    """br0kr_last_progress_age_seconds is now - the loop's live progress stamp, on a leader AND a standby (a wedged
+    standby cannot take over either), and absent before the loop has stamped anything. Br0krDaemonStalled keys on
+    it, because Compose never restarts the unhealthy container /healthz reports (review OPS-03)."""
+    for state in (_leader(), HealthState(role=observability.ROLE_STANDBY)):
+        lines = observability.render_metrics(state, True, {}, now=1000.0, progress=940.0).splitlines()
+        assert "br0kr_last_progress_age_seconds 60.0" in lines
+    assert "br0kr_last_progress_age_seconds" not in observability.render_metrics(_leader(), True, {}, now=1000.0)
+
+
+def test_sync_required_gauge_separates_an_async_ledger_from_a_lost_sync_standby():
+    """br0kr_ledger_sync_required says whether commits wait for a synchronous standby, so the sync-lost alert can
+    key on it: an async ledger (sync_required 0, standbys_sync 0) is healthy, a sync one with 0 sync standbys is
+    blocking writes. Without the gauge the alert fired forever on the bundled async pair (review OPS-03)."""
+    out = observability.render_metrics(_leader(), True, {}, now=1000.0, repl=_posture())
+    assert "br0kr_ledger_sync_required 0" in out.splitlines()
+    out = observability.render_metrics(_leader(), True, {}, now=1000.0, repl=_posture(sync_required=True))
+    assert "br0kr_ledger_sync_required 1" in out.splitlines()
+
+
 def test_render_metrics_reports_pinned_leases_as_their_own_gauge():
     """The scrape's live-pinned count (observability.PINNED_KEY, 0049) renders as br0kr_leases_pinned, a family
     of its own, and never as a br0kr_leases{state=...} series (a pinned lease is already counted in its state).

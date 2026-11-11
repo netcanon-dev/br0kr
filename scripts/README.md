@@ -163,6 +163,7 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 | `backup_ledger.sh` | A `pg_dump` of the ledger, mode `0600`, with retention. | [ledger-ha](../docs/runbooks/ledger-ha.md#backups-durability) |
 | `restore_ledger.sh` | Restores a dump in one transaction; refuses over live leases without `--force`. | [ledger-ha](../docs/runbooks/ledger-ha.md#restore-drill-practice-this-before-you-need-it) |
 | `bake_template_agent.sh` | Installs and enables `qemu-guest-agent` inside a cloud image before it becomes a template. | [vm-access §2](../docs/runbooks/vm-access.md#2-prepare-a-cloud-init-template-operator-once-per-cluster) |
+| `check_alert_rules.sh` | Runs `promtool check rules` and `promtool test rules` on the shipped alert rules in a digest-pinned Prometheus image (no network, no ports). CI runs it; run it after changing a rule or a threshold. | [alerts](../docs/runbooks/alerts.md) |
 
 ## Client and reference
 
