@@ -225,6 +225,10 @@ _DISCOVERY_DRIFT_BUCKETS: tuple[str, ...] = (
 # exists yet, so the release mints no orphan; capacity frees for placeable work.
 _HELD_RELEASE_AFTER = 60
 
+# The /metrics scrape's count of live PINNED leases (0049) — the ones the TTL reaper skips.
+_LIVE_PINNED_COUNT = ("SELECT count(*) FROM lease WHERE pinned AND state IN ("
+                      + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")")
+
 # The stale-build reclaim's BOUNDED poll when RE-ATTACHING to a guest-free DOWNLOADING build's download task
 # (migration 0045) — a few seconds, NOT build_template's full download wait. A task that has already SETTLED
 # returns its verdict within the first poll (so the source is reaped this sweep); a task NOT confirmed settled
@@ -1664,11 +1668,15 @@ class Daemon:
         """Read leases-by-state from the ledger for /readyz + /metrics, on a FRESH short-lived
         connection (never the tick/leader connections — this runs on the health-server thread). Returns
         (reachable, counts); ANY error returns (False, {}) so a momentarily-unreachable ledger reads as
-        not-ready / not-reachable rather than crashing the scrape."""
+        not-ready / not-reachable rather than crashing the scrape. The counts also carry the live PINNED leases
+        (0049) under observability.PINNED_KEY, for the br0kr_leases_pinned gauge."""
         try:
             with closing(self._connect()) as c:
                 rows = c.execute("SELECT state::text, count(*) FROM lease GROUP BY state").fetchall()
-            return True, {str(state): int(n) for state, n in rows}
+                pinned = c.execute(_LIVE_PINNED_COUNT).fetchone()
+            counts = {str(state): int(n) for state, n in rows}
+            counts[observability.PINNED_KEY] = int(pinned[0]) if pinned else 0
+            return True, counts
         except Exception:
             log.warning("health: ledger scrape failed — reporting ledger unreachable", exc_info=True)
             return False, {}

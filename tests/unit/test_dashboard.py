@@ -658,8 +658,10 @@ def test_post_action_routes_are_an_explicit_allowlist():
     accidental write endpoint slipping in (or out) unreviewed — especially the act-as-project create."""
     assert set(dashboard._ACTIONS) == {
         "/api/cancel", "/api/lease/create", "/api/lease/renew", "/api/lease/release",
+        "/api/lease/pin",                                              # 0049
         "/api/quota", "/api/migrate", "/api/migration/cancel",
         "/api/project/create", "/api/project/edit", "/api/project/delete", "/api/project/template-disk",
+        "/api/project/max-pinned",                                     # 0049
         "/api/node/create", "/api/node/edit", "/api/node/cordon", "/api/node/delete",
         "/api/cluster/create", "/api/cluster/edit", "/api/cluster/delete",
         "/api/storage/create", "/api/storage/edit", "/api/storage/delete",
@@ -1208,3 +1210,37 @@ def test_read_settings_shapes_knobs_with_ledger_override_and_reload_flag():
     assert {k.name for k in settings.KNOBS} == set(by)                       # every knob present
     assert by["queue_max"]["override"] == 42 and by["queue_max"]["gateway"] is True
     assert by["reap_grace"]["override"] is None and by["reap_grace"]["default"] == 30
+
+
+def test_parse_max_pinned_is_strict_about_the_bound():
+    """The pin-bound setter (0049) takes project_id + max_pinned, a whole number 0 or more. A bool, a float or a
+    numeric string is refused rather than coerced (a typo must not quietly set a different bound), and a
+    negative one gets the validator's reason. Guards a malformed body reaching the ledger, or `true` allowing
+    one pin."""
+    parse = dashboard._ACTIONS["/api/project/max-pinned"][0]
+    assert parse({"project_id": "p", "max_pinned": 0}) == {"project_id": "p", "max_pinned": 0}
+    assert parse({"project_id": "p", "max_pinned": 4}) == {"project_id": "p", "max_pinned": 4}
+    for bad, reason in ((True, "max_pinned_invalid"), (2.0, "max_pinned_invalid"), ("2", "max_pinned_invalid"),
+                        (None, "max_pinned_invalid"), (-1, "negative_max_pinned")):
+        with pytest.raises(dashboard._Reject) as err:
+            parse({"project_id": "p", "max_pinned": bad})
+        assert err.value.reason == reason
+    pin_parse = dashboard._ACTIONS["/api/lease/pin"][0]
+    assert pin_parse({"lease_id": 3, "pinned": False}) == {"lease_id": 3, "pinned": False}
+    with pytest.raises(dashboard._Reject):
+        pin_parse({"lease_id": 3, "pinned": 1})   # a 0/1 is not a toggle
+
+
+def test_active_leases_panel_badges_pinned_leases_and_offers_the_pin_toggle():
+    """The Active leases table shows a pinned lease's TTL cell as the `pinned` badge (its expires_at means
+    nothing to the reaper), offers pin/unpin from the row's Python-computed `pinnable` flag, treats a no-op toggle
+    (no reason) as done rather than "failed", and the project card shows and sets the pin limit. Guards the badge
+    the review asked for going missing, and the toggle's wiring (endpoint, body, success rule) drifting."""
+    js = _script_block(dashboard.PAGE)
+    assert js is not None
+    assert "${l.pinned ? pinTag : ttl(l.expires_in_seconds)}" in js
+    assert "if(canEdit && l.pinnable)" in js and "'unpinLease' : 'pinLease'" in js
+    assert "postJSON('/api/lease/pin', {lease_id:id, pinned:to})" in js
+    assert "if(r.ok && r.data && r.data.reason == null) poll();" in js
+    assert "postJSON('/api/project/max-pinned', {project_id:p.project_id, max_pinned:num})" in js
+    assert "`pins ${p.pinned_count||0}/${p.max_pinned}`" in js

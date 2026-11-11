@@ -55,6 +55,7 @@ operator tools need an operator token. A tenant token always acts on its own pro
 | [`mark_template_source_dirty`](#mark_template_source_dirty) | operator | `gateway-operator` only | OPERATOR only: set (`dirty=true`) or clear a template's hand-modified flag. |
 | [`migrate_lease`](#migrate_lease) | operator | `gateway-operator` only | OPERATOR only: relocate a running lease's guest to a node in ANOTHER cluster, race-free: the target is reserved through admit(), then the guest moves fence-checked. |
 | [`node_cordon`](#node_cordon) | operator | `gateway-operator` only | OPERATOR only: cordon (cordoned=true) or uncordon (false) a node — the "place NO new lease here" toggle. |
+| [`pin_lease`](#pin_lease) | operator | `gateway-operator` only | OPERATOR only: pin (pinned=true) or unpin (false) any tenant's live lease. |
 | [`prune_replications`](#prune_replications) | operator | `gateway-operator` only | OPERATOR only: retention for the replication job table — delete SETTLED TERMINAL jobs older than `older_than_days` (optionally scoped to one target cluster), so a decommissioned cluster's job history can't FK-block it forever. |
 | [`replicate_template`](#replicate_template) | operator | `gateway-operator` only | OPERATOR only: request an async copy of a template onto another pool; the leader daemon copies it once `replication_enabled`. |
 | [`verify_declarations`](#verify_declarations) | operator | `gateway-operator` only | OPERATOR only: reconcile DECLARED storage reachability against PVE and quarantine a (storage, node) pair on hard evidence (PVE reports the pool disabled, or its live content dropped `images`), so templated leases over it are refused until clear_storage_node_quarantine. |
@@ -216,6 +217,7 @@ Tier **consume**, served by all gateways. Reserve capacity for a VM on a node (r
 - `queue` (boolean, default `false`)
 - `max_wait_seconds` (integer, default `3600`)
 - `data_disks` (array of object | null, default `null`)
+- `pinned` (boolean, default `false`)
 
 ### schedule_lease
 
@@ -236,6 +238,7 @@ Tier **consume**, served by all gateways. Reserve capacity and let the broker PI
 - `queue` (boolean, default `false`)
 - `max_wait_seconds` (integer, default `3600`)
 - `data_disks` (array of object | null, default `null`)
+- `pinned` (boolean, default `false`)
 
 ### request_template_download
 
@@ -341,6 +344,13 @@ Tier **operator**, served by `gateway-operator` only. OPERATOR only: cordon (cor
 - `node_id` (string, required)
 - `cordoned` (boolean, required)
 
+### pin_lease
+
+Tier **operator**, served by `gateway-operator` only. OPERATOR only: pin (pinned=true) or unpin (false) any tenant's live lease.
+
+- `lease_id` (integer, required)
+- `pinned` (boolean, required)
+
 ### prune_replications
 
 Tier **operator**, served by `gateway-operator` only. OPERATOR only: retention for the replication job table — delete SETTLED TERMINAL jobs older than `older_than_days` (optionally scoped to one target cluster), so a decommissioned cluster's job history can't FK-block it forever.
@@ -424,6 +434,7 @@ recorded in the audit log.
 | `/api/instance/delete` | Delete a template-instance ROW (never the physical guest). |
 | `/api/instance/retire` | Retire a READY/REPLICATING instance → RETIRED (excluded from uniqueness + 0033 usability, so a fresh copy can be materialised in its place — stale content is never immortal). |
 | `/api/lease/create` | Provision a VM on behalf of `project_id` (act-as), debiting THAT project's real quota through the proven admission path. |
+| `/api/lease/pin` | Pin or unpin a live lease. |
 | `/api/lease/release` | Release a lease (normal completion). |
 | `/api/lease/renew` | Heartbeat a lease to push its TTL out — OR hold your place in the admission QUEUE (a PENDING lease's renewable spot, capped at its max-wait ceiling). |
 | `/api/migrate` | Request that a lease's running guest be migrated to ``target_node_id`` in ANOTHER cluster, race-free (br0kr/migration.py). |
@@ -442,6 +453,7 @@ recorded in the audit log.
 | `/api/project/create` | Create a tenant, optionally with its self-service ceilings (the `*_max` envelope; None = that dimension not self-raisable, the default — self-service is OFF until a ceiling is set). |
 | `/api/project/delete` | Delete a tenant. |
 | `/api/project/edit` | Set an EXISTING project's tenant budget (cpu/mem/lease limits + optional per-project queue cap) AND its self-service ceilings (the `*_max` envelope a provision token may climb within; None = that dimension not self-raisable). |
+| `/api/project/max-pinned` | Set how many live leases of a project may be pinned (0 = pinning off, the default; br0kr/pin.py). |
 | `/api/project/template-disk` | Set (or clear, with None) a project's template-disk ceiling — the GB of downloaded template images the tenant's provision tokens may own (phase A4.2; NULL disables self-service downloads for the tenant, the opt-in default for every new project). |
 | `/api/quota` | Set ONLY a project's base quota (cpu/mem/lease limits + the optional queue cap), PRESERVING its self-service ceilings — the /api/quota base-quota editor. |
 | `/api/reload` | Ask the daemon to reload its fleet config on its next tick, by setting the flag it reads and clears. |

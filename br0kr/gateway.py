@@ -31,6 +31,7 @@ from br0kr import (
     lease,
     migration,
     multidisk,
+    pin,
     replication,
     scheduler,
     settings,
@@ -80,7 +81,7 @@ def _multi_disk_refused(conn: psycopg.Connection[Any], idem_key: str,
     return not exists   # refuse only a FRESH ask; an existing lease falls through for its idempotency verdict
 
 
-def request_lease(
+def _request_lease(
     conn: psycopg.Connection[Any],
     *,
     idem_key: str,
@@ -200,7 +201,47 @@ def request_lease(
             "idempotent": r.idempotent, "reason": r.reason}
 
 
-def schedule_lease(
+def request_lease(
+    conn: psycopg.Connection[Any],
+    *,
+    idem_key: str,
+    node_id: str,
+    req_cpu: float,
+    req_mem_mb: int,
+    storage_id: str | None = None,
+    req_disk_gb: int = 0,
+    project_id: str | None = None,
+    ssh_pubkey: str | None = None,
+    ci_user: str | None = None,
+    ip_config: str | None = None,
+    template_id: str | None = None,
+    ttl_seconds: int = 900,
+    queue: bool = False,
+    max_wait_seconds: int = 3600,
+    queue_max: int = 1000,
+    data_disks: tuple[multidisk.DataDisk, ...] = (),
+    pinned: bool = False,
+) -> dict[str, Any]:
+    """Reserve capacity for a VM on a named node: _request_lease's admission, queue, cloud-init, template and
+    data-disk rules, plus ``pinned`` in the answer.
+
+    PINNED (optional, 0049): ``pinned=True`` asks for a lease the TTL reaper never reclaims, so it needs no
+    heartbeat (release it when done). The project must allow pins (max_pinned > 0, else pin_disabled) and have a
+    slot free (else pinned_limit); a queued request can't ask (pin_not_queueable). See br0kr/pin.py."""
+    if pinned:
+        refused = pin.refuse_before_admit(conn, idem_key=idem_key, project_id=project_id, queue=queue)
+        if refused:
+            return {"lease_id": None, "admitted": False, "queued": False, "idempotent": False,
+                    "reason": refused, "pinned": False}
+    r = _request_lease(conn, idem_key=idem_key, node_id=node_id, req_cpu=req_cpu, req_mem_mb=req_mem_mb,
+                       storage_id=storage_id, req_disk_gb=req_disk_gb, project_id=project_id,
+                       ssh_pubkey=ssh_pubkey, ci_user=ci_user, ip_config=ip_config, template_id=template_id,
+                       ttl_seconds=ttl_seconds, queue=queue, max_wait_seconds=max_wait_seconds,
+                       queue_max=queue_max, data_disks=data_disks)
+    return pin.settle(conn, r, pinned=pinned)
+
+
+def _schedule_lease(
     conn: psycopg.Connection[Any],
     *,
     idem_key: str,
@@ -285,6 +326,42 @@ def schedule_lease(
             "idempotent": r.idempotent, "reason": r.reason, "tried": r.tried}
 
 
+def schedule_lease(
+    conn: psycopg.Connection[Any],
+    *,
+    idem_key: str,
+    req_cpu: float,
+    req_mem_mb: int,
+    cluster_id: str | None = None,
+    storage_id: str | None = None,
+    req_disk_gb: int = 0,
+    project_id: str | None = None,
+    ssh_pubkey: str | None = None,
+    ci_user: str | None = None,
+    ip_config: str | None = None,
+    template_id: str | None = None,
+    ttl_seconds: int = 900,
+    queue: bool = False,
+    max_wait_seconds: int = 3600,
+    queue_max: int = 1000,
+    data_disks: tuple[multidisk.DataDisk, ...] = (),
+    pinned: bool = False,
+) -> dict[str, Any]:
+    """Reserve capacity and let the broker pick the node: _schedule_lease's placement and queue rules, plus
+    ``pinned`` in the answer. ``pinned=True`` asks for a pinned lease, with request_lease's rules (br0kr/pin.py)."""
+    if pinned:
+        refused = pin.refuse_before_admit(conn, idem_key=idem_key, project_id=project_id, queue=queue)
+        if refused:
+            return {"lease_id": None, "node_id": None, "admitted": False, "queued": False, "idempotent": False,
+                    "reason": refused, "tried": [], "pinned": False}
+    r = _schedule_lease(conn, idem_key=idem_key, req_cpu=req_cpu, req_mem_mb=req_mem_mb, cluster_id=cluster_id,
+                        storage_id=storage_id, req_disk_gb=req_disk_gb, project_id=project_id,
+                        ssh_pubkey=ssh_pubkey, ci_user=ci_user, ip_config=ip_config, template_id=template_id,
+                        ttl_seconds=ttl_seconds, queue=queue, max_wait_seconds=max_wait_seconds,
+                        queue_max=queue_max, data_disks=data_disks)
+    return pin.settle(conn, r, pinned=pinned)
+
+
 def renew_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
     """Heartbeat a lease to push its TTL out — OR hold your place in the admission QUEUE (a PENDING
     lease's renewable spot, capped at its max-wait ceiling). ``renewed`` is False (with ``expires_at``
@@ -314,8 +391,8 @@ def lease_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
     if info is None:
         return {"lease_id": lease_id, "state": None, "exists": False, "access_requested": False,
                 "ip_address": None, "ci_user": None, "vmid": None, "node_id": None,
-                "released_reason": None, "hold_reason": None}
-    # info carries state/vmid/node/ip/ci_user/access_requested + 0033's released_reason & hold_reason.
+                "released_reason": None, "hold_reason": None, "pinned": False}
+    # info carries state/vmid/node/ip/ci_user/access_requested + 0033's released_reason & hold_reason + 0049's pinned.
     return {"lease_id": lease_id, "exists": True, **info}
 
 

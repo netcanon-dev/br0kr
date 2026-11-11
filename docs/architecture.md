@@ -443,7 +443,11 @@ leaves a lease there when a clone or create outlives its wait budget. `begin_pro
 (operator setting, default 20 min) as `RELEASING(released_reason = 'provision_stuck')`, whatever its
 `expires_at`. A fenced guest is then fenced-destroyed; a clone that timed out before its fence was stamped is
 removed by the orphan sweep's marker reclaim once the lease is terminal. A lease whose agent stopped renewing
-usually expires first (the default TTL is shorter than the budget) and reads `expired`. **Built in `br0kr/lease.py`**; the teardown driver
+usually expires first (the default TTL is shorter than the budget) and reads `expired`. A **pinned** lease
+(migration `0049`, `br0kr/pin.py`) is skipped by the TTL step alone, so it needs no heartbeat; it is admitted,
+debited and released like any other, the two steps above still apply, and a project may hold at most
+`max_pinned` of them, counted under the project row lock ([designs/pinned-lease.md](designs/pinned-lease.md)).
+**Built in `br0kr/lease.py`**; the teardown driver
 that actually destroys guests is **`br0kr/reaper.py`**. `db/migrations/0001_baseline.sql` carries the
 `ttl_seconds`/`expires_at`/`heartbeat_at`/`reclaim_at`/`release_attempts` columns (a trigger derives
 `expires_at` from `ttl_seconds`, so the deadline can't drift from the TTL).

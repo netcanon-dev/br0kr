@@ -160,6 +160,36 @@ def set_project_template_disk_quota(
     return {"project_id": project_id, "updated": True, "reason": None}
 
 
+def validate_max_pinned(max_pinned: int) -> str | None:
+    """Reject a malformed per-project pin bound (0049: how many live leases of the project may be pinned, i.e.
+    skipped by the TTL reaper). 0 turns pinning off for the project; a value must be a non-negative integer
+    within the int column. `bool` is excluded (True/False are ints in Python but a nonsense count). Pure, so it is
+    unit-testable without a database."""
+    if isinstance(max_pinned, bool) or not isinstance(max_pinned, int):
+        return "invalid_max_pinned"
+    if max_pinned < 0:
+        return "negative_max_pinned"
+    if max_pinned > _INT_MAX:
+        return "max_pinned_too_large"
+    return None
+
+
+def set_project_max_pinned(conn: psycopg.Connection[Any], project_id: str, max_pinned: int) -> dict[str, Any]:
+    """Set how many live leases of a project may be pinned (0 = pinning off, the default; br0kr/pin.py). The
+    caller MUST have run `validate_max_pinned`. A DEDICATED setter, like the template-disk one, so the operator
+    can allow pins without re-sending the rest of the project's quota. Lowering it below the project's current
+    pins unpins nothing: the bound applies to the next pin, as a lowered quota applies to the next admission.
+    The UPDATE takes the project row lock pin.set_pinned counts under, so a concurrent pin sees one bound or the
+    other, never a mix. Returns {project_id, updated, reason}; unknown_project if no such project. Does NOT commit
+    (the caller owns the txn)."""
+    row = conn.execute("UPDATE project SET max_pinned = %s WHERE id = %s RETURNING id",
+                       (max_pinned, project_id)).fetchone()
+    if row is None:
+        return {"project_id": project_id, "updated": False, "reason": "unknown_project"}
+    log.info("project pin bound set: %s -> %d", project_id, max_pinned, extra={"project": project_id})
+    return {"project_id": project_id, "updated": True, "reason": None}
+
+
 def set_project_quota(
     conn: psycopg.Connection[Any],
     project_id: str,

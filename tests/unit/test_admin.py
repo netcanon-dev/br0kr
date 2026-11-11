@@ -1270,3 +1270,16 @@ def test_delete_template_takes_only_its_own_instances():
     assert "origin NOT IN ('seed','build') OR instance_state = 'REPLICATING'" in inst_check
     assert own_delete.startswith("DELETE FROM template_instance") and "origin IN ('seed','build')" in own_delete
     assert tpl_delete.startswith("DELETE FROM template ")
+
+
+def test_validate_max_pinned_accepts_zero_and_up_rejects_bad():
+    """The per-project pin bound (0049) is a REQUIRED non-negative integer within the int column: 0 turns
+    pinning off for the project, a positive value allows that many live pinned leases. `bool` is excluded (True
+    is an int in Python but a nonsense count). Guards a negative bound reaching the CHECK as a 500, an overflow,
+    and True quietly allowing one pin."""
+    assert admin.validate_max_pinned(0) is None          # pinning off: valid
+    assert admin.validate_max_pinned(3) is None
+    assert admin.validate_max_pinned(-1) == "negative_max_pinned"
+    assert admin.validate_max_pinned(2 ** 40) == "max_pinned_too_large"
+    assert admin.validate_max_pinned(True) == "invalid_max_pinned"
+    assert admin.validate_max_pinned("2") == "invalid_max_pinned"

@@ -72,6 +72,26 @@ def test_is_due_is_inclusive_at_the_deadline():
     assert lease.is_due("ACTIVE", _T0, _T0) is True
 
 
+def test_a_pinned_lease_is_never_due_however_old_its_deadline():
+    """A PINNED live lease (0049) is not due even with its deadline long past; unpinned, the same lease is.
+    Guards the pin's one promise, that the TTL step never reclaims the lease, from a refactor of the rule."""
+    stale = _T0 - timedelta(days=30)
+    assert lease.is_due("ACTIVE", stale, _T0, pinned=True) is False
+    assert lease.is_due("PROVISIONING", stale, _T0, pinned=True) is False
+    assert lease.is_due("ACTIVE", stale, _T0, pinned=False) is True
+
+
+def test_claim_expired_sql_skips_pinned_leases():
+    """The reaper's TTL claim filters `NOT pinned` in the same WHERE that picks the due live leases, so the one
+    statement that flips leases to RELEASING(expired) can never take a pinned one. (The real-Postgres proof, a
+    pinned ACTIVE lease surviving expiry and a reaper pass, is scripts/harness_lease.py.) Guards the filter being
+    dropped from, or moved out of, the claim's WHERE."""
+    c = _Conn(many=[])
+    assert lease.claim_expired(c) == []
+    where = c.sql.partition("WHERE")[2].partition("ORDER BY")[0]
+    assert "expires_at <= now()" in where and "NOT pinned" in where
+
+
 def test_next_expiry_extends_strictly_into_the_future():
     """A renew sets the new deadline to now + ttl, strictly later than now. Guards a
     heartbeat that computes a non-positive TTL and so fails to actually save the
@@ -199,13 +219,18 @@ def test_stamp_data_disk_device_updates_the_row_keyed_on_disk_index():
 
 def test_access_of_surfaces_released_and_hold_reason():
     """access_of includes released_reason + hold_reason (0033) so lease_status gives an honest reason — a
-    held lease reports its blocker, a released one its cause. Guards the two fields being dropped from the
-    VM-access view the agent polls."""
-    # row: state, vmid, node_id, ip_address, ci_user, (ssh_pubkey IS NOT NULL), released_reason, hold_reason
-    row = ("ADMITTED", None, "n1", None, None, False, None, "no_reachable_instance")
+    held lease reports its blocker, a released one its cause — and `pinned` (0049), so an agent can see the
+    broker will not reclaim it for a missed heartbeat. Guards those fields being dropped from the VM-access view
+    the agent polls."""
+    # row: state, vmid, node_id, ip_address, ci_user, (ssh_pubkey IS NOT NULL), released_reason, hold_reason,
+    #      pinned
+    row = ("ADMITTED", None, "n1", None, None, False, None, "no_reachable_instance", False)
     out = lease.access_of(_Conn(one=row), 1)
     assert out is not None
     assert out["hold_reason"] == "no_reachable_instance" and out["released_reason"] is None
+    assert out["pinned"] is False
+    pinned = lease.access_of(_Conn(one=("ACTIVE", 101, "n1", None, None, True, None, None, True)), 1)
+    assert pinned is not None and pinned["pinned"] is True
     assert lease.access_of(_Conn(one=None), 1) is None   # unknown lease
 
 

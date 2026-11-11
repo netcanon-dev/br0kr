@@ -17,10 +17,12 @@ for _ in $(seq 1 30); do
   docker exec brokerpg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1
 done
 
-echo "[3/5] python venv + psycopg"
+echo "[3/5] python venv + the runtime requirements"
 python3 -m venv /tmp/brokervenv
 /tmp/brokervenv/bin/pip install -q --upgrade pip
-/tmp/brokervenv/bin/pip install -q "psycopg[binary]"
+# The full requirements, not just psycopg: the pinned-lease checks drive br0kr.gateway, whose imports reach
+# requests (the same gap that breaks the other single-dependency wrappers, review TEST-02).
+/tmp/brokervenv/bin/pip install -q -r "${ROOT}/requirements.txt"
 
 echo "[4/5] run the lease-lifecycle gate"
 export PGCONN="host=127.0.0.1 port=${PGPORT} dbname=broker user=postgres password=broker"

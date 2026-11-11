@@ -110,6 +110,11 @@ gateway without it they answer `checked_nodes: []` or `node_unroutable`.
   lease here" toggle. A cordoned node accepts no new provisioning (a pinned `request_lease` there is refused
   `node_cordoned`; the scheduler drops it from placement) but **existing leases keep running — it is not
   eviction.** Returns `{node_id, updated, reason}` (`unknown_node` if there's no such node). Always live.
+- **`pin_lease(lease_id, pinned)`** — pin (`true`) or unpin (`false`) any tenant's live lease. A pinned lease
+  is never reclaimed for a missed heartbeat; unpinning gives it a fresh TTL from now. Bounded by the lease's
+  project: `max_pinned` > 0 (else `pin_disabled`) and a free slot (else `pinned_limit`), set per project on the
+  dashboard's project card. Returns `{lease_id, pinned, updated, reason}`
+  ([designs/pinned-lease.md](../designs/pinned-lease.md)).
 - **`migrate_lease(idem_key, lease_id, target_node_id)`** — relocate a running lease's guest to a node in
   **another** cluster, race-free (the target is re-debited through the proven `admit()`). It **records the
   intent**; the leader daemon does the reservation + the move. Idempotent on `idem_key`. Returns

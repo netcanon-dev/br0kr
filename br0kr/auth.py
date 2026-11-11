@@ -101,6 +101,9 @@ VERB_TIER: dict[str, str] = {
     # operator token may ALSO call the read-tier verbs to observe (see tier_allows).
     "node_cordon": "operator",
     "migrate_lease": "operator",
+    # pin_lease: pin/unpin ANY tenant's live lease (0049) — a permanent capacity hold on someone's quota, bounded
+    # by that project's max_pinned. A tenant asks for a pin only at request time (request_lease pinned=true).
+    "pin_lease": "operator",
     # force_fail_build: force a STUCK template-build → FAILED (a wedged reclaim that keeps pinning a project's
     # disk-quota reserve). Fleet-wide config action across ANY project's build, so operator-only.
     "force_fail_build": "operator",

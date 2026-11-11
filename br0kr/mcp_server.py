@@ -70,6 +70,7 @@ from br0kr import (
     migrate,
     multidisk,
     nodes,
+    pin,
     placement,
     ratelimit,
     replication,
@@ -261,6 +262,7 @@ def request_lease(
     queue: bool = False,
     max_wait_seconds: int = 3600,
     data_disks: list[dict[str, Any]] | None = None,
+    pinned: bool = False,
 ) -> dict[str, Any]:
     """Reserve capacity for a VM on a node (race-free admission control).
 
@@ -283,7 +285,8 @@ def request_lease(
 
     VM ACCESS (optional): to actually log into the VM, pass ssh_pubkey = YOUR OWN ssh PUBLIC key (e.g.
     "ssh-ed25519 AAAA... you@host"). The broker injects it via cloud-init; you keep the private key. ci_user
-    sets the login username (a default is used if omitted); ip_config sets a static Proxmox ipconfig0 (e.g.
+    sets the login username (the operator's default, usually br0kr, if omitted: lease_status then reports
+    ci_user as null); ip_config sets a static Proxmox ipconfig0 (e.g.
     "ip=10.0.0.5/24,gw=10.0.0.1") instead of the DHCP default. Once the guest boots, call lease_status to get
     its ip_address and ci_user, then ssh in. A malformed key/user/ip is refused (reason ssh_pubkey_malformed,
     cloud_init_requires_pubkey, …). Omit ssh_pubkey for a bare reserved/fenced VM with no injected login.
@@ -302,6 +305,15 @@ def request_lease(
     the operator: while it is off, a data_disks ask is refused multi_disk_disabled. Omit it (the default) for a
     single-disk VM.
 
+    PINNED (optional): pinned=True asks for a lease the broker never reclaims for a missed heartbeat, for a
+    VM that must outlive this session (a dev box, a long-running service). It needs no renew_lease; call
+    release_lease when done, which still destroys it. Your operator must allow pins for your project, else
+    reason pin_disabled; at the project's pin limit it is pinned_limit; it can't be combined with queue=True
+    (pin_not_queueable). The answer's `pinned` says whether you got one; lease_status shows it too. A retry
+    with the same idem_key never adds a pin: if that lease isn't pinned (a request that didn't ask, or one
+    interrupted between admission and the pin), the answer stays admitted with pinned false and reason
+    pin_refused_on_replay. Then renew it like any lease, or release it and ask again with a new idem_key.
+
     Requires a consume-tier (or higher) token; an unauthorized call returns {"error": ...}.
     """
     principal = _authorize(ctx, "request_lease")
@@ -316,7 +328,8 @@ def request_lease(
         # Record it like every other FINAL refusal on this verb (the gateway multi_disk_disabled AND the
         # value-path data_disk_malformed one step later are both audited) so the refusal trail stays symmetric.
         _audit_refused(principal, reason=dd_reason, template_id=template_id, node_id=node_id)
-        return {"lease_id": None, "admitted": False, "queued": False, "idempotent": False, "reason": dd_reason}
+        return {"lease_id": None, "admitted": False, "queued": False, "idempotent": False, "reason": dd_reason,
+                "pinned": False}
     with _conn() as c:
         # Per-project image governance (phase A3): a non-public template needs a grant to this tenant, else
         # template_forbidden — ABOVE admission, on the SAME connection (like lease_owned_by). This is the
@@ -334,7 +347,7 @@ def request_lease(
             storage_id=storage_id, req_disk_gb=req_disk_gb, project_id=pid,
             ssh_pubkey=ssh_pubkey, ci_user=ci_user, ip_config=ip_config, template_id=template_id,
             ttl_seconds=ttl_seconds, queue=queue, max_wait_seconds=max_wait_seconds, queue_max=_queue_max(c),
-            data_disks=disks,
+            data_disks=disks, pinned=pinned,
         )
         if (r.get("admitted") or r.get("queued")) and not r.get("idempotent"):   # a FRESH reserve/enqueue —
             #      not a rejection, and NOT an idempotent replay (an agent auto-retrying the same idem_key must
@@ -342,7 +355,8 @@ def request_lease(
             _audit_write(c, principal, "request_lease",
                          target=str(r["lease_id"]) if r.get("lease_id") is not None else None,
                          params={"idem_key": idem_key, "node_id": node_id, "req_cpu": req_cpu,
-                                 "req_mem_mb": req_mem_mb, "template_id": template_id, "queue": queue})
+                                 "req_mem_mb": req_mem_mb, "template_id": template_id, "queue": queue,
+                                 "pinned": pinned})
         elif not r.get("admitted") and not r.get("queued"):   # a FINAL refusal (never a queued-then-promoted)
             _audit_refused(principal, reason=r.get("reason"), template_id=template_id, node_id=node_id,
                            lease_id=r.get("lease_id"))
@@ -367,6 +381,7 @@ def schedule_lease(
     queue: bool = False,
     max_wait_seconds: int = 3600,
     data_disks: list[dict[str, Any]] | None = None,
+    pinned: bool = False,
 ) -> dict[str, Any]:
     """Reserve capacity and let the broker PICK the node for you (placement/scheduling).
 
@@ -407,6 +422,10 @@ def schedule_lease(
     changed layout is idem_key_conflict); a malformed entry is refused data_disk_malformed; the feature is
     operator-gated (multi_disk_disabled while off). Omit it (default) for a single-disk VM.
 
+    PINNED (optional): pinned=True asks for a lease the broker never reclaims for a missed heartbeat, with
+    request_lease's rules (pin_disabled, pinned_limit, pin_not_queueable, and pin_refused_on_replay for a retry
+    whose lease isn't pinned); release_lease still destroys it.
+
     Requires a consume-tier (or higher) token; an unauthorized call returns {"error": ...}.
     """
     principal = _authorize(ctx, "schedule_lease")
@@ -420,7 +439,7 @@ def schedule_lease(
     if dd_reason is not None:   # a malformed SHAPE — refuse cleanly (schedule shape carries node_id + tried)
         _audit_refused(principal, reason=dd_reason, template_id=template_id)   # symmetric with every final refusal
         return {"lease_id": None, "node_id": None, "admitted": False, "queued": False,
-                "idempotent": False, "reason": dd_reason, "tried": []}
+                "idempotent": False, "reason": dd_reason, "tried": [], "pinned": False}
     with _conn() as c:
         # Per-project image governance (phase A3): same gate as request_lease — a non-public template needs a
         # grant to this tenant, else template_forbidden, before the broker picks a node and admits/queues it.
@@ -434,14 +453,15 @@ def schedule_lease(
             storage_id=storage_id, req_disk_gb=req_disk_gb, project_id=pid,
             ssh_pubkey=ssh_pubkey, ci_user=ci_user, ip_config=ip_config, template_id=template_id,
             ttl_seconds=ttl_seconds, queue=queue, max_wait_seconds=max_wait_seconds, queue_max=_queue_max(c),
-            data_disks=disks,
+            data_disks=disks, pinned=pinned,
         )
         if (r.get("admitted") or r.get("queued")) and not r.get("idempotent"):   # FRESH place/enqueue, not a
             #                                          rejection and not an idempotent retry (flood)
             _audit_write(c, principal, "schedule_lease",
                          target=str(r["lease_id"]) if r.get("lease_id") is not None else None,
                          params={"idem_key": idem_key, "cluster_id": cluster_id, "req_cpu": req_cpu,
-                                 "req_mem_mb": req_mem_mb, "template_id": template_id, "queue": queue})
+                                 "req_mem_mb": req_mem_mb, "template_id": template_id, "queue": queue,
+                                 "pinned": pinned})
         elif not r.get("admitted") and not r.get("queued"):   # a FINAL refusal (the scheduler placed nothing)
             _audit_refused(principal, reason=r.get("reason"), template_id=template_id,
                            lease_id=r.get("lease_id"))   # node_id: the broker tried several
@@ -977,6 +997,27 @@ def node_cordon(ctx: Context, node_id: str, cordoned: bool) -> dict[str, Any]:
         if r.get("updated"):   # `gate` is the operator Principal here (project_id None → NULL in the row)
             _audit_write(c, gate, "node_cordon", target=node_id,
                          params={"node_id": node_id, "cordoned": cordoned})
+        return r
+
+
+@_operator_tool
+def pin_lease(ctx: Context, lease_id: int, pinned: bool) -> dict[str, Any]:
+    """OPERATOR only: pin (pinned=true) or unpin (false) any tenant's live lease. A pinned lease is never
+    reclaimed for a missed heartbeat; unpinning gives it a fresh TTL from now. The pin is bounded by the
+    lease's project: it needs max_pinned > 0 (else pin_disabled) and a free slot (else pinned_limit); an
+    ungoverned lease can't be pinned (pin_needs_project). Returns {lease_id, pinned, updated, reason} (reason
+    also unknown_lease, lease_not_live). Requires an OPERATOR-tier token (others get
+    {"error":"forbidden_scope"})."""
+    gate = _authorize(ctx, "pin_lease")
+    if isinstance(gate, dict):
+        return gate
+    with _conn() as c:
+        r = pin.set_pinned(c, lease_id, pinned=pinned)
+        c.commit()   # pin.set_pinned does NOT self-commit; commit (and free its row locks) BEFORE the best-effort
+        #              audit, so an audit failure can only ever discard its own empty txn (as node_cordon does)
+        if r.get("updated"):
+            _audit_write(c, gate, "pin_lease", target=str(lease_id),
+                         params={"lease_id": lease_id, "pinned": pinned})
         return r
 
 

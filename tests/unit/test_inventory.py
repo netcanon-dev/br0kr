@@ -140,7 +140,8 @@ def test_project_row_derives_quota_usage_and_slot_budget():
     # (id, cpu_limit, mem_limit_mb, max_leases, max_queued, cpu_used, mem_used, lease_count, queue_depth,
     #  cpu_limit_max, mem_limit_mb_max, max_leases_max, max_template_disk_gb, template_disk_used)
     out = inventory._project_row(
-        ("team-a", Decimal("20"), 40960, 10, 5, Decimal("12"), 24576, 6, 2, Decimal("40"), 81920, 20, 200, 50))
+        ("team-a", Decimal("20"), 40960, 10, 5, Decimal("12"), 24576, 6, 2, Decimal("40"), 81920, 20, 200, 50,
+         3, 1))
     assert out["cpu_available"] == 8.0 and out["cpu_pct"] == 60.0
     assert out["mem_mb_available"] == 16384 and out["mem_pct"] == 60.0
     assert out["lease_count"] == 6 and out["lease_slots_available"] == 4 and out["lease_pct"] == 60.0
@@ -150,9 +151,10 @@ def test_project_row_derives_quota_usage_and_slot_budget():
     assert out["cpu_limit_max"] == 40.0 and out["mem_mb_limit_max"] == 81920 and out["max_leases_max"] == 20
     # phase A4.2: the template-disk ceiling + current usage (settled owned + in-flight reserved), GB
     assert out["max_template_disk_gb"] == 200 and out["template_disk_used"] == 50
+    assert out["max_pinned"] == 3 and out["pinned_count"] == 1   # 0049: the pin bound and the live pins
 
     ungoverned_cap = inventory._project_row(
-        ("team-b", Decimal("10"), 8192, 4, None, Decimal("0"), 0, 0, 0, None, None, None, None, 0))
+        ("team-b", Decimal("10"), 8192, 4, None, Decimal("0"), 0, 0, 0, None, None, None, None, 0, 0, 0))
     assert ungoverned_cap["max_queued"] is None and ungoverned_cap["lease_slots_available"] == 4
     assert ungoverned_cap["cpu_limit_max"] is None and ungoverned_cap["max_leases_max"] is None
     # a NULL template-disk ceiling (downloads disabled) surfaces as None; usage is 0
@@ -303,40 +305,50 @@ def test_lease_row_shapes_active_lease_and_derives_action_flags():
     ACTIVE-only); an ACTIVE lease WITH storage is cancellable + renewable but NOT migratable (the migrate
     form is compute-only); and a reservation (a saga placeholder) is none, whatever its state. ci_user passes
     through (None when no access was injected); vmid coerces to int-or-None, ip to str-or-None, a NULL TTL
-    stays None. Guards the dashboard offering a cancel/renew on a RELEASING lease, a migrate on a disk-backed
-    / reservation lease, or crashing on a null ip/ttl/ci_user."""
+    stays None. A PINNED lease (0049) is pinnable and cancellable but not renewable (the TTL reaper skips
+    it), and every live non-reservation lease is pinnable. Guards the dashboard offering a cancel/renew on a
+    RELEASING lease, a migrate on a disk-backed / reservation lease, a renew on a pinned one, or crashing on a
+    null ip/ttl/ci_user."""
     # (id, project_id, node_id, cluster_id, state, req_cpu, req_mem_mb, storage_id, req_disk_gb,
-    #  vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation)
+    #  vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned)
     active = inventory._lease_row((11, "team-a", "n1", "clA", "ACTIVE", Decimal("4"), 8192, None, 0,
-                                   1234, "192.168.11.31", "runner", 61.44, 3500.2, False))
+                                   1234, "192.168.11.31", "runner", 61.44, 3500.2, False, False))
     assert active["lease_id"] == 11 and active["state"] == "ACTIVE" and active["vmid"] == 1234
     assert active["ip_address"] == "192.168.11.31" and active["req_cpu"] == 4.0 and active["age_seconds"] == 61.4
     assert active["expires_in_seconds"] == 3500.2 and active["is_reservation"] is False
     assert active["ci_user"] == "runner"
     assert active["cancellable"] is True and active["renewable"] is True and active["migratable"] is True
+    assert active["pinned"] is False and active["pinnable"] is True
 
     releasing = inventory._lease_row((12, "team-a", "n1", "clA", "RELEASING", Decimal("1"), 1024, None, 0,
-                                      1235, None, None, 5.0, None, False))
+                                      1235, None, None, 5.0, None, False, False))
     assert releasing["cancellable"] is False and releasing["renewable"] is False
     assert releasing["migratable"] is False
     assert releasing["ip_address"] is None and releasing["ci_user"] is None
     assert releasing["expires_in_seconds"] is None
 
     admitted = inventory._lease_row((13, "team-b", "n2", "clA", "ADMITTED", Decimal("2"), 2048, None, 0,
-                                     None, None, None, 2.0, 10.0, False))
+                                     None, None, None, 2.0, 10.0, False, False))
     assert admitted["cancellable"] is True and admitted["renewable"] is True
     assert admitted["migratable"] is False and admitted["vmid"] is None
 
     disk = inventory._lease_row((14, "team-b", "n3", "clB", "ACTIVE", Decimal("1"), 512, "ceph", 100,
-                                 1300, "10.0.0.9", "admin", 9.0, 20.0, False))
+                                 1300, "10.0.0.9", "admin", 9.0, 20.0, False, False))
     assert disk["cancellable"] is True and disk["renewable"] is True and disk["migratable"] is False
     assert disk["storage_id"] == "ceph"
 
     reservation = inventory._lease_row((15, None, "n3", "clB", "ACTIVE", Decimal("2"), 4096, None, 0,
-                                        None, None, None, 3.0, 30.0, True))
+                                        None, None, None, 3.0, 30.0, True, False))
     assert reservation["is_reservation"] is True
     assert reservation["cancellable"] is False and reservation["renewable"] is False
     assert reservation["migratable"] is False
+    assert reservation["pinnable"] is False
+
+    # 0049: a pinned lease keeps cancel (release still ends it) and its pin toggle, but offers no renew.
+    pinned = inventory._lease_row((16, "team-a", "n1", "clA", "ACTIVE", Decimal("2"), 2048, None, 0,
+                                   1400, None, None, 7.0, -50.0, False, True))
+    assert pinned["pinned"] is True and pinned["pinnable"] is True
+    assert pinned["renewable"] is False and pinned["cancellable"] is True
 
 
 class _CapConn:
@@ -396,7 +408,7 @@ def test_row_shapers_report_negative_available_unclamped_when_oversubscribed():
     assert node["cpu_available"] == -4.0 and node["cpu_pct"] == 125.0
     assert node["mem_mb_available"] == -7232 and node["mem_pct"] > 100.0
     proj = inventory._project_row(
-        ("p", Decimal("10"), 8192, 4, None, Decimal("12"), 9000, 6, 0, None, None, None, None, 0))
+        ("p", Decimal("10"), 8192, 4, None, Decimal("12"), 9000, 6, 0, None, None, None, None, 0, 0, 0))
     assert proj["cpu_available"] == -2.0 and proj["lease_slots_available"] == -2 and proj["lease_pct"] == 150.0
 
 

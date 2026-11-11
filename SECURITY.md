@@ -103,6 +103,15 @@ keyring does not defeat malware already running as the user; resolve-then-valida
 SSRF guards do not stop DNS rebinding; a static token has no per-user rotation.
 Name the residual, why it's accepted, and what would close it.
 
+- **A pinned lease is a permanent capacity hold.** A pinned lease (migration 0049) is never reclaimed for a
+  missed heartbeat, so one an agent forgets holds its node, pool and project capacity until someone releases
+  it. Bounded, not prevented: a project may pin at most `max_pinned` live leases (0, the default, turns
+  pinning off), counted under the project row lock so concurrent pins can't overshoot it
+  (`scripts/harness_lease.py` `pin_race_last_slot`); only an operator can pin an existing lease
+  (`pin_lease`, operator tier); the pinned debit still counts against the project's quota; and
+  `br0kr_leases_pinned` plus the dashboard's `pinned` badge keep forgotten pins visible. Accepted because
+  the alternative, a heartbeat sidecar, fails silently instead. Closing it fully would take an expiry on the
+  pin itself.
 - **~~C6 reaps by recorded `vmid`, not by a fence.~~ CLOSED (C8).** Per-VMID fencing now stamps the
   lease id on the guest and `fenced_destroy` deletes only on a tag match, so a stale reap of a reused
   `vmid` is refused (`fence_mismatch`) — proven live on a real PVE node. The legacy unfenced `reconciler.py`

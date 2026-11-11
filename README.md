@@ -46,7 +46,7 @@ reconciler (one holds the leader lock), `br0kr-gateway` serves agents over MCP (
 |---------|--------------|-----------------|-----------|
 | Race-free admission | Admits or refuses each request under ordered locks across node, project and pool. | `admission.py` | [architecture](docs/architecture.md#the-admission-transaction-the-heart) |
 | Admission queue | `queue=true` parks a request that does not fit, then admits it in FIFO order when room frees. | `admission.py`, `scheduler.py` | [design](docs/designs/admission-queue.md) |
-| Leases | TTL and renew, guarded state transitions, and a reaper that tears each expired lease down once. | `lease.py`, `reaper.py` | [lifecycle](docs/architecture.md#lease-lifecycle) |
+| Leases | TTL and renew, guarded state transitions, and a reaper that tears each expired lease down once; a pinned lease, where its project allows, needs no heartbeat. | `lease.py`, `reaper.py`, `pin.py` | [lifecycle](docs/architecture.md#lease-lifecycle), [pinned](docs/designs/pinned-lease.md) |
 | Reconciler daemon | The one leader-elected writer to Proxmox: provisions, reaps and sweeps orphans, and acts only on VMs carrying its own fence tag. | `daemon.py`, `reconciler.py`, `pve.py` | [deploy §4](docs/runbooks/docker-deploy.md#4-high-availability--how-it-works-here) |
 | Agent gateway | MCP tools to request, watch, renew and release leases and to read capacity, over HTTP or stdio; a stdlib client for CI jobs. | `mcp_server.py`, `gateway.py` | [connecting an agent](docs/runbooks/connecting-an-agent.md), [API reference](docs/api.md) |
 | Tokens and tiers | Per-project `read` / `consume` / `provision` tokens; a cross-tenant `operator` tier on its own gateway. | `auth.py` | [operator tier](docs/runbooks/operator-tier.md) |
@@ -66,7 +66,7 @@ reconciler (one holds the leader lock), `br0kr-gateway` serves agents over MCP (
   detail per feature; the proofs are catalogued in [scripts/README.md](scripts/README.md).
 - ◐ Dormant: the Proxmox Datacenter Manager driver and cross-cluster lease migration, proven against a mock
   PDM and disabled by default until there is real PDM hardware to verify against.
-- ⏳ Next: a pinned (long-lived) lease and a bounded server-side `wait_for_lease`.
+- ⏳ Next: a bounded server-side `wait_for_lease`.
 - Not planned, with the reasons: [Non-goals](docs/architecture.md#non-goals).
 
 ## What's here

@@ -127,7 +127,11 @@ Once connected the agent sees the tools and calls them like any other MCP tool. 
 3. Poll `lease_status(lease_id)` until `state` is `ACTIVE` and `ip_address` is non-null (agent-discovered via
    the guest's qemu-guest-agent), then SSH into that IP with the agent's **own private key** — see
    [vm-access.md](vm-access.md).
-4. `renew_lease` to hold it, `release_lease` when done (or let the reaper reclaim it on TTL).
+4. `renew_lease` to hold it, `release_lease` when done (or let the reaper reclaim it on TTL). For a VM that
+   must outlive the session (a dev box, a service), ask for `pinned=true`: the broker never reclaims a pinned
+   lease for a missed heartbeat, and `release_lease` still ends it. Your operator must allow pins for the
+   project (`pin_disabled` otherwise), and it can't be combined with `queue=true`
+   ([designs/pinned-lease.md](../designs/pinned-lease.md)).
 
 The MCP layer is pure request/response; admission, per-VMID fencing, and the double-allocation floor all happen
 *below* it, unchanged by which client connected. Every tool, its tier and its parameters: [api.md](../api.md).

@@ -910,10 +910,10 @@ def test_the_reload_flag_is_lock_free_for_async_signal_safety(wired):
 # ── health / metrics wiring (the daemon-side adapter feeding br0kr/observability.py) ──────────────
 class _ScrapeConn:
     """A fake ledger connection for _scrape_ledger: execute(...).fetchall() returns canned
-    (state, count) rows; closeable for the `with closing(...)`."""
+    (state, count) rows, and fetchone() the live-pinned count (0049); closeable for the `with closing(...)`."""
 
-    def __init__(self, rows):
-        self._rows = rows
+    def __init__(self, rows, pinned=0):
+        self._rows, self._pinned = rows, pinned
 
     def execute(self, sql, *a):
         assert "FROM lease" in sql
@@ -921,6 +921,9 @@ class _ScrapeConn:
 
     def fetchall(self):
         return self._rows
+
+    def fetchone(self):
+        return (self._pinned,)
 
     def close(self):
         pass
@@ -976,13 +979,14 @@ def test_standby_publish_clears_the_tick_stamp(wired):
 
 
 def test_scrape_ledger_returns_counts_or_marks_unreachable(wired):
-    """_scrape_ledger runs leases-by-state on a FRESH connection and returns (True, counts); ANY error
-    (a momentarily-unreachable ledger) returns (False, {}) instead of raising — so /readyz reads
-    not-ready and /metrics reads ledger_reachable 0 rather than the scrape crashing. Guards the probe
-    propagating an exception onto the health thread."""
+    """_scrape_ledger runs leases-by-state on a FRESH connection and returns (True, counts), the counts also
+    carrying the live pinned leases under observability.PINNED_KEY (0049); ANY error (a momentarily-unreachable
+    ledger) returns (False, {}) instead of raising — so /readyz reads not-ready and /metrics reads
+    ledger_reachable 0 rather than the scrape crashing. Guards the probe propagating an exception onto the
+    health thread, and the pinned gauge losing its count."""
     d = _daemon()
-    d._connect = lambda: _ScrapeConn([("ACTIVE", 3), ("ADMITTED", 1)])
-    assert d._scrape_ledger() == (True, {"ACTIVE": 3, "ADMITTED": 1})
+    d._connect = lambda: _ScrapeConn([("ACTIVE", 3), ("ADMITTED", 1)], pinned=2)
+    assert d._scrape_ledger() == (True, {"ACTIVE": 3, "ADMITTED": 1, observability.PINNED_KEY: 2})
 
     def boom():
         raise RuntimeError("ledger down")

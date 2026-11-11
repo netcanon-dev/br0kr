@@ -399,3 +399,37 @@ def test_schedule_lease_threads_data_disks_into_scheduler_and_enqueue(monkeypatc
                                  template_id="deb12", data_disks=_DISK, queue=True)
     assert out["queued"] is True
     assert seen["sched_data_disks"] == _DISK and seen["data_disks"] == _DISK
+
+
+def test_a_pinned_request_is_refused_before_admission_when_it_cannot_be_pinned(monkeypatch):
+    """request_lease / schedule_lease with pinned=True run pin.refuse_before_admit FIRST: a refusal (here
+    pin_disabled) answers with no lease and never reaches admission, so no capacity is reserved for a pin that
+    can't be kept. Guards a pinned ask debiting a node before its project's pin bound is checked."""
+    monkeypatch.setattr(gateway.pin, "refuse_before_admit", lambda c, **k: "pin_disabled")
+    monkeypatch.setattr(gateway.admission, "admit", lambda *a, **k: pytest.fail("must not reach admission"))
+    monkeypatch.setattr(gateway.scheduler, "schedule", lambda *a, **k: pytest.fail("must not reach placement"))
+    req = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1, req_mem_mb=512,
+                                project_id="p", pinned=True)
+    assert req == {"lease_id": None, "admitted": False, "queued": False, "idempotent": False,
+                   "reason": "pin_disabled", "pinned": False}
+    sch = gateway.schedule_lease(object(), idem_key="k", req_cpu=1, req_mem_mb=512, project_id="p", pinned=True)
+    assert sch["reason"] == "pin_disabled" and sch["pinned"] is False and sch["tried"] == []
+
+
+def test_every_request_answer_carries_pinned_and_a_pinned_admission_is_settled(monkeypatch):
+    """An unpinned request skips the pre-check and its answer gains pinned False; a pinned one that passes the
+    pre-check is admitted as usual and then handed to pin.settle, which owns the pin. Guards the `pinned` key
+    missing from an answer, and a pinned admission skipping the pin step."""
+    monkeypatch.setattr(gateway.pin, "refuse_before_admit",
+                        lambda c, **k: pytest.fail("an unpinned request runs no pin check"))
+    monkeypatch.setattr(gateway, "_request_lease", lambda c, **k: {"lease_id": 9, "admitted": True,
+                                                                   "queued": False, "idempotent": False,
+                                                                   "reason": None})
+    assert gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1, req_mem_mb=512)["pinned"] is False
+    monkeypatch.setattr(gateway.pin, "refuse_before_admit", lambda c, **k: None)
+    settled: list[int] = []
+    monkeypatch.setattr(gateway.pin, "settle",
+                        lambda c, r, *, pinned: settled.append(r["lease_id"]) or {**r, "pinned": pinned})
+    out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1, req_mem_mb=512, project_id="p",
+                                pinned=True)
+    assert out["pinned"] is True and settled == [9]

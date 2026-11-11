@@ -302,3 +302,16 @@ def test_sync_standby_count_is_surfaced_separately():
                                        repl=_posture(standbys_total=1, standbys_streaming=1,
                                                      standbys_sync=1, slots_inactive=0))
     assert "br0kr_ledger_standbys_sync 1" in out.splitlines()
+
+
+def test_render_metrics_reports_pinned_leases_as_their_own_gauge():
+    """The scrape's live-pinned count (observability.PINNED_KEY, 0049) renders as br0kr_leases_pinned, a family
+    of its own, and never as a br0kr_leases{state=...} series (a pinned lease is already counted in its state).
+    Guards a forgotten pin being invisible, and the per-state family gaining a non-state series that breaks
+    its sum."""
+    state = HealthState(role=observability.ROLE_LEADER, leader=True, ticks=1,
+                        last_tick_monotonic=997.0, served_nodes=2)
+    out = observability.render_metrics(state, True, {"ACTIVE": 3, observability.PINNED_KEY: 2}, now=1000.0)
+    assert "br0kr_leases_pinned 2" in out and "# TYPE br0kr_leases_pinned gauge" in out
+    assert f'br0kr_leases{{state="{observability.PINNED_KEY}"}}' not in out
+    assert "br0kr_leases_pinned" not in observability.render_metrics(state, True, {"ACTIVE": 3}, now=1000.0)

@@ -55,6 +55,9 @@ ROLE_LEADER = "leader"
 
 # A ledger scrape result: (reachable, counts-by-state). Returned by the daemon's injected callback.
 LedgerProbe = tuple[bool, dict[str, int]]
+# The one count in a scrape that is not a state: live PINNED leases (0049), rendered as br0kr_leases_pinned. Lease
+# states are upper-case enum labels, so this lower-case key can't collide with one.
+PINNED_KEY = "pinned"
 
 
 @dataclass(frozen=True)
@@ -199,11 +202,16 @@ def render_metrics(state: HealthState, ledger_ok: bool, counts: dict[str, int], 
     # overlay the scrape (so an unexpected state still shows).
     if state.leader:
         by_state: dict[str, int] = dict.fromkeys(LEASE_STATES, 0)
-        by_state.update(counts)
+        by_state.update({k: v for k, v in counts.items() if k != PINNED_KEY})
         out.append("# HELP br0kr_leases Current lease count by lifecycle state (ledger-wide; leader only).")
         out.append("# TYPE br0kr_leases gauge")
         for st in sorted(by_state):
             out.append(f'br0kr_leases{{state="{st}"}} {by_state[st]}')
+        # A separate family, not a `pinned` label on br0kr_leases: those per-state series sum to every lease,
+        # and a pinned lease is also in one of them. A forgotten pin holds capacity forever, so make it visible.
+        if PINNED_KEY in counts:
+            metric("br0kr_leases_pinned", counts[PINNED_KEY],
+                   "Live leases the TTL reaper skips because they are pinned (ledger-wide; leader only).", "gauge")
 
     # Fleet admission SLOs (ledger-wide, leader only — same reason as leases-by-state: a global fact, so
     # only the leader emits it to avoid double-counting under a 2-replica scrape). Each is skipped when

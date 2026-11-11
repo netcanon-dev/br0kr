@@ -25,6 +25,17 @@ Deterministic checks:
                        frees all the capacity; a null-vmid lease is settled WITHOUT a destroy.
   reaper_release_failed a guest whose destroy always fails ends RELEASE_FAILED (capacity
                        freed, orphan vmid flagged) instead of pinning the slot forever.
+  pinned_survives_expiry  a PINNED lease (0049) a day past its deadline survives claim_expired and a full
+                       reaper pass; an unpinned one due by as much is reaped beside it.
+  pin_bound_refusals   set_pinned: pin_disabled at max_pinned 0; at 2, two pins then pinned_limit;
+                       pin_needs_project for an ungoverned lease; lease_not_live for a RELEASING one.
+  unpin_fresh_ttl      unpinning resets expires_at to now + ttl, so the next reaper pass skips it.
+  pinned_request_e2e   gateway.request_lease(pinned=True): pin_disabled with pinning off (no lease); then
+                       admits and pins; its replay returns the same pinned lease at the bound; a second is
+                       refused pinned_limit before admission; a retry adding a pin to an unpinned lease keeps
+                       it unpinned (pin_refused_on_replay).
+  pinned_migration     0049 is idempotent; defaults are unpinned and max_pinned 0; a negative bound is
+                       refused by the CHECK.
 
 Concurrent invariants (barrier-synchronized, thousands of rounds):
   renew_vs_expire      1 heartbeat vs N reapers on one due lease → renewed XOR expired.
@@ -37,6 +48,9 @@ Concurrent invariants (barrier-synchronized, thousands of rounds):
   provision_stuck_no_double  M stale PROVISIONING leases, C reapers → each reclaimed exactly once.
   backlog_drains       limit << due-count, reapers loop → every lease claimed exactly once
                        across passes (bounded-LIMIT multi-pass drain, no loss, no dupes).
+  pin_race_last_slot   N callers race to pin N leases of a project with ONE pin slot → exactly one pinned.
+  pinned_request_e2e   (its race half) N concurrent pinned requests for one slot → exactly one pinned live
+                       lease, no unpinned leftover (an admitted loser is released).
 
 Exit 0 + "GO" iff every invariant holds.
 """
@@ -51,7 +65,7 @@ import psycopg
 
 # Import the modules under test from the repo root (scripts/ is a sibling of br0kr/).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import lease, migrate, reaper  # noqa: E402
+from br0kr import gateway, lease, migrate, pin, reaper  # noqa: E402
 
 CONN = os.environ["PGCONN"]
 NODE = "n1"
@@ -467,6 +481,219 @@ def check_backlog_drains(leases: int = 40, reapers: int = 4, limit: int = 7) -> 
     return ok
 
 
+# ── pinned leases (0049, review FEAT-01) ─────────────────────────────────────────
+PIN_PROJECT = "pinp"
+
+
+def pin_project(max_pinned: int) -> None:
+    """(Re)create the pin project with a roomy quota and the given pin bound."""
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO project(id, cpu_limit, mem_limit_mb, max_leases, max_pinned) "
+                  "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET max_pinned = EXCLUDED.max_pinned",
+                  (PIN_PROJECT, NODE_CPU, NODE_MEM, 1000, max_pinned))
+
+
+def pinned_lease(state: str, expires_offset_s: int, *, pinned: bool, project: str | None = PIN_PROJECT,
+                 ttl: int = 900, vmid: int | None = None) -> int:
+    lid = insert_lease(state, expires_offset_s, ttl=ttl, vmid=vmid)
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("UPDATE lease SET project_id = %s, pinned = %s WHERE id = %s", (project, pinned, lid))
+    return lid
+
+
+def pinned_of(lid: int) -> bool:
+    with psycopg.connect(CONN, autocommit=True) as c:
+        return bool(c.execute("SELECT pinned FROM lease WHERE id = %s", (lid,)).fetchone()[0])
+
+
+def check_pinned_survives_expiry() -> bool:
+    """A pinned ACTIVE lease whose deadline passed a day ago survives claim_expired AND a full reaper pass,
+    while an unpinned lease due by the same amount is reaped and destroyed beside it; renewing the pinned lease
+    still succeeds (a harmless no-op for it)."""
+    reset()
+    pin_project(5)
+    kept = pinned_lease("ACTIVE", -86400, pinned=True, vmid=961)
+    gone = pinned_lease("ACTIVE", -86400, pinned=False, vmid=962)
+    destroyed: list[int] = []
+    with connect() as c:
+        claimed = [x.id for x in lease.claim_expired(c)]
+        reaper.reap_once(c, lambda cl: destroyed.append(cl.vmid), grace_seconds=0)
+        renewed = lease.heartbeat(c, kept) is not None
+    ok = (claimed == [gone] and destroyed == [962] and state_of(kept) == "ACTIVE" and pinned_of(kept)
+          and state_of(gone) == "RELEASED" and renewed)
+    print(f"[pinned_survives_expiry] claimed={claimed} destroyed={destroyed} pinned={state_of(kept)} "
+          f"unpinned={state_of(gone)} renew_ok={renewed}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_pin_bound_refusals() -> bool:
+    """set_pinned honours the project bound: max_pinned 0 refuses pin_disabled; with 2 the first two pins land
+    and the third is pinned_limit; an ungoverned lease is pin_needs_project; a RELEASING one is lease_not_live.
+    Each refusal leaves the flag unset."""
+    reset()
+    pin_project(0)
+    a, b, x = (pinned_lease("ACTIVE", 3600, pinned=False) for _ in range(3))
+    loose = pinned_lease("ACTIVE", 3600, pinned=False, project=None)
+    leaving = pinned_lease("RELEASING", 3600, pinned=False)
+
+    def try_pin(lid: int) -> str | None:
+        with connect() as c:
+            r = pin.set_pinned(c, lid, pinned=True)
+            c.commit()
+        return r["reason"]
+
+    off = try_pin(a)
+    pin_project(2)
+    got = [try_pin(a), try_pin(b), try_pin(x), try_pin(loose), try_pin(leaving)]
+    ok = (off == "pin_disabled" and got == [None, None, "pinned_limit", "pin_needs_project", "lease_not_live"]
+          and [pinned_of(i) for i in (a, b, x, loose, leaving)] == [True, True, False, False, False])
+    print(f"[pin_bound_refusals]   off={off} then={got}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_unpin_gives_a_fresh_ttl() -> bool:
+    """Unpinning a pinned lease whose deadline is long past resets expires_at to now + ttl_seconds, so the very
+    next reaper pass does NOT take it; it is reaped only once that fresh TTL runs out."""
+    reset()
+    pin_project(1)
+    lid = pinned_lease("ACTIVE", -86400, pinned=True, ttl=600)
+    with connect() as c:
+        r = pin.set_pinned(c, lid, pinned=False)
+        c.commit()
+    with psycopg.connect(CONN, autocommit=True) as c:
+        left = float(c.execute("SELECT EXTRACT(EPOCH FROM expires_at - now()) FROM lease WHERE id = %s",
+                               (lid,)).fetchone()[0])
+    with connect() as c:
+        claimed = lease.claim_expired(c)
+    ok = r["updated"] and not pinned_of(lid) and 590 <= left <= 600 and claimed == []
+    print(f"[unpin_fresh_ttl]      unpinned={r['updated']} ttl_left={left:.0f}s reaped_now={len(claimed)}"
+          f"  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_pin_race_for_the_last_slot(rounds: int = 40, racers: int = REAPERS) -> bool:
+    """N callers race to pin N different leases of a project with ONE pin slot, every round: exactly one wins
+    and the rest are refused pinned_limit. The bound is enforced under the project row lock, not by a read
+    taken outside it."""
+    bad = 0
+    for _ in range(rounds):
+        reset()
+        pin_project(1)
+        ids = [pinned_lease("ACTIVE", 3600, pinned=False) for _ in range(racers)]
+        barrier = threading.Barrier(racers, timeout=60)
+        reasons: list[str | None] = []
+        lock = threading.Lock()
+
+        def race(lid: int) -> None:
+            with connect() as c:
+                barrier.wait()
+                r = pin.set_pinned(c, lid, pinned=True)
+                c.commit()
+            with lock:
+                reasons.append(r["reason"])
+
+        threads = [threading.Thread(target=race, args=(lid,)) for lid in ids]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        pinned_now = sum(pinned_of(lid) for lid in ids)
+        if pinned_now != 1 or reasons.count(None) != 1 or reasons.count("pinned_limit") != racers - 1:
+            bad += 1
+    ok = bad == 0
+    print(f"[pin_race_last_slot]   {rounds} rounds x {racers} racers for 1 slot: exactly one pinned each round "
+          f"(bad rounds={bad})  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_pinned_request_end_to_end(racers: int = REAPERS) -> bool:
+    """Through the real gateway: with pinning off a pinned request is refused pin_disabled and creates no lease;
+    then request_lease(pinned=True) admits AND pins; a replay of it returns the same pinned lease even at the
+    bound; a second pinned request is refused pinned_limit before admission; a retry that adds pinned=True to an
+    earlier UNPINNED lease gets that lease back unpinned (pin_refused_on_replay), so only an operator pins an
+    existing lease. With the slot free again, N concurrent pinned requests for the one slot leave EXACTLY one
+    pinned live lease and no unpinned leftover (a loser admitted then refused is released)."""
+    reset()
+    pin_project(0)
+
+    def ask(key: str, *, pinned: bool = True) -> dict:
+        with connect() as c:
+            return gateway.request_lease(c, idem_key=key, node_id=NODE, req_cpu=1, req_mem_mb=256,
+                                         project_id=PIN_PROJECT, pinned=pinned)
+
+    def leases_with(key: str) -> int:
+        with psycopg.connect(CONN, autocommit=True) as c:
+            return int(c.execute("SELECT count(*) FROM lease WHERE idem_key = %s", (key,)).fetchone()[0])
+
+    off = ask("pin-off")
+    pin_project(1)
+    plain = ask("plain", pinned=False)
+    first, replay, second = ask("pin-1"), ask("pin-1"), ask("pin-2")
+    added = ask("plain")   # a retry of the unpinned request, now asking for a pin
+    seq_ok = (off["reason"] == "pin_disabled" and leases_with("pin-off") == 0
+              and first["admitted"] and first["pinned"] and replay["lease_id"] == first["lease_id"]
+              and replay["pinned"] and second["reason"] == "pinned_limit" and second["lease_id"] is None
+              and added["lease_id"] == plain["lease_id"] and added["admitted"] and not added["pinned"]
+              and added["reason"] == "pin_refused_on_replay" and not pinned_of(plain["lease_id"])
+              and state_of(plain["lease_id"]) == "ADMITTED")
+    reset()
+    pin_project(1)
+    barrier = threading.Barrier(racers, timeout=60)
+    answers: list[dict] = []
+    lock = threading.Lock()
+
+    def race(i: int) -> None:
+        with connect() as c:
+            barrier.wait()
+            r = gateway.request_lease(c, idem_key=f"race-{i}", node_id=NODE, req_cpu=1, req_mem_mb=256,
+                                      project_id=PIN_PROJECT, pinned=True)
+        with lock:
+            answers.append(r)
+
+    threads = [threading.Thread(target=race, args=(i,)) for i in range(racers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    with psycopg.connect(CONN, autocommit=True) as c:
+        live = c.execute("SELECT count(*) FILTER (WHERE pinned), count(*) FILTER (WHERE NOT pinned) FROM lease "
+                         "WHERE state IN ('ADMITTED','PROVISIONING','ACTIVE')").fetchone()
+    winners = [a for a in answers if a.get("pinned")]
+    race_ok = (tuple(live) == (1, 0) and len(winners) == 1
+               and all(a["reason"] == "pinned_limit" for a in answers if not a.get("pinned")))
+    ok = seq_ok and race_ok
+    print(f"[pinned_request_e2e]   off={off['reason']} first={first['pinned']} "
+          f"replay_same={replay['lease_id'] == first['lease_id']} second={second['reason']} "
+          f"added_on_replay={added['reason']} | race: live pinned/unpinned={tuple(live)} winners={len(winners)}"
+          f"  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_pinned_lease_migration() -> bool:
+    """Re-applying migration 0049 is idempotent; a new lease defaults to unpinned and a new project to
+    max_pinned 0 (pinning off, so the upgrade changes nothing); the CHECK refuses a negative bound."""
+    reset()
+    sql = (Path(__file__).resolve().parent.parent / "db" / "migrations" / "0049_pinned_lease.sql").read_text(
+        encoding="utf-8")
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute(sql)
+        c.execute(sql)
+        c.execute("DELETE FROM project WHERE id = 'pin-default'")
+        c.execute("INSERT INTO project(id, cpu_limit, mem_limit_mb, max_leases) VALUES ('pin-default', 1, 1, 1)")
+        default_bound = c.execute("SELECT max_pinned FROM project WHERE id = 'pin-default'").fetchone()[0]
+    lid = insert_lease("ACTIVE", 3600)
+    refused = False
+    try:
+        with psycopg.connect(CONN, autocommit=True) as c:
+            c.execute("UPDATE project SET max_pinned = -1 WHERE id = 'pin-default'")
+    except psycopg.errors.CheckViolation:
+        refused = True
+    ok = default_bound == 0 and pinned_of(lid) is False and refused
+    print(f"[pinned_migration]     idempotent, default max_pinned={default_bound} default pinned={pinned_of(lid)} "
+          f"negative refused={refused}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main() -> int:
     load_schema()
     print("=== lease-lifecycle concurrency gate (migrations) ===\n")
@@ -487,6 +714,12 @@ def main() -> int:
         check_releasing_no_double,
         check_provision_stuck_no_double,
         check_backlog_drains,
+        check_pinned_survives_expiry,
+        check_pin_bound_refusals,
+        check_unpin_gives_a_fresh_ttl,
+        check_pin_race_for_the_last_slot,
+        check_pinned_request_end_to_end,
+        check_pinned_lease_migration,
     ]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))

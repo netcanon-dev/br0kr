@@ -53,7 +53,7 @@ Wrappers that share a port cannot run at the same time.
 
 | Wrapper | Proves | Port |
 |---------|--------|------|
-| `run_lease.sh` | Lease lifecycle and reaper under concurrency: guarded transitions, one teardown claimant. | 5439 |
+| `run_lease.sh` | Lease lifecycle and reaper under concurrency: guarded transitions, one teardown claimant; pinned leases survive expiry, and racers for the last pin slot get exactly one. | 5439 |
 | `run_gateway.sh` | The MCP gateway verbs, wired to a real ledger. | 5439 |
 | `run_cloudinit.sh` | The cloud-init (VM access) fields carry through admit, queue and lease. | 5457 |
 | `run_sweeper_watermark.sh` | The orphan sweep refuses to act on a stale (restored or lagging) ledger. | 5471 |

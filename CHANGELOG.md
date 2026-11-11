@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **Pinned leases (migration 0049).** A long-lived VM needed a heartbeat sidecar or a huge TTL; a pinned one is
+  skipped by the TTL reaper, bounded by `project.max_pinned` (0 = off). `harness_lease.py`; review FEAT-01.
 - **An API reference, generated: `docs/api.md`.** Runbooks listed the tools piecemeal; it lists every MCP tool
   (tier, parameters) and dashboard route from the code, and `tests/unit/test_api_reference.py` fails on drift.
 - **A CI job can lease a VM with only Python.** `scripts/br0kr_mcp_call.py` is a stdlib MCP client (`call`, `wait`);

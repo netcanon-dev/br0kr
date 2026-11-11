@@ -69,6 +69,7 @@ Endpoints:
     POST /api/lease/renew  {lease_id}                         — extend a lease's heartbeat TTL (token-gated)
     POST /api/lease/release {lease_id}                        — release a lease early (token-gated)
     POST /api/cancel      {lease_id}                          — cancel/release a lease (token-gated)
+    POST /api/lease/pin   {lease_id, pinned}                  — pin/unpin a live lease (no TTL reaping; 0049)
     POST /api/migrate     {idem_key, lease_id, target_node_id} — migrate a lease to another cluster (token-gated)
     POST /api/migration/cancel {migration_id}                 — cancel a wedged migration, free its reservation
     POST /api/node/cordon {node_id, cordoned}                 — cordon/uncordon a node (no new provisioning)
@@ -77,6 +78,7 @@ Endpoints:
                           name?, description?} — act-as TENANT template-download: fetch a net-new PRIVATE image
                           on behalf of a chosen project, debiting ITS template-disk quota (token-gated)
     POST /api/quota       {project_id, cpu_limit, mem_limit_mb, max_leases, max_queued}  — base quota (ceilings kept)
+    POST /api/project/max-pinned {project_id, max_pinned}     — how many of its live leases may be pinned (0 = off)
     POST /api/template/grant  {project_id, template_id}       — grant a project a private template (token-gated)
     POST /api/template/revoke {project_id, template_id}       — revoke a project's template grant (token-gated)
     POST /api/token/create {project_id, scope, label, expires_in_days?} — mint an agent token (returns the secret ONCE)
@@ -113,6 +115,7 @@ from br0kr import (
     ledgerhealth,
     logging_setup,
     migrate,
+    pin,
     replication,
     settings,
     ui_assets,
@@ -428,6 +431,21 @@ def _parse_template_disk(body: dict[str, Any]) -> dict[str, Any]:
     if reason is not None:
         raise _Reject(reason)
     return {"project_id": pid, "max_template_disk_gb": gb}
+
+
+def _parse_max_pinned(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse the per-project pin bound setter (0049): project_id + max_pinned, a REQUIRED non-negative integer
+    (0 = pinning off). Strict at the boundary like the template-disk setter: a bool, a float or a numeric string
+    is refused rather than coerced, so a typo can't quietly set a different bound. Validated by
+    admin.validate_max_pinned. A DEDICATED endpoint so allowing pins never re-sends the project's quota."""
+    pid = _req_str(body, "project_id")
+    raw = body.get("max_pinned")
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise _Reject("max_pinned_invalid")
+    reason = admin.validate_max_pinned(raw)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"project_id": pid, "max_pinned": raw}
 
 
 def _parse_node(body: dict[str, Any]) -> dict[str, Any]:
@@ -841,6 +859,10 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
                          lambda c, **k: gateway.renew_lease(c, k["lease_id"])),
     "/api/lease/release": (lambda b: {"lease_id": _req_int(b, "lease_id")},
                            lambda c, **k: gateway.release_lease(c, k["lease_id"])),
+    # 0049: pin/unpin a live lease (the TTL reaper skips a pinned one), bounded by its project's max_pinned under
+    # the project row lock (br0kr/pin.py). Does not commit; _action does, which also frees the row locks.
+    "/api/lease/pin": (lambda b: {"lease_id": _req_int(b, "lease_id"), "pinned": _req_bool(b, "pinned")},
+                       lambda c, **k: pin.set_pinned(c, k["lease_id"], pinned=k["pinned"])),
     # /api/quota is the BASE-quota editor — preserves the *_max ceilings (set_base_quota). /api/project/edit
     # is the full project edit (set_project_quota, which also writes the ceilings).
     "/api/quota": (_parse_base_quota, lambda c, **k: admin.set_base_quota(c, **k)),
@@ -852,6 +874,10 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
     "/api/project/template-disk": (_parse_template_disk,
                                    lambda c, **k: admin.set_project_template_disk_quota(
                                        c, k["project_id"], k["max_template_disk_gb"])),
+    # 0049: the per-project pin bound — a DEDICATED setter like template-disk, so allowing pins never re-sends
+    # (or clears) the rest of the project's quota.
+    "/api/project/max-pinned": (_parse_max_pinned,
+                                lambda c, **k: admin.set_project_max_pinned(c, k["project_id"], k["max_pinned"])),
     "/api/node/create": (_parse_node, lambda c, **k: admin.create_node(c, **k)),
     "/api/node/edit": (_parse_node, lambda c, **k: admin.set_node(c, **k)),
     "/api/node/cordon": (lambda b: {"node_id": _req_str(b, "node_id"), "cordoned": _req_bool(b, "cordoned")},

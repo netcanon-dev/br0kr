@@ -41,6 +41,8 @@ log = logging.getLogger(__name__)
 # inventory's "used" sums debit by the SAME definition the admission transaction does (one source of
 # truth; a drift guard pins this in tests/unit/test_inventory.py).
 _ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
+# lease.LIVE_STATES (capacity-holding and still renewable/releasable): what a pin counts against max_pinned (0049).
+_LIVE_SQL = "(" + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")"
 
 # Per-node derived usage: Σ active leases on the node (cpu/mem/count). The LEFT JOIN keeps a node with
 # no leases (its sums COALESCE to 0); the FILTER counts only capacity-holding rows, so a node-with-only-
@@ -128,7 +130,9 @@ _LIST_PROJECTS_TMPL = f"""
                      WHERE project_id = p.id AND job_state NOT IN ('READY','FAILED')), 0)
          + COALESCE((SELECT sum(ti.size_gb) FROM template_instance ti
                      JOIN template_replication tr ON tr.id = ti.replication_id
-                     WHERE tr.project_id = p.id AND ti.instance_state = 'READY'), 0) AS template_disk_used
+                     WHERE tr.project_id = p.id AND ti.instance_state = 'READY'), 0) AS template_disk_used,
+         p.max_pinned,
+         COUNT(*) FILTER (WHERE l.pinned AND l.state IN {_LIVE_SQL})            AS pinned_count
   FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {_ACTIVE_SQL}
   {{where}}
   GROUP BY p.id ORDER BY p.id
@@ -213,7 +217,8 @@ _LEASE_LIST_TMPL = f"""
          l.req_cpu, l.req_mem_mb, l.storage_id, l.req_disk_gb, l.vmid, l.ip_address, l.ci_user,
          EXTRACT(EPOCH FROM (now() - l.created_at))::float8     AS age_seconds,
          EXTRACT(EPOCH FROM (l.expires_at - now()))::float8     AS expires_in_seconds,
-         {_RES_FLAG_SQL}                                        AS is_reservation
+         {_RES_FLAG_SQL}                                        AS is_reservation,
+         l.pinned
   FROM lease l
   WHERE l.state IN {_ACTIVE_SQL} {{extra}}
   ORDER BY l.created_at, l.id
@@ -291,7 +296,8 @@ def _project_row(row: tuple[Any, ...]) -> dict[str, Any]:
     figures mirror admission._PROJECT_AVAIL's `max_leases − live count`, so the GUI shows the SAME
     headroom admission enforces."""
     (pid, cpu_limit, mem_limit, max_leases, max_queued, cpu_used, mem_used, lease_count, queue_depth,
-     cpu_limit_max, mem_limit_mb_max, max_leases_max, max_template_disk_gb, template_disk_used) = row
+     cpu_limit_max, mem_limit_mb_max, max_leases_max, max_template_disk_gb, template_disk_used,
+     max_pinned, pinned_count) = row
     cpu_limit, cpu_used = float(cpu_limit), float(cpu_used)
     mem_limit, mem_used = int(mem_limit), int(mem_used)
     max_leases, lease_count = int(max_leases), int(lease_count)
@@ -315,6 +321,8 @@ def _project_row(row: tuple[Any, ...]) -> dict[str, Any]:
         # CURRENT usage (owned templates' settled size + in-flight builds' declared reserve), both in GB.
         "max_template_disk_gb": None if max_template_disk_gb is None else int(max_template_disk_gb),
         "template_disk_used": int(template_disk_used),
+        # 0049: how many live leases may be pinned (0 = pinning off) and how many are now.
+        "max_pinned": int(max_pinned), "pinned_count": int(pinned_count),
     }
 
 
@@ -347,10 +355,11 @@ def _lease_row(row: tuple[Any, ...]) -> dict[str, Any]:
     the JS): `cancellable` = a LIVE lease (lease.is_releasable — ADMITTED/PROVISIONING/ACTIVE, NOT the
     already-departing RELEASING) that is not a reservation; `migratable` = an ACTIVE, compute-only (no
     storage — the migrate form's own contract, since PDM can't move a disk in this pre-wire) lease that is
-    not a reservation. ip_address is coerced to str (a text/inet column → a JSON string, never a raw
-    IPv4Address). Pure, so the table render is testable without a DB."""
+    not a reservation; `pinnable` = a live lease that is not a reservation (pin or unpin it, 0049), and a
+    `pinned` one is not `renewable`, since the TTL reaper skips it. ip_address is coerced to str (a text/inet
+    column → a JSON string, never a raw IPv4Address). Pure, so the table render is testable without a DB."""
     (lid, project_id, node_id, cluster_id, state, req_cpu, req_mem_mb, storage_id, req_disk_gb,
-     vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation) = row
+     vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned) = row
     reservation = bool(is_reservation)
     live = lease.is_releasable(state) and not reservation   # cancel drops/releases it; renew pushes its TTL
     return {
@@ -364,7 +373,8 @@ def _lease_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "expires_in_seconds": None if expires_in_seconds is None else round(float(expires_in_seconds), 1),
         "is_reservation": reservation,
         "cancellable": live,
-        "renewable": live,
+        "renewable": live and not pinned,   # a pinned lease (0049) needs no heartbeat
+        "pinned": bool(pinned), "pinnable": live,
         "migratable": state == "ACTIVE" and storage_id is None and not reservation,
     }
 

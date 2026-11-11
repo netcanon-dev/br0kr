@@ -319,6 +319,12 @@ const REASON_HINT = {
   bad_response: 'the server answered with something other than JSON',
   not_found: 'this server has no such endpoint (is the page newer than the server?)',
   lease_id_required: 'a lease id is required',
+  pin_disabled: 'pinning is off for this project: raise its pin limit on the project card first',
+  pinned_limit: 'this project already has as many pinned leases as its pin limit allows',
+  pin_needs_project: 'only a lease that belongs to a project can be pinned',
+  pin_not_queueable: 'a queued request cannot ask for a pin; pin the lease once it is admitted',
+  pin_refused_on_replay: 'a retry never adds a pin: the lease is live but not pinned (pin it here, or release it)',
+  negative_max_pinned: 'the pin limit cannot be negative',
   already_terminal: 'it has already ended',
   already_revoked: 'it was already revoked',
   already_granted: 'that project already has access',
@@ -462,6 +468,43 @@ function toggleCordon(i){
     if(r.ok && r.data && r.data.updated) poll();
     else notify('Cordon failed: ' + why(r), 'err');
   });
+}
+function pinLease(id){ setPin(id, true); }
+function unpinLease(id){ setPin(id, false); }
+function setPin(id, to){
+  // 0049: a pinned lease is skipped by the TTL reaper; unpinning gives it a fresh TTL from now.
+  const msg = to ? 'Pin lease '+id+'? The broker will no longer reclaim it for a missed heartbeat: it holds '
+                   + 'its capacity until someone releases it.'
+                 : 'Unpin lease '+id+'? It gets a fresh TTL from now, and is reclaimed if nobody renews it.';
+  confirmModal(msg, async () => {   // reversible toggle — not a `danger` (no red button)
+    const r = await postJSON('/api/lease/pin', {lease_id:id, pinned:to});
+    // no reason = done, including a lease that was already in that state (a double click, a stale page)
+    if(r.ok && r.data && r.data.reason == null) poll();
+    else notify((to ? 'Pin' : 'Unpin') + ' failed: ' + why(r), 'err');
+  });
+}
+function setMaxPinned(i){
+  // 0049: how many of this project's live leases may be pinned at once (0 = pinning off).
+  if(paused) return; paused = true;                        // one form at a time (suppresses the poll re-render)
+  const p = DATA.projects[i];
+  $('form-slot').innerHTML = `<div class="form"><h3>Pin limit · ${esc(p.project_id)}</h3>
+    <label class="ff"><span>Pinned leases</span><input id="mp-n" type="number" step="1" min="0"
+      value="${esc(String(p.max_pinned||0))}"></label>
+    <p class="pill">How many of its live leases may be pinned: never reclaimed for a missed heartbeat. 0 turns
+      pinning off; lowering it unpins nothing.</p>
+    <div class="erow"><button class="act" onclick="submitMaxPinned(${i})">save</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitMaxPinned(i){
+  const p = DATA.projects[i], t = $('mp-n').value.trim(), num = Number(t);
+  if(t==='' || !Number.isInteger(num) || num<0){         // a typo must not quietly set a different limit
+    $('form-err').textContent = 'Enter a whole number, 0 or more (0 turns pinning off).';
+    return;
+  }
+  const r = await postJSON('/api/project/max-pinned', {project_id:p.project_id, max_pinned:num});
+  if(r.ok && r.data && r.data.updated) closeForm();       // closeForm() re-polls → the project card refreshes
+  else $('form-err').textContent = why(r);
 }
 function setTemplateDisk(i){
   // phase A4.2: open a modal to set/clear a project's template-disk ceiling (GB). Blank = disable downloads.
@@ -1551,6 +1594,8 @@ function renderLeases(){
   const lstate = s => s==='ACTIVE'?'var(--ok)':(s==='RELEASING'?'var(--warn)':'var(--accent)');
   const ttl = s => s==null?'—':(s<0?'expired':Math.round(s)+'s');
   const resTag = ' <span class="warn" title="cross-cluster migration reservation — no guest">reservation</span>';
+  const pinTag = '<span style="color:var(--accent)" title="pinned: never reclaimed for a missed heartbeat">'
+    + 'pinned</span>';
   let bar = '';
   if(canEdit){
     const createBtn = `<button class="act" onclick="openCreateVM()">+ create VM</button>`;
@@ -1577,6 +1622,7 @@ function renderLeases(){
       let ops = '';
       if(canEdit && !l.is_reservation) ops += ab('leaseDetail', 'detail');
       if(canEdit && l.renewable)   ops += ab('renewLease', 'renew');
+      if(canEdit && l.pinnable)    ops += ab(l.pinned ? 'unpinLease' : 'pinLease', l.pinned ? 'unpin' : 'pin');
       if(canEdit && l.cancellable) ops += ab('cancelLease', 'cancel');
       if(canEdit && l.migratable)  ops += ab('openMigrateForm', 'migrate');
       opcell = ops;
@@ -1591,7 +1637,8 @@ function renderLeases(){
       <td class="pill">${l.ip_address?esc(l.ip_address):'—'}</td>
       <td class="num">${l.req_cpu}</td><td class="num">${gib(l.req_mem_mb)}</td>
       <td class="pill">${store}</td>
-      <td class="num">${Math.round(l.age_seconds)}s</td><td class="num">${ttl(l.expires_in_seconds)}</td>
+      <td class="num">${Math.round(l.age_seconds)}s</td>
+      <td class="num">${l.pinned ? pinTag : ttl(l.expires_in_seconds)}</td>
       ${canEdit?'<td>'+opcell+'</td>':''}</tr>`;
   }).join('');
   const opsTh = canEdit ? (sel ? '<th>sel</th>' : '<th></th>') : '';
@@ -1893,10 +1940,12 @@ function render(d){
                 p.max_leases_max!=null?p.max_leases_max+'L':null].filter(Boolean).join('/');
     const td = p.max_template_disk_gb!=null ? `tmpl-disk ${p.template_disk_used||0}/${p.max_template_disk_gb}G`
                                             : 'tmpl-disk off';
+    const pn = p.max_pinned>0 ? `pins ${p.pinned_count||0}/${p.max_pinned}` : 'pins off';
     const meta = `${p.lease_count}/${p.max_leases} leases · queue ${p.queue_depth}${cap}`
-                 + (ss?` · self-svc≤${ss}`:'') + ' · ' + td;
+                 + (ss?` · self-svc≤${ss}`:'') + ' · ' + td + ' · ' + pn;
     const tdBtn = canEdit ? `<div class="erow"><button class="act ghost" `
-                            + `onclick="setTemplateDisk(${i})">set tmpl-disk</button></div>` : '';
+                            + `onclick="setTemplateDisk(${i})">set tmpl-disk</button> `
+                            + `<button class="act ghost" onclick="setMaxPinned(${i})">set pins</button></div>` : '';
     return resourceCard(p.project_id, meta, [bar(p.cpu_used, p.cpu_limit, p.cpu_pct, 'CPU'),
       bar(gib(p.mem_mb_used), gib(p.mem_mb_limit), p.mem_pct, 'Mem (GiB)'),
       bar(p.lease_count, p.max_leases, p.lease_pct, 'Leases')], acts('project',i) + tdBtn);

@@ -15,6 +15,11 @@ it. The harnesses themselves are catalogued in [scripts/README.md](../scripts/RE
   (8 concurrent promoters at a 1-slot node → exactly one admits). `db/migrations/0006_queue.sql`
 - ✅ **Lease lifecycle + reaper** — TTL/heartbeat, guarded-CAS transitions, single-claimant teardown,
   `RELEASE_FAILED` backstop. `br0kr/lease.py` + `br0kr/reaper.py`
+- ✅ **Pinned leases** — a lease the TTL reaper never reclaims, for a VM that must outlive its agent's
+  session; still admitted, debited and released like any other. Bounded per project by `max_pinned` (0 = off,
+  the default), counted under the project row lock (N racers for the last slot → exactly one). Asked for at
+  request time (`pinned=true`) or set by an operator (`pin_lease`, the dashboard). `br0kr/pin.py` +
+  [designs/pinned-lease.md](designs/pinned-lease.md); proven in `scripts/harness_lease.py`.
 - ✅ **Per-VMID fencing + reconciler** — provisions a real, fenced VM and tears it down, exception-safe.
   `br0kr/pve.py` + `br0kr/reconciler.py`
 - ✅ **VM access (cloud-init)** — an agent passes its OWN ssh public key on `request_lease`; the broker
@@ -109,7 +114,7 @@ it. The harnesses themselves are catalogued in [scripts/README.md](../scripts/RE
   tick but **DISABLED BY DEFAULT** (`BR0KR_MIGRATE_LIMIT=0`); an operator triggers it from the dashboard, an
   agent watches its own lease via the MCP `migration_status` read. `br0kr/migration.py` +
   [docs/runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
-- ⏳ Next: a pinned (long-lived) lease, and a bounded server-side `wait_for_lease` for agents. The two
+- ⏳ Next: a bounded server-side `wait_for_lease` for agents. The two
   dormant items above wait for PDM hardware; when it exists, the first step is `bash scripts/run_pdm.sh`
   pointed at the real box.
 - Not planned, with the reasons: see [Non-goals](architecture.md#non-goals) (other backends, a cloud

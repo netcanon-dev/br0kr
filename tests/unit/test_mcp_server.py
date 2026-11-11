@@ -1415,3 +1415,45 @@ def test_tenant_tool_descriptions_stay_within_a_context_budget():
     collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
     tenant = {n: t for n, t in _descriptions(mcp_server.mcp).items() if n not in collected}
     assert sum(map(len, tenant.values())) < 25_000, sum(map(len, tenant.values()))
+
+
+def test_pin_lease_is_operator_gated_forwards_and_commits_before_auditing(monkeypatch):
+    """pin_lease is an operator-tier verb, served only where the operator tools are registered. Authorized, it
+    forwards to pin.set_pinned with no project binding or lease-ownership check (an operator pins any tenant's
+    lease), commits, and audits only a change. A tenant token gets forbidden_scope and never reaches pin.
+    Guards a tenant pinning a lease (a permanent hold on shared capacity), and the verb not wiring the pin."""
+    assert auth.VERB_TIER["pin_lease"] == "operator"
+    assert mcp_server.pin_lease in mcp_server._OPERATOR_TOOLS
+    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(auth, "lease_owned_by", lambda *_a: pytest.fail("an operator pin checks no ownership"))
+    captured: dict = {}
+    audited: list[str] = []
+    monkeypatch.setattr(mcp_server.pin, "set_pinned",
+                        lambda _c, lid, pinned: captured.update(lid=lid, pinned=pinned) or {"updated": True})
+    monkeypatch.setattr(mcp_server, "_audit_write", lambda _c, _p, action, **_k: audited.append(action))
+    assert mcp_server.pin_lease(object(), lease_id=7, pinned=True) == {"updated": True}
+    assert captured == {"lid": 7, "pinned": True} and audited == ["pin_lease"]
+    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(mcp_server.pin, "set_pinned", lambda *a, **k: pytest.fail("a tenant must not pin"))
+    assert mcp_server.pin_lease(object(), lease_id=7, pinned=True) == {"error": "forbidden_scope"}
+
+
+def test_request_and_schedule_lease_forward_pinned_and_audit_it(monkeypatch):
+    """request_lease / schedule_lease pass the agent's `pinned` through to the gateway and record it in the
+    audit params of a fresh reserve. Guards the flag being dropped between the tool and the gateway (the agent
+    would get an unpinned lease reaped for a missed heartbeat) and the trail not showing which leases were
+    asked to be pinned."""
+    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("p", "consume", 1))
+    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_server, "_queue_max", lambda _c: 1000)
+    monkeypatch.setattr(auth, "template_allowed", lambda *_a: (True, None))
+    seen: list[bool] = []
+    audited: list[dict] = []
+    answer = {"lease_id": 3, "admitted": True, "queued": False, "idempotent": False, "reason": None, "pinned": True}
+    monkeypatch.setattr(gateway, "request_lease", lambda _c, **k: seen.append(k["pinned"]) or answer)
+    monkeypatch.setattr(gateway, "schedule_lease", lambda _c, **k: seen.append(k["pinned"]) or answer)
+    monkeypatch.setattr(mcp_server, "_audit_write", lambda _c, _p, _a, **k: audited.append(k["params"]))
+    mcp_server.request_lease(object(), idem_key="a", node_id="n1", req_cpu=1, req_mem_mb=512, pinned=True)
+    mcp_server.schedule_lease(object(), idem_key="b", req_cpu=1, req_mem_mb=512, pinned=True)
+    assert seen == [True, True] and [p["pinned"] for p in audited] == [True, True]

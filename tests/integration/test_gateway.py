@@ -29,7 +29,8 @@ def test_request_lease_builds_request_and_maps_result(monkeypatch):
     monkeypatch.setattr(admission, "admit", fake_admit)
     out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=2, req_mem_mb=2048,
                                 storage_id="ceph", req_disk_gb=40, ttl_seconds=120)
-    assert out == {"lease_id": 42, "admitted": True, "queued": False, "idempotent": False, "reason": None}
+    assert out == {"lease_id": 42, "admitted": True, "queued": False, "idempotent": False, "reason": None,
+                   "pinned": False}
     r = captured["req"]
     assert (r.idem_key, r.node_id, r.req_cpu, r.req_mem_mb, r.storage_id, r.req_disk_gb, r.ttl_seconds) \
         == ("k", "n1", 2, 2048, "ceph", 40, 120)
@@ -67,7 +68,8 @@ def test_lease_status_marks_unknown_lease(monkeypatch):
     assert gateway.lease_status(object(), 9) == {
         "lease_id": 9, "state": None, "exists": False, "access_requested": False,
         "ip_address": None, "ci_user": None, "vmid": None, "node_id": None,
-        "released_reason": None, "hold_reason": None}   # 0033: uniform shape even for an unknown lease
+        "released_reason": None, "hold_reason": None,
+        "pinned": False}   # 0033 / 0049: a uniform shape even for an unknown lease
 
 
 def test_lease_status_returns_access_facts_for_an_active_guest(monkeypatch):
@@ -174,7 +176,8 @@ def test_request_lease_queues_on_a_queueable_reject(monkeypatch):
                         admission.AdmissionResult(None, admitted=False, idempotent=False, reason="insufficient_node_cpu"))
     monkeypatch.setattr(admission, "enqueue", lambda c, **kw: admission.EnqueueResult(99, queued=True, reason=None))
     out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=4, req_mem_mb=2048, queue=True)
-    assert out == {"lease_id": 99, "admitted": False, "queued": True, "idempotent": False, "reason": "queued"}
+    assert out == {"lease_id": 99, "admitted": False, "queued": True, "idempotent": False, "reason": "queued",
+                   "pinned": False}
 
 
 def test_request_lease_without_queue_flag_rejects_normally(monkeypatch):
@@ -205,7 +208,8 @@ def test_request_lease_idempotent_queued_replay_does_not_reenqueue(monkeypatch):
                         admission.AdmissionResult(5, admitted=False, idempotent=True, reason="queued"))
     monkeypatch.setattr(admission, "enqueue", lambda c, **kw: pytest.fail("a 'queued' replay must not re-enqueue"))
     out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=4, req_mem_mb=2048, queue=True)
-    assert out == {"lease_id": 5, "admitted": False, "queued": True, "idempotent": True, "reason": "queued"}
+    assert out == {"lease_id": 5, "admitted": False, "queued": True, "idempotent": True, "reason": "queued",
+                   "pinned": False}
 
 
 def test_cancel_lease_three_outcomes(monkeypatch):

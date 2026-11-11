@@ -142,11 +142,12 @@ def is_releasable(state: str) -> bool:
     return state in LIVE_STATES
 
 
-def is_due(state: str, expires_at: datetime, now: datetime) -> bool:
+def is_due(state: str, expires_at: datetime, now: datetime, *, pinned: bool = False) -> bool:
     """True if the reaper should expire this lease: it still holds capacity AND its
-    deadline has passed. A non-live lease is never 'due' (it is already on its way
-    out), so a heartbeat that pushed expires_at forward removes it from this set."""
-    return state in LIVE_STATES and expires_at <= now
+    deadline has passed AND it is not pinned. A non-live lease is never 'due' (it is already on its way
+    out), so a heartbeat that pushed expires_at forward removes it from this set. A PINNED lease (0049,
+    br0kr/pin.py) is never due by time; it ends only when released, or by the steps not about time."""
+    return not pinned and state in LIVE_STATES and expires_at <= now
 
 
 def is_queue_expired(state: str, expires_at: datetime, now: datetime) -> bool:
@@ -448,14 +449,15 @@ def claim_expired(conn: psycopg.Connection[Any], limit: int = 100) -> list[Claim
     One statement, so there is no claim-then-update window. ``FOR UPDATE SKIP
     LOCKED`` lets many reaper instances run at once without claiming the same lease
     twice or blocking one another. A lease renewed since the scan has ``expires_at``
-    in the future and is simply not matched — the heartbeat wins. The actual guest
+    in the future and is simply not matched — the heartbeat wins. A PINNED lease (0049) is
+    never matched, whatever its expires_at: pinning exempts it from this step only. The actual guest
     teardown is then driven by `claim_releasing` (a freshly-expired lease has
     ``reclaim_at IS NULL``, so the very next teardown pass picks it up).
     """
     rows = conn.execute(
         f"""WITH due AS (
                 SELECT id FROM lease
-                 WHERE state IN {_LIVE_SQL} AND expires_at <= now()
+                 WHERE state IN {_LIVE_SQL} AND expires_at <= now() AND NOT pinned
                  ORDER BY expires_at
                  FOR UPDATE SKIP LOCKED
                  LIMIT %s)
@@ -810,10 +812,10 @@ def access_of(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any] | 
     'placement_blocked:<hold>'/…) and ``hold_reason`` (0033: why a still-ADMITTED templated lease is parked,
     not yet provisioned — the diagnostic the daemon writes) are surfaced so an agent's lease_status poll sees
     a HONEST reason rather than an opaque wait: a held lease reports its blocker, a released one its cause.
-    Both are None on a normal live lease."""
+    Both are None on a normal live lease. ``pinned`` (0049) says the TTL step will not reclaim it."""
     row = conn.execute(
         "SELECT state, vmid, node_id, ip_address, ci_user, (ssh_pubkey IS NOT NULL), released_reason, "
-        "hold_reason FROM lease WHERE id = %s",
+        "hold_reason, pinned FROM lease WHERE id = %s",
         (lease_id,),
     ).fetchone()
     conn.commit()
@@ -821,7 +823,7 @@ def access_of(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any] | 
         return None
     return {"state": row[0], "vmid": row[1], "node_id": row[2],
             "ip_address": row[3], "ci_user": row[4], "access_requested": bool(row[5]),
-            "released_reason": row[6], "hold_reason": row[7]}
+            "released_reason": row[6], "hold_reason": row[7], "pinned": bool(row[8])}
 
 
 # ── 0033 held-lease hygiene: the daemon parks an unplaceable templated lease with a diagnostic, re-checks it
