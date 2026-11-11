@@ -38,6 +38,9 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **The daemon's /metrics reads the ledger at most once per 10 s, and the dashboard polls with one request.**
+  fleet_stats reads only its window via new partial indexes (migration 0050); /readyz probes with SELECT 1;
+  /api/overview carries the fleet and ledger strips (PERF-03).
 - **The gateway and dashboard reuse ledger connections from in-process pools (`db.pool`).** Every tool call
   and page read opened fresh ones; harness_gateway holds 20 concurrent callers to <= 10 backends (PERF-02).
   The dashboard now stops on SIGTERM (`docker stop`) and closes its pool, instead of waiting to be killed.

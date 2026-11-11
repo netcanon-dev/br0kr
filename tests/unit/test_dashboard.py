@@ -772,18 +772,19 @@ def test_create_vm_and_lease_lifecycle_ui_is_wired():
 def test_fleet_route_and_reader_and_page_strip(monkeypatch):
     """PR-2 fleet-stat tiles: GET /api/fleet routes to the 'fleet' tag whose _API reader calls
     inventory.fleet_stats (an OPEN inventory read like nodes/leases — NOT the operator gate, matching the MCP
-    'read' tier), and the PAGE carries the tile-strip wiring (renderFleet/loadFleet + the #fleet mount, hooked
-    into the poll loop). Guards the read being dropped, mis-gated onto the operator surface, or the strip
-    becoming a dead endpoint (a syntax-clean but unwired script the backtick test wouldn't catch)."""
+    'read' tier), and the PAGE carries the tile-strip wiring (renderFleet + the #fleet mount, rendered by the poll
+    from the overview's fleet block, review PERF-03). Guards the read being dropped, mis-gated onto the operator
+    surface, or the strip going unwired (a syntax-clean script the backtick test wouldn't catch)."""
     assert dashboard.route("/api/fleet") == "fleet"
     assert "fleet" in dashboard._API
     monkeypatch.setattr(dashboard.inventory, "fleet_stats",
                         lambda c: {"queue_depth": 3, "window_minutes": 60})
     assert dashboard._API["fleet"](object()) == {"queue_depth": 3, "window_minutes": 60}
     page = dashboard.PAGE
-    for needle in ('id="fleet-sec"', 'id="fleet"', "function renderFleet(", "async function loadFleet(",
-                   "fetchJSON('/api/fleet')", "loadFleet();"):
+    for needle in ('id="fleet-sec"', 'id="fleet"', "function renderFleet(", "function renderStrips(",
+                   "renderStrips(r.data)"):
         assert needle in page, needle
+    assert "fetchJSON('/api/fleet')" not in page and "fetchJSON('/api/ledger')" not in page   # one read per poll
 
 
 def test_tenant_download_action_is_act_as_with_result_aware_audit(monkeypatch):
@@ -1244,3 +1245,32 @@ def test_active_leases_panel_badges_pinned_leases_and_offers_the_pin_toggle():
     assert "if(r.ok && r.data && r.data.reason == null) poll();" in js
     assert "postJSON('/api/project/max-pinned', {project_id:p.project_id, max_pinned:num})" in js
     assert "`pins ${p.pinned_count||0}/${p.max_pinned}`" in js
+
+
+def test_the_overview_carries_the_fleet_and_ledger_strips_best_effort(monkeypatch):
+    """The /api/overview reader returns inventory.overview plus a `fleet` block (inventory.fleet_stats) and a
+    `ledger` block (the ledger's replication posture), without mutating the overview it was given. When the fleet
+    read fails, `fleet` is null with fleet_error 'query_failed', the aborted transaction is rolled back, and the
+    ledger block and the rest still answer. Guards the page's poll costing three requests and connections (review
+    PERF-03), and a failed strip read failing the whole overview, which would blank every panel."""
+    from types import SimpleNamespace
+
+    import psycopg
+
+    base = {"nodes": []}
+    monkeypatch.setattr(dashboard.inventory, "overview", lambda c: base)
+    monkeypatch.setattr(dashboard.inventory, "fleet_stats", lambda c: {"queue_depth": 1})
+    monkeypatch.setattr(dashboard.ledgerhealth, "read", lambda c: dashboard.ledgerhealth.UNREADABLE)
+    rolled: list[int] = []
+    conn = SimpleNamespace(rollback=lambda: rolled.append(1))
+
+    out = dashboard._API["overview"](conn)
+    assert out["nodes"] == [] and out["fleet"] == {"queue_depth": 1} and out["ledger"]["readable"] is False
+    assert "fleet_error" not in out and base == {"nodes": []} and rolled == []
+
+    def boom(_c):
+        raise psycopg.OperationalError("canceling statement due to statement timeout")
+    monkeypatch.setattr(dashboard.inventory, "fleet_stats", boom)
+    out = dashboard._API["overview"](conn)
+    assert out["fleet"] is None and out["fleet_error"] == "query_failed" and rolled == [1]
+    assert out["ledger"]["readable"] is False and out["nodes"] == []

@@ -6,7 +6,9 @@ Admission-SLO observability gate — proves, against a REAL Postgres ledger, tha
     on mark_active's PROVISIONING→ACTIVE CAS — and NOT stamped before the state is reached;
   * `inventory.fleet_stats` computes the admission-latency percentiles (queue-wait created→admitted,
     provision admitted→active) + oldest-pending age + queue depth FROM those timestamps, excluding
-    NULLs (a lease that never reached the state) so a partial history never skews an SLO.
+    NULLs (a lease that never reached the state) so a partial history never skews an SLO;
+  * the per-window query (review PERF-03) answers exactly what the old single pass over `lease` answered, on a
+    seeded mixed history, and its plan reads both percentile windows through the 0050 partial indexes.
 
 No Proxmox, no VMs — pure ledger. Safe to run unattended. Env: PGCONN.
 """
@@ -61,6 +63,58 @@ def insert_pending(idem: str) -> int:
     return int(lid)
 
 
+# The pre-PERF-03 fleet_stats head, one FILTERed pass over the whole lease table: kept as the oracle the
+# per-window rewrite must match (queue depth, oldest pending, both percentile legs, held leases).
+_SINGLE_PASS = """
+  SELECT
+    count(*) FILTER (WHERE state = 'PENDING'),
+    EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE state = 'PENDING'))),
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at)))
+      FILTER (WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s)),
+    percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at)))
+      FILTER (WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s)),
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at)))
+      FILTER (WHERE active_at IS NOT NULL AND admitted_at IS NOT NULL
+                    AND active_at >= now() - make_interval(mins => %(win)s)),
+    percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at)))
+      FILTER (WHERE active_at IS NOT NULL AND admitted_at IS NOT NULL
+                    AND active_at >= now() - make_interval(mins => %(win)s)),
+    count(*) FILTER (WHERE state = 'ADMITTED' AND hold_reason IS NOT NULL)
+  FROM lease
+"""
+
+
+def _norm(x: object) -> object:
+    return None if x is None else round(float(x), 6)
+
+
+def seed_history() -> None:
+    """A deterministic mixed lease history: every state; half the rows created in the last two hours, half over
+    three days; most admitted after a wait, most of those ACTIVE after a provision; a few legacy rows with
+    active_at but no admitted_at; some ADMITTED rows held."""
+    import random
+
+    rnd = random.Random(7)
+    states = ("PENDING", "ADMITTED", "PROVISIONING", "ACTIVE", "RELEASING", "RELEASED", "REJECTED",
+              "RELEASE_FAILED")
+    with connect() as c:
+        for i in range(400):
+            state = states[i % len(states)]
+            created = rnd.uniform(0, 7200) if i % 2 else rnd.uniform(0, 259200)
+            admitted = max(0.0, created - rnd.uniform(0, 600)) if rnd.random() < 0.8 else None
+            active = max(0.0, admitted - rnd.uniform(0, 900)) if admitted is not None and rnd.random() < 0.7 else None
+            if admitted is None and rnd.random() < 0.05:
+                active = max(0.0, created - 30)   # a legacy row: active_at without admitted_at
+            hold = "placement_lost" if state == "ADMITTED" and i % 3 == 0 else None
+            c.execute(
+                "INSERT INTO lease (idem_key,node_id,req_cpu,req_mem_mb,state,ttl_seconds,expires_at,queue_deadline,"
+                " created_at,admitted_at,active_at,hold_reason) VALUES (%s,'N',1,512,%s,900,"
+                " now()+interval '900 seconds', now()+interval '3600 seconds', now() - make_interval(secs => %s),"
+                " now() - make_interval(secs => %s), now() - make_interval(secs => %s), %s)",
+                (f"hist-{i}", state, created, admitted, active, hold))
+        c.commit()
+
+
 def main() -> int:
     results: list[bool] = []
 
@@ -108,6 +162,27 @@ def main() -> int:
         st = inventory.fleet_stats(c)
     check("fleet_queue_depth_reflects_pending", st["queue_depth"] == 1, f"queue_depth={st['queue_depth']}")
     check("fleet_oldest_pending_age_present", st["oldest_pending_age_seconds"] is not None, f"{st}")
+
+    # F. the per-window rewrite answers exactly what the old single pass did, on a mixed history (every state,
+    #    in- and out-of-window timestamps, NULLs, a legacy row with active_at but no admitted_at, held leases).
+    seed_history()
+    for win in (1, 60, 100_000):
+        with connect() as c:   # one transaction: both queries see the same now()
+            new = c.execute(inventory._FLEET_STATS, {"win": win}).fetchone()[:7]
+            old = c.execute(_SINGLE_PASS, {"win": win}).fetchone()
+        same = [_norm(a) for a in new] == [_norm(b) for b in old]
+        check(f"per_window_matches_single_pass_win{win}", same, f"new={new} old={old}")
+
+    # G. the plan reads both windows through the partial indexes (seq scans off, so a usable index is preferred
+    #    on this small table; an index the predicate cannot use would leave a seq scan and fail this).
+    with connect() as c:
+        c.execute("SET LOCAL enable_seqscan = off")
+        plan = "\n".join(r[0] for r in c.execute("EXPLAIN " + inventory._FLEET_STATS.replace("%(win)s", "60")))
+    # Each window must be an Index Cond on its index, so the scan is bounded to the window (a non-sargable rewrite
+    # would still name the index, as a full scan of it with a Filter).
+    for index, column in (("lease_admitted_at", "admitted_at"), ("lease_active_at", "active_at")):
+        check(f"plan_bounds_the_window_with_{index}",
+              index in plan and f"Index Cond: ({column} >=" in plan, "" if index in plan else plan)
 
     n = len(results)
     ok = all(results)

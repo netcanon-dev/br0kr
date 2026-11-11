@@ -46,6 +46,8 @@ never doubles or splits an alert.
 `/healthz` and `/readyz`. The gateway serves `/metrics` on a separate port, `BR0KR_GATEWAY_METRICS_PORT` (default
 `9091`, `0` turns it off), never on its MCP port `8080`: Caddy and the tunnel route `8080` to the internet. Both are
 unauthenticated plain HTTP that carry counts and durations only ([SECURITY.md](../../SECURITY.md) C3 (c2)).
+The daemon's ledger-wide series (leases by state, the fleet SLOs, the ledger's replication posture) come from one
+read it repeats at most every 10 s, so they can be that much behind the ledger.
 
 | metric | from | means |
 |---|---|---|

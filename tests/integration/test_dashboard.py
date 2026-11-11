@@ -95,11 +95,22 @@ _OVERVIEW = {
 }
 
 
+_FLEET = {"queue_depth": 0, "window_minutes": 60}
+
+
+def _overview_answer() -> dict:
+    """What /api/overview answers over `canned`: the overview plus its fleet and ledger strip blocks (PERF-03)."""
+    return {**_OVERVIEW, "fleet": _FLEET,
+            "ledger": dashboard.ledgerhealth.as_dict(dashboard.ledgerhealth.UNREADABLE)}
+
+
 @pytest.fixture
 def canned(monkeypatch):
     """Patch the inventory reads in their HOME module so the dispatch lambdas (which resolve
     inventory.<fn> at call time) return canned data — no DB. Returns the overview the page should get."""
     monkeypatch.setattr(inventory, "overview", lambda c, **k: _OVERVIEW)
+    monkeypatch.setattr(inventory, "fleet_stats", lambda c, **k: _FLEET)
+    monkeypatch.setattr(dashboard.ledgerhealth, "read", lambda c: dashboard.ledgerhealth.UNREADABLE)
     monkeypatch.setattr(inventory, "list_nodes", lambda c: _OVERVIEW["nodes"])
     monkeypatch.setattr(inventory, "list_clusters", lambda c: _OVERVIEW["clusters"])
     monkeypatch.setattr(inventory, "list_storage", lambda c: _OVERVIEW["storage"])
@@ -135,7 +146,7 @@ def test_page_and_overview_render(canned):
         code, body = _get(port, "/")
         assert code == 200 and body.startswith("<!doctype html>")
         code, body = _get(port, "/api/overview")
-        assert code == 200 and json.loads(body) == _OVERVIEW
+        assert code == 200 and json.loads(body) == _overview_answer()
 
 
 def test_each_api_endpoint_returns_its_resource(canned):
@@ -293,7 +304,7 @@ def test_reads_require_the_bearer_when_a_read_token_is_set(canned):
         assert _get(port, "/api/overview")[0] == 401                     # no bearer
         assert _get(port, "/api/overview", token="nope")[0] == 401       # wrong bearer
         code, body = _get(port, "/api/overview", token="rt")
-        assert code == 200 and json.loads(body) == _OVERVIEW
+        assert code == 200 and json.loads(body) == _overview_answer()
 
 
 def test_operator_token_also_satisfies_read_auth(canned):

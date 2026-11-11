@@ -14,7 +14,7 @@ import logging
 import pytest
 
 from br0kr import daemon as daemon_mod
-from br0kr import leader, lease, nodes, observability, placement, reaper, reconciler, sweeper
+from br0kr import leader, lease, ledgerhealth, nodes, observability, placement, reaper, reconciler, sweeper
 from br0kr.lease import AdmittedLease
 
 pytestmark = pytest.mark.integration
@@ -985,6 +985,12 @@ class _ScrapeConn:
     def fetchone(self):
         return (self._pinned,)
 
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
     def close(self):
         pass
 
@@ -1045,12 +1051,14 @@ def test_scrape_ledger_returns_counts_or_marks_unreachable(wired):
     ledger_reachable 0 rather than the scrape crashing. Guards the probe propagating an exception onto the
     health thread, and the pinned gauge losing its count."""
     d = _daemon()
+    d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
     d._connect = lambda: _ScrapeConn([("ACTIVE", 3), ("ADMITTED", 1)], pinned=2)
     assert d._scrape_ledger() == (True, {"ACTIVE": 3, "ADMITTED": 1, observability.PINNED_KEY: 2})
 
     def boom():
         raise RuntimeError("ledger down")
     d._connect = boom
+    d._ledger_snap = None   # the snapshot is cached for METRICS_SNAPSHOT_TTL_S; force the next read
     assert d._scrape_ledger() == (False, {})
 
 
@@ -1752,8 +1760,8 @@ def test_publish_health_renders_every_ticksummary_field_to_metrics():
 
 
 def test_ledger_replication_scrape_is_leader_only_and_degrades_to_unknown():
-    """`_scrape_ledger_replication` returns {} on a standby and the UNREADABLE shape when it cannot
-    connect — never a partial or absent posture.
+    """The snapshot's replication posture (`_ledger_snapshot().repl`, what /metrics renders) is {} on a standby
+    and the UNREADABLE shape when it cannot connect — never a partial or absent posture.
 
     Both halves are load-bearing contracts the daemon's own docstring makes, and both shipped unpinned
     until review caught it. (1) The gauges are LEDGER-WIDE, so a standby emitting them would double-count
@@ -1765,13 +1773,180 @@ def test_ledger_replication_scrape_is_leader_only_and_degrades_to_unknown():
     d = _daemon()
 
     d._health = observability.HealthState(role=observability.ROLE_STANDBY, leader=False)
-    assert d._scrape_ledger_replication() == {}
+    assert d._ledger_snapshot().repl == {}
 
     def _boom():
         raise RuntimeError("ledger unreachable")
 
     d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
     d._connect = _boom
-    posture = d._scrape_ledger_replication()
+    posture = d._ledger_snapshot().repl
     assert posture["readable"] is False
     assert posture["configured"] is False        # never a confident zero-standbys claim
+
+
+def test_metrics_read_the_ledger_once_per_snapshot_and_readyz_only_probes(wired):
+    """Through the daemon's real health server: two /metrics scrapes in a row open ONE ledger connection (the
+    snapshot serves both, and each scrape renders one snapshot); once the snapshot is older than
+    METRICS_SNAPSHOT_TTL_S the next scrape reads again; the replication posture is rendered (the daemon wires
+    the one-read get_scrape); /readyz opens its own connection and runs only SELECT 1;
+    and a standby's snapshot is a SELECT 1 too, emitting no leases-by-state. Guards review PERF-03's finding,
+    where every scrape opened up to three connections and scanned the whole lease table, /readyz ran the same
+    scan, and a standby scanned for series it never emits."""
+    import dataclasses
+    import socket
+    import urllib.request
+
+    opened: list[int] = []
+    sqls: list[str] = []
+
+    class _Conn(_ScrapeConn):
+        def execute(self, sql, *a):
+            sqls.append(" ".join(sql.split()))
+            return self
+
+    def connect():
+        opened.append(1)
+        return _Conn([("ACTIVE", 2)], pinned=1)
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    d = _daemon(health_host="127.0.0.1", health_port=port)
+    d._connect = connect
+    d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
+    httpd = d._start_health_server()
+
+    def get(path: str) -> str:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+            return r.read().decode()
+
+    try:
+        first = get("/metrics")
+        get("/metrics")
+        assert len(opened) == 1
+        assert 'br0kr_leases{state="ACTIVE"} 2' in first and "br0kr_leases_pinned 1" in first
+        # The posture leg reaches /metrics only through the daemon's get_scrape wiring (the fake makes the read
+        # fail, so the series is present at 0): without that wiring /metrics falls back to get_ledger alone and
+        # every fleet-SLO and br0kr_ledger_* series is gone.
+        assert "br0kr_ledger_replication_readable 0" in first
+        d._ledger_snap = dataclasses.replace(
+            d._ledger_snap, taken_at=d._ledger_snap.taken_at - daemon_mod.METRICS_SNAPSHOT_TTL_S)
+        get("/metrics")
+        assert len(opened) == 2
+        n = len(sqls)
+        get("/readyz")
+        assert len(opened) == 3 and sqls[n:] == ["SELECT 1"]
+        d._health = observability.HealthState(role=observability.ROLE_STANDBY, leader=False)
+        n = len(sqls)
+        standby = get("/metrics")
+        assert len(opened) == 4 and sqls[n:] == ["SELECT 1"]
+        assert "br0kr_ledger_reachable 1" in standby and "br0kr_leases{" not in standby
+    finally:
+        httpd.shutdown()
+
+
+def test_a_leader_snapshot_renders_slos_and_replication_from_one_connection(wired, monkeypatch):
+    """A leader's snapshot reads leases-by-state, the fleet SLOs and the replication posture on ONE connection,
+    and /metrics renders all three (queue age, ledger replication readable); when the leases-by-state read fails,
+    the ledger reads unreachable but the SLO and posture reads still run and render. Guards a snapshot that drops
+    a leg (no SLO gauges, so Br0krQueueOldestAgeHigh can never fire, or a posture stuck UNREADABLE so
+    Br0krLedgerPostureUnknown always fires), the legs reading on different connections, and one failed read
+    taking the others with it."""
+    seen: list[object] = []
+
+    def fleet_stats(conn):
+        seen.append(("slo", conn))
+        return {"oldest_pending_age_seconds": 12.5}
+
+    def read(conn):
+        seen.append(("repl", conn))
+        return ledgerhealth.LedgerReplication(readable=True, reason="ok")
+
+    monkeypatch.setattr(daemon_mod.inventory, "fleet_stats", fleet_stats)
+    monkeypatch.setattr(daemon_mod.ledgerhealth, "read", read)
+    conn = _ScrapeConn([("ACTIVE", 1)])
+    opened: list[int] = []
+
+    def connect():
+        opened.append(1)
+        return conn
+
+    d = _daemon()
+    d._connect = connect
+    d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
+    ok, counts, slo, repl = d._scrape(True)
+    body = observability.render_metrics(d._health, ok, counts, 0.0, slo, repl)
+    assert len(opened) == 1 and seen == [("slo", conn), ("repl", conn)]
+    assert "br0kr_ledger_reachable 1" in body and 'br0kr_leases{state="ACTIVE"} 1' in body
+    assert "br0kr_queue_oldest_age_seconds 12.5" in body and "br0kr_ledger_replication_readable 1" in body
+
+    class _NoCounts(_ScrapeConn):
+        def execute(self, sql, *a):
+            if "GROUP BY" in sql:
+                raise RuntimeError("canceling statement due to lock timeout")
+            return self
+
+    seen.clear()
+    conn = _NoCounts([])
+    d._ledger_snap = None
+    ok, counts, slo, repl = d._scrape(True)
+    assert (ok, counts) == (False, {}) and [what for what, _ in seen] == ["slo", "repl"]
+    assert slo == {"oldest_pending_age_seconds": 12.5} and repl["readable"] is True
+
+
+def test_concurrent_scrapes_share_one_slow_read(wired, monkeypatch):
+    """Scrapes arriving while a snapshot read is in flight wait for it and share it, ONE connection, even when the
+    read outlasts the TTL: the snapshot is stamped when the read finishes, so it lands fresh, and a scrape right
+    after is served from it too. The read runs on a fake clock that it advances past the TTL, so the passing path
+    has no timing margin. Guards a missing lock (each waiter opens its own connection) and a start-of-read stamp,
+    under which a read as slow as the TTL (a 10 s connect timeout) lands stale and every queued scrape reads again
+    in turn (review PERF-03 round 1, M1)."""
+    import threading
+    import time as _time
+
+    clock = [1000.0]
+
+    class _Clock:
+        def __getattr__(self, name):
+            return getattr(_time, name)
+
+        @staticmethod
+        def monotonic() -> float:
+            return clock[0]
+
+    monkeypatch.setattr(daemon_mod, "time", _Clock())
+    release = threading.Event()
+    opened: list[int] = []
+
+    def slow_connect():
+        opened.append(1)
+        release.wait(10)
+        clock[0] += daemon_mod.METRICS_SNAPSHOT_TTL_S + 1   # this read outlasts the TTL
+        return _ScrapeConn([("ACTIVE", 1)])
+
+    d = _daemon()
+    d._connect = slow_connect
+    d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
+    got: list[tuple] = []
+
+    def scrape() -> None:
+        got.append(d._scrape(True))
+
+    first = threading.Thread(target=scrape)
+    first.start()
+    for _ in range(500):          # wait until the first read is in flight, holding the lock
+        if opened:
+            break
+        _time.sleep(0.01)
+    others = [threading.Thread(target=scrape) for _ in range(3)]
+    for t in others:
+        t.start()
+    _time.sleep(0.2)              # room for a lock-less snapshot to open more connections (the mutant this guards)
+    assert len(opened) == 1
+    release.set()
+    for t in (first, *others):
+        t.join(10)
+    assert len(opened) == 1 and len(got) == 4 and all(g[0] is True for g in got)
+    d._scrape(True)               # a scrape right after the slow read is served from it
+    assert len(opened) == 1

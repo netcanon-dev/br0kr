@@ -453,7 +453,11 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   reconciles nothing; a standby is alive-but-not-ready, so with `--scale daemon=2` exactly one is ready), and
   **`/metrics`** Prometheus (process/leader gauges, last-tick age, `br0kr_consecutive_tick_failures`, the
   latest tick's provision/reap/sweep counts, cumulative `*_total`, `br0kr_leases{state="…"}`, the loop's
-  `br0kr_last_progress_age_seconds`, and its PVE call timings `br0kr_pve_request_seconds`). The gateway has its own **`/healthz`** (a fast ledger `SELECT 1` →
+  `br0kr_last_progress_age_seconds`, and its PVE call timings `br0kr_pve_request_seconds`). Its ledger-wide
+  series come from one read the daemon repeats at most every 10 s, however often and by however many servers it
+  is scraped, and `/readyz` checks the ledger with a `SELECT 1` (`br0kr_ledger_reachable` instead says whether
+  that read of the lease table worked, so a ledger that answers but cannot serve `lease` is ready with it at 0).
+  The gateway has its own **`/healthz`** (a fast ledger `SELECT 1` →
   200/503) and serves its **`/metrics`** (`br0kr_admit_total{tool,outcome}`, the admission verdicts) on a
   separate port, `BR0KR_GATEWAY_METRICS_PORT` (default `9091`, `0` = off), never on `8080`, which Caddy and the
   tunnel route to the internet. Both services carry a Compose `healthcheck` — but it probes **`/healthz`** only,

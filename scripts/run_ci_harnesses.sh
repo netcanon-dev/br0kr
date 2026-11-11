@@ -20,7 +20,7 @@ PY="${PYTHON:-python3}"
 : "${PGHOST:?set PGHOST (and PGPORT/PGUSER/PGPASSWORD) to a throwaway Postgres server}"
 
 # The CI set. Each entry is a scripts/harness_<name>.py whose EXIT CODE is the verdict (0 = GO).
-HARNESSES=(admission queue vmid_race lease migrate_lease multidisk_admit template_seed gateway)
+HARNESSES=(admission queue vmid_race lease migrate_lease multidisk_admit template_seed gateway slo)
 # Per-harness wall-clock cap, so a hung harness becomes a NO-GO line with the summary intact rather
 # than a job killed by the CI timeout. The slowest (lease) takes under 3 minutes on a 4-vCPU host.
 PER_HARNESS_TIMEOUT="${PER_HARNESS_TIMEOUT:-420}"

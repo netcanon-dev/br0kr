@@ -163,3 +163,52 @@ def test_a_stalled_loop_fails_liveness():
         code, body = _get(port, "/healthz")
         assert code == 503 and json.loads(body)["status"] == "unhealthy"
         assert json.loads(body)["reason"].startswith("stalled")
+
+
+def test_readyz_asks_the_cheap_probe_not_the_metrics_read_when_one_is_given():
+    """With a `probe_ledger`, /readyz takes ledger reachability from it alone and never calls `get_ledger` (the
+    metrics read), and a False probe reads not_ready / ledger_unreachable. Guards readiness running the
+    leases-by-state scan on every probe (review PERF-03)."""
+    calls: list[str] = []
+
+    def metrics_read() -> observability.LedgerProbe:
+        calls.append("metrics")
+        return True, {}
+
+    def probe() -> bool:
+        calls.append("probe")
+        return False
+
+    httpd = observability.start_health_server(
+        "127.0.0.1", 0, get_state=lambda: _leader(age=2.0), get_ledger=metrics_read, probe_ledger=probe,
+        get_progress=lambda: 998.0, stall_after=180.0, clock=lambda: 1000.0)
+    try:
+        code, body = _get(httpd.server_address[1], "/readyz")
+    finally:
+        httpd.shutdown()
+    assert code == 503 and json.loads(body)["reason"] == "ledger_unreachable" and calls == ["probe"]
+
+
+def test_metrics_renders_one_scrape_from_get_scrape_for_the_role_the_handler_saw():
+    """With `get_scrape`, /metrics takes every ledger view from that one call, passing the role it rendered for,
+    and never calls `get_ledger` (so one scrape is one consistent read). Guards a scrape that mixes two reads
+    (counts from one, SLOs from the next), and a provider deciding the role on its own a moment after the
+    handler did (a demoted leader's zero-filled leases)."""
+    leaders: list[bool] = []
+
+    def scrape(leader: bool) -> observability.LedgerScrape:
+        leaders.append(leader)
+        return True, {"ACTIVE": 1}, {"oldest_pending_age_seconds": 5.0}, None
+
+    def metrics_read() -> observability.LedgerProbe:
+        raise AssertionError("get_ledger must not be called when get_scrape is given")
+
+    httpd = observability.start_health_server(
+        "127.0.0.1", 0, get_state=lambda: _leader(age=2.0), get_ledger=metrics_read, get_scrape=scrape,
+        probe_ledger=lambda: True, get_progress=lambda: 998.0, stall_after=180.0, clock=lambda: 1000.0)
+    try:
+        code, body = _get(httpd.server_address[1], "/metrics")
+    finally:
+        httpd.shutdown()
+    assert code == 200 and leaders == [True]
+    assert 'br0kr_leases{state="ACTIVE"} 1' in body and "br0kr_queue_oldest_age_seconds 5.0" in body

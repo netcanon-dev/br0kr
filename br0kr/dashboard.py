@@ -42,7 +42,8 @@ Endpoints:
     GET  /                page (the HTML dashboard; polls /api/overview)
     GET  /assets/<tag>/…  the three vendored UI files (netcanon-ui.css / br0kr.css / theme-picker.js) —
                           open like the page shell; immutable-cached (the <tag> path is the cache-buster)
-    GET  /api/overview    {nodes, clusters, storage, projects, templates, template_instances, leases, queue, migrations}
+    GET  /api/overview    {nodes, clusters, storage, projects, templates, template_instances, leases, queue,
+                          migrations, replications, fleet, ledger}  — a failed strip: null + <key>_error
     GET  /api/nodes …/clusters …/storage …/projects …/templates …/leases …/queue   the per-resource reads
     GET  /api/leases      {leases:[...]}  — the ACTIVE leases holding capacity (drives operator cancel/migrate)
     GET  /api/meta        {actions_enabled, read_auth_required}  — which tokens are configured (the GUI adapts)
@@ -176,7 +177,7 @@ GET_ACCESS: dict[str, str] = {
 # tag → (connection → JSON-able dict). Each references the inventory function at CALL time (not bound at
 # import), so a test that monkeypatches inventory.list_nodes in its home module is seen here.
 _API: dict[str, Callable[[psycopg.Connection[Any]], dict[str, Any]]] = {
-    "overview": lambda c: inventory.overview(c),
+    "overview": lambda c: _overview(c),
     "nodes": lambda c: {"nodes": inventory.list_nodes(c)},
     "clusters": lambda c: {"clusters": inventory.list_clusters(c)},
     "storage": lambda c: {"storage": inventory.list_storage(c)},
@@ -1668,6 +1669,30 @@ def start_dashboard_server(
 
 
 DASHBOARD_POOL_MAX = 8
+
+
+def _overview(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    """The page's one read per poll (review PERF-03): inventory.overview plus the fleet-stat and ledger DR-posture
+    tile strips, which were two more requests (and connections) every 5 s per open tab. Each strip is
+    best-effort: when its read fails, its key is null and `<key>_error` says why, the aborted transaction is
+    rolled back, and the rest of the answer stands, so a failed fleet read marks only its own strip (the page
+    keeps the last tiles under an error line). A slow strip read does delay the whole answer; both are bounded
+    (fleet_stats by the 0050 indexes). GET /api/fleet and /api/ledger still answer for other clients, and for a
+    page from a newer build talking to this one."""
+    data = dict(inventory.overview(conn))
+    strips: tuple[tuple[str, Callable[[psycopg.Connection[Any]], dict[str, Any]]], ...] = (
+        ("fleet", inventory.fleet_stats),
+        ("ledger", lambda c: ledgerhealth.as_dict(ledgerhealth.read(c))))
+    for key, read in strips:
+        try:
+            data[key] = read(conn)
+        except Exception:
+            log.warning("dashboard: the %s strip read failed; the overview carries it as null", key,
+                        exc_info=True, extra={"strip": key})
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            data[key], data[key + "_error"] = None, "query_failed"
+    return data
 
 
 def _return_to(pool: Any) -> Callable[[psycopg.Connection[Any]], None]:

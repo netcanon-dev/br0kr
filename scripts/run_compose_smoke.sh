@@ -158,10 +158,11 @@ check operator_gateway_healthz_ok "$ogh"
 
 # daemon health surface on the internal port 9090 (not host-published; probe from inside the container).
 # /readyz must be 'ready' (the daemon holds the leader lock, its ledger is reachable) and /metrics must carry
-# the leader gauge. Proves /readyz + /metrics + the leases-by-state scrape end to end in the real stack.
+# the leader gauge, with the ledger snapshot's legs: the leases-by-state read (ledger reachable) and the replication
+# posture. Proves /readyz + /metrics + the ledger snapshot end to end in the real stack.
 dr=1
 for _ in $(seq 1 40); do
-  if "${DC[@]}" exec -T daemon python -c 'import sys,json,urllib.request as u; r=json.load(u.urlopen("http://localhost:9090/readyz",timeout=3)); m=u.urlopen("http://localhost:9090/metrics",timeout=3).read().decode(); sys.exit(0 if r["status"]=="ready" and "br0kr_leader 1" in m else 1)' >/dev/null 2>&1; then dr=0; break; fi
+  if "${DC[@]}" exec -T daemon python -c 'import sys,json,urllib.request as u; r=json.load(u.urlopen("http://localhost:9090/readyz",timeout=3)); m=u.urlopen("http://localhost:9090/metrics",timeout=3).read().decode(); sys.exit(0 if r["status"]=="ready" and all(s in m for s in ("br0kr_leader 1","br0kr_ledger_reachable 1","br0kr_ledger_replication_readable 1")) else 1)' >/dev/null 2>&1; then dr=0; break; fi
   sleep 2
 done
 check daemon_ready_and_metrics "$dr"

@@ -1673,9 +1673,10 @@ function cancelSelected(){
   }, true);
 }
 // ── Fleet admission-SLO tile strip (Capacity tab): surfaces the MCP `fleet_stats` read — the current queue
-//    depth + admit-wait/provision-latency percentiles — via GET /api/fleet. A null percentile means NO SAMPLES
-//    in the window (a quiet fleet), rendered as an em-dash + muted, NEVER as 0 (which would read as "instant").
-//    Best-effort + independent of the /api/overview poll, so a fleet blip never disturbs the rest of the page. ──
+//    depth + admit-wait/provision-latency percentiles — from the fleet block of /api/overview. A null percentile
+//    means NO SAMPLES in the window (a quiet fleet), rendered as an em-dash + muted, NEVER as 0 (which would read
+//    as "instant").
+//    Best-effort: a failed fleet read marks this strip only, never the rest of the page. ──
 function renderFleet(f){
   const el = $('fleet'); if(!el) return;
   if(!f){ el.innerHTML = '<div class="empty">no fleet data</div>'; return; }
@@ -1693,9 +1694,9 @@ function renderFleet(f){
         [['p95', fsec(f.provision_latency_p95_seconds)], ['window', win+'m']]);
   // Placement/reachability health (0031-0033): quarantined pairs is the ALARM (red when >0 — a failed post-clone
   // assertion fenced a (storage,node) pair off, so nothing may clone onto it); the rest are backlog/health counts
-  // where 0 is healthy and is EMITTED not hidden (unlike a null latency percentile). From the same /api/fleet read.
+  // where 0 is healthy and is EMITTED not hidden (unlike a null latency percentile). From the same fleet block.
   // The ||0 is defensive only: a pre-0031 ledger doesn't return partial keys — fleet_stats' SQL references
-  // storage_node/template_instance, so it 503s the WHOLE read and loadFleet keeps the last strip under an error
+  // storage_node/template_instance, so the WHOLE block fails and the strip keeps its last tiles under an error
   // line (never a partial payload). Warn-coloured when >0 for the operator-actionable rows.
   const qpairs = f.quarantined_reachability_pairs||0;
   const prow = (label, n, warn) => {
@@ -1721,12 +1722,34 @@ function stripResult(id, what, r, render){
   const since = STRIP_AT[id] ? '; the tiles below are from ' + STRIP_AT[id].toLocaleTimeString() : '';
   note.innerHTML = loadErr(what, r, since);
 }
-async function loadFleet(){
-  const r = await fetchJSON('/api/fleet');   // best-effort, independent of the /api/overview poll
-  if(!paused) stripResult('fleet', 'fleet stats', r, f => { FLEET = f; renderFleet(f); renderAttention(); });
+// The fleet and ledger strips ride in the /api/overview answer (review PERF-03: one request per poll, not three).
+// Each is best-effort: the server sends the block, or null and a _error key naming why, so a failed read marks
+// only its own strip and keeps the last tiles under an error line. A server from before PERF-03 sends no block,
+// so the page reads that strip on its own, as it used to. A block this page cannot draw marks its own strip too,
+// and never stops the rest of the page from rendering.
+// A strip's last good block (FLEET, LEDGER) is kept only once drawn, so the attention line never alarms from a
+// block this page could not draw.
+const STRIPS = [['fleet', 'fleet stats', f => { renderFleet(f); FLEET = f; }],
+                ['ledger', 'the ledger DR posture', l => { renderLedger(l); LEDGER = l; }]];
+const stripBlock = (d, key) => d[key] ? {ok:true, status:200, data:d[key]}
+  : {ok:false, status:503, data:{error:d[key + '_error'] || 'query_failed'}};
+async function renderStrips(d){
+  for(const [key, what, draw] of STRIPS){
+    const r = (d && key in d) ? stripBlock(d, key) : await fetchJSON('/api/' + key);
+    if(paused) return;
+    try{ stripResult(key, what, r, draw); }
+    catch(e){
+      const note = $(key + '-err');
+      if(note) note.innerHTML = loadErr(what, {status:200,
+        data:{error:'page script error: ' + ((e && e.message) || e)}});
+      console.error('br0kr dashboard: could not draw ' + what, e);
+    }
+  }
+  renderAttention();
 }
-// ── Ledger DR-posture tile strip (Capacity tab): surfaces GET /api/ledger — br0kr/ledgerhealth.py's read of the
-//    ledger's OWN Postgres replication state (slots + connected standbys). NOTE this is not the same subject as
+// ── Ledger DR-posture tile strip (Capacity tab): surfaces the ledger block of /api/overview —
+//    br0kr/ledgerhealth.py's read of the ledger's OWN Postgres replication state (slots + connected standbys).
+//    NOTE this is not the same subject as
 //    the "Replications" panel, which is TEMPLATE replication; this is WAL replication of the ledger itself.
 //    It exists because a dead hot standby degraded NOTHING for 45 hours: the daemon was leader, the ledger was
 //    writable through the surviving multi-host PGCONN host, and every other tile stayed green while the DR
@@ -1786,18 +1809,13 @@ function renderLedger(d){
         + row('retained WAL', fbytes(s.retained_wal_bytes), bigLag(s.retained_wal_bytes))
         + `</div>`).join('');
 }
-async function loadLedger(){
-  const r = await fetchJSON('/api/ledger');  // best-effort, exactly like loadFleet
-  if(!paused) stripResult('ledger', 'the ledger DR posture', r,
-                          l => { LEDGER = l; renderLedger(l); renderAttention(); });
-}
 // ── the "needs attention" strip (above every tab) + tab badges. The signals an operator must act on are spread
 //    over three tabs, some below the fold; this one line summarises them from data already in hand (the overview,
 //    the last good fleet and ledger reads, and for an unlocked operator the build list and settings) and renders
 //    NOTHING when all is well. Each item jumps to its section. A failed build or replication stays listed until
 //    dismissed in this browser (builds have no retention prune, so counting every FAILED row would keep the strip
 //    red forever after the first failure, and a signal that never clears is ignored); a newer failure returns. ──
-let FLEET = null, LEDGER = null;   // the last good /api/fleet and /api/ledger reads
+let FLEET = null, LEDGER = null;   // the last good fleet and ledger blocks
 const ACK = (() => {   // per-browser dismissals {build|replication: newest dismissed updated_at, epoch ms}
   try{ return JSON.parse(localStorage.getItem('br0kr_ack') || '{}') || {}; }catch(e){ return {}; }
 })();
@@ -1982,7 +2000,7 @@ function render(d){
   TICK++;
   // header "acting as <name>" (0026): the operator's own identity, from the token check (no read per poll)
   $('whoami').textContent = (canEdit && WHO.actor) ? 'acting as ' + WHO.actor : '';
-  renderAttention();   // the strip + tab badges; the async loaders above re-render it when they land
+  renderAttention();   // the strip + tab badges; the operator loaders re-render it when they land
 }
 // ── act-as-project provisioning + lease lifecycle: create a VM as a CHOSEN project (debiting ITS quota via
 //    the same admission path an agent's request_lease/schedule_lease uses, br0kr/actas.py), watch it boot,
@@ -2207,10 +2225,9 @@ async function poll(){
       return;
     }
     delay = REFRESH_MS;
-    loadFleet();                              // the tile strips, best-effort and independent, but only once the
-    loadLedger();                             // overview answers: a down or refusing server costs one request
     if(!paused){                              // an edit may have opened during the fetch
       render(r.data);
+      renderStrips(r.data).catch(e => console.error('br0kr dashboard: the tile strips failed', e));
       LAST_OK = new Date();
       if(STALE) console.info('br0kr dashboard: overview refresh recovered');
       STALE = false;

@@ -110,13 +110,13 @@ const OVERVIEW = {
   storage: [], projects: [], leases: [], queue: { depth: 0, waiting: [], truncated: false, shown: 0 },
   templates: [{ template_id: 't1', cluster_id: 'c1', vmid: 9000, name: 'debian', public: false }],
   template_instances: [], replications: [], migrations: [],
+  fleet: { queue_depth: 0, window_minutes: 60 },
+  ledger: { readable: true, configured: false, is_primary: true },
 };
 function healthy() {
   return {
     '/api/meta': { status: 200, body: { actions_enabled: true, read_auth_required: false } },
     '/api/overview': { status: 200, body: OVERVIEW },
-    '/api/fleet': { status: 200, body: { queue_depth: 0, window_minutes: 60 } },
-    '/api/ledger': { status: 200, body: { readable: true, configured: false, is_primary: true } },
     '/api/tokens': { status: 200, body: { tokens: [] } },
     '/api/operators': { status: 200, body: { operators: [] } },
     '/api/whoami': { status: 200, body: { verdict: 'ok', actor: 'tester' } },
@@ -220,16 +220,34 @@ const SCENARIOS = {
   async strip_fails_after_success() {
     await boot({});
     const tiles = $('fleet').innerHTML;
-    routes['/api/fleet'] = fail(503, 'query_failed');
-    await run('loadFleet()'); await settle();
+    routes['/api/overview'] = ok({ ...OVERVIEW, fleet: null, fleet_error: 'query_failed' });
+    await run('poll()'); await settle();
     const failed = { tilesKept: tiles !== '' && $('fleet').innerHTML === tiles, note: $('fleet-err').innerHTML };
-    routes['/api/fleet'] = healthy()['/api/fleet'];
-    await run('loadFleet()'); await settle();
+    routes['/api/overview'] = healthy()['/api/overview'];
+    await run('poll()'); await settle();
     return { ...failed, noteAfter: $('fleet-err').innerHTML };
   },
   async strip_first_load_fails() {
-    await boot({ routes: { '/api/ledger': fail(401, 'unauthorized') } });
+    await boot({ routes: { '/api/overview': ok({ ...OVERVIEW, ledger: null, ledger_error: 'query_failed' }) } });
     return { tiles: $('ledger').innerHTML, note: $('ledger-err').innerHTML };
+  },
+  async strip_render_throws() {
+    await boot({ routes: { '/api/overview': ok({ ...OVERVIEW,
+      ledger: { readable: true, configured: true, is_primary: true, slots: 5 } }) } });
+    return { status: $('status').textContent, note: $('ledger-err').innerHTML, fleet: $('fleet').innerHTML,
+      clusters: $('clusters').innerHTML };
+  },
+  async strips_from_an_older_server() {
+    const { fleet, ledger, ...older } = OVERVIEW;
+    await boot({ routes: { '/api/overview': ok(older), '/api/fleet': ok(fleet), '/api/ledger': ok(ledger) } });
+    return { paths: pathsSince(0), fleet: $('fleet').innerHTML, ledger: $('ledger').innerHTML,
+      notes: $('fleet-err').innerHTML + $('ledger-err').innerHTML };
+  },
+  async one_request_per_poll() {
+    await boot({});
+    const n = calls.length;
+    await advance(pollTimer().ms);
+    return { paths: pathsSince(n), fleet: $('fleet').innerHTML, ledger: $('ledger').innerHTML };
   },
   async action_refused() {
     await boot({ token: 't', routes: {
@@ -302,10 +320,10 @@ const SCENARIOS = {
           mechanism: 'clone_shared', size_gb: 10, job_state: 'FAILED', project_id: null, error: 'boom',
           updated_at: '2026-11-10T10:00:00+00:00' }],
         migrations: [{ migration_id: 4, lease_id: 5, state: 'COPYING', source_node: 'n1', target_node: 'n2',
-          reason: null, updated_at: '2026-11-10T10:00:00+00:00' }] }),
-      '/api/fleet': ok({ queue_depth: 2, window_minutes: 60, quarantined_reachability_pairs: 1, held_leases: 2 }),
-      '/api/ledger': ok({ readable: true, configured: true, is_primary: true, standbys_streaming: 0,
-        standbys_total: 0, slots_inactive: 1, slots_lost: 1, slots: [] }),
+          reason: null, updated_at: '2026-11-10T10:00:00+00:00' }],
+        fleet: { queue_depth: 2, window_minutes: 60, quarantined_reachability_pairs: 1, held_leases: 2 },
+        ledger: { readable: true, configured: true, is_primary: true, standbys_streaming: 0,
+          standbys_total: 0, slots_inactive: 1, slots_lost: 1, slots: [] } }),
       '/api/settings': ok({ knobs: [], schema_version: 48, reload_pending: true }) } });
     return strip();
   },

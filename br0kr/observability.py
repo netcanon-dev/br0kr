@@ -58,6 +58,8 @@ ROLE_LEADER = "leader"
 
 # A ledger scrape result: (reachable, counts-by-state). Returned by the daemon's injected callback.
 LedgerProbe = tuple[bool, dict[str, int]]
+# Every ledger view /metrics renders, from ONE read: (reachable, leases-by-state, fleet SLOs, replication posture).
+LedgerScrape = tuple[bool, dict[str, int], dict[str, Any] | None, dict[str, Any] | None]
 # The one count in a scrape that is not a state: live PINNED leases (0049), rendered as br0kr_leases_pinned. Lease
 # states are upper-case enum labels, so this lower-case key can't collide with one.
 PINNED_KEY = "pinned"
@@ -180,7 +182,7 @@ def render_metrics(state: HealthState, ledger_ok: bool, counts: dict[str, int], 
     metric("br0kr_leader", int(state.leader),
            "1 if this instance holds the reconciler leader lock (is the active writer).", "gauge")
     metric("br0kr_ledger_reachable", int(ledger_ok),
-           "1 if the ledger answered the leases-by-state scrape query.", "gauge")
+           "1 if the ledger answered the latest read behind these metrics.", "gauge")
     metric("br0kr_served_nodes", state.served_nodes,
            "Nodes this daemon currently serves (the live node registry size).", "gauge")
     metric("br0kr_ticks_total", state.ticks,
@@ -344,16 +346,21 @@ def make_handler(
     get_repl: Callable[[], dict[str, Any]] | None = None,
     max_tick_failures: int = 0,
     families: Iterable[metrics.Family] = (),
+    probe_ledger: Callable[[], bool] | None = None,
+    get_scrape: Callable[[bool], LedgerScrape] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build the request handler class over injected providers: `get_state()` returns the current
     HealthState (an atomic read of the daemon's published snapshot), `get_progress()` is a LIVE read of
     the loop's last-progress monotonic stamp (updated mid-tick, so liveness sees a long-but-healthy tick
-    as alive), `get_ledger()` probes the ledger (reachable + leases-by-state) on a fresh connection,
-    `clock()` is the monotonic time source. `get_slo()` (optional) returns the fleet admission-SLO dict for
-    /metrics on a fresh connection — omitted → no SLO gauges. `max_tick_failures` (>0) is the consecutive
-    tick-failure streak past which a leader reads not_ready on /readyz. `families` are process-local
-    `br0kr.metrics` families appended to every /metrics. Only /readyz and /metrics call
-    `get_ledger()` (and /metrics `get_slo()`); /healthz never does (liveness is ledger-independent)."""
+    as alive), `get_ledger()` returns (reachable, leases-by-state), `clock()` is the monotonic time source.
+    `get_slo()` / `get_repl()` (optional) return the fleet admission-SLO dict and the ledger's replication posture
+    for /metrics — omitted → no such gauges. `get_scrape(leader)` (optional) returns all four ledger views from
+    ONE read for the role the handler saw: given, /metrics uses it alone, so a scrape renders one consistent read
+    (the daemon's cached snapshot, review PERF-03); without it /metrics calls `get_ledger()`, `get_slo()` and
+    `get_repl()`. `max_tick_failures` (>0) is the consecutive tick-failure streak past which a leader reads
+    not_ready on /readyz. `families` are process-local `br0kr.metrics` families appended to every /metrics.
+    /readyz asks `probe_ledger()` (a cheap reachability check) when one is given, else `get_ledger()`; /healthz
+    never touches the ledger (liveness is ledger-independent)."""
     families = tuple(families)
 
     class _Handler(BaseHTTPRequestHandler):
@@ -371,15 +378,18 @@ def make_handler(
                 self._json(200 if ok else 503,
                            {"status": "ok" if ok else "unhealthy", "role": state.role, "reason": reason})
             elif path == "/readyz":
-                ledger_ok, _counts = get_ledger()
+                ledger_ok = probe_ledger() if probe_ledger is not None else get_ledger()[0]
                 ok, reason = readiness(state.role, ledger_ok, get_progress(), now, stall_after,
                                        state.consecutive_tick_failures, max_tick_failures)
                 self._json(200 if ok else 503,
                            {"status": "ready" if ok else "not_ready", "role": state.role, "reason": reason})
             elif path == "/metrics":
-                ledger_ok, counts = get_ledger()
-                slo = get_slo() if get_slo is not None else None
-                repl = get_repl() if get_repl is not None else None
+                if get_scrape is not None:
+                    ledger_ok, counts, slo, repl = get_scrape(state.leader)
+                else:
+                    ledger_ok, counts = get_ledger()
+                    slo = get_slo() if get_slo is not None else None
+                    repl = get_repl() if get_repl is not None else None
                 self._text(200, render_metrics(state, ledger_ok, counts, now, slo, repl, families,
                                                progress=get_progress()))
             else:
@@ -414,16 +424,22 @@ def start_health_server(
     get_repl: Callable[[], dict[str, Any]] | None = None,
     max_tick_failures: int = 0,
     families: Iterable[metrics.Family] = (),
+    probe_ledger: Callable[[], bool] | None = None,
+    get_scrape: Callable[[bool], LedgerScrape] | None = None,
 ) -> ThreadingHTTPServer:
     """Start the health/metrics HTTP server on a daemon thread and return it (the caller `shutdown()`s
     it on exit). `ThreadingHTTPServer` + `daemon_threads` so a slow scrape can't block shutdown and the
     thread never outlives the process. Binds `host:port` (0.0.0.0 to be reachable from outside a
-    container). `get_slo` (optional) feeds /metrics the fleet admission-SLO gauges. `max_tick_failures`
+    container). `get_slo` / `get_repl` (optional) feed /metrics the fleet admission-SLO and ledger-posture gauges
+    when no `get_scrape` is given. `max_tick_failures`
     (>0) is the consecutive tick-failure streak past which a leader reads not_ready. `families` (process-local
-    `br0kr.metrics` families) are appended to every /metrics. Raises if the port can't be bound (a misconfig
-    should fail loudly at startup)."""
+    `br0kr.metrics` families) are appended to every /metrics. `probe_ledger` (optional) is /readyz's cheap
+    reachability check (else /readyz uses `get_ledger`); `get_scrape` (optional) gives /metrics every ledger view
+    from one read (see `make_handler`). Raises if the port can't be bound (a misconfig should fail loudly at
+    startup)."""
     handler = make_handler(get_state, get_ledger, get_progress, stall_after, clock=clock, get_slo=get_slo,
-                           get_repl=get_repl, max_tick_failures=max_tick_failures, families=families)
+                           get_repl=get_repl, max_tick_failures=max_tick_failures, families=families,
+                           probe_ledger=probe_ledger, get_scrape=get_scrape)
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, name="br0kr-health", daemon=True)

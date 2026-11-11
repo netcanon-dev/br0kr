@@ -150,7 +150,8 @@ surfaces them two ways:
 
 - **`/metrics`** — leader-only `br0kr_ledger_*` gauges (ledger-wide facts, so only the leader emits
   them, the same no-double-counting rule as leases-by-state).
-- **the dashboard** — a "Ledger — DR posture" tile strip in the Capacity tab, from `GET /api/ledger`.
+- **the dashboard** — a "Ledger — DR posture" tile strip in the Capacity tab, from the `ledger` block of
+  `GET /api/overview` (also served alone as `GET /api/ledger`).
 
 The load-bearing mechanic: **a replication slot outlives the standby that used it.** When the consumer
 dies the slot stays, flips to `active=false`, and the primary starts *pinning WAL* for a consumer that

@@ -838,7 +838,8 @@ not evidence that what we ship is; (b) **`.env`/`.env.standby` are plaintext on
   tunnel send every MCP-port path to the gateway, so a `/metrics` route there would be internet-reachable.
   Compose `expose`s the metrics port only (no host port), and `BR0KR_GATEWAY_METRICS_PORT=0` turns it off.
   The same surface also carries the **ledger's replication posture** (`br0kr/ledgerhealth.py`: the
-  `br0kr_ledger_*` gauges and the dashboard's `GET /api/ledger`) — replication slot NAMES plus lag/retention
+  `br0kr_ledger_*` gauges and the dashboard's `GET /api/ledger`, also the `ledger` block of its
+  `GET /api/overview`, the same read tier) — replication slot NAMES plus lag/retention
   BYTE COUNTS and connected-standby counts. That is DR topology, not a secret: it is derived from
   `pg_replication_slots`/`pg_stat_replication`, carries no DSN, no credential and no tenant data, and a read
   failure is reported as a reason CODE (the exception class) precisely so a driver message carrying connection
@@ -949,10 +950,11 @@ not evidence that what we ship is; (b) **`.env`/`.env.standby` are plaintext on
   now prefix-quotes any cell starting with a spreadsheet formula trigger (`=`/`+`/`-`/`@`/TAB/CR) via
   `_csv_safe`, neutralizing a planted macro that would execute when an operator opens the file (CWE-1236);
   covering-check = `test_audit.py`'s formula-injection assertion.
-  Each `/metrics`, `/readyz` and gateway `/healthz` hit opens a short-lived ledger connection, so an
-  unbounded unauthenticated scrape storm could exhaust the ledger's connections — a further reason to keep
-  the surface network-restricted. The gateway's tool calls and token lookups and the dashboard's `/api/*`
-  reads and writes instead borrow from bounded in-process pools (`db.pool`, at most 8 connections each, review
+  Each daemon `/readyz` and gateway `/healthz` hit opens a short-lived ledger connection (a `SELECT 1`), so an
+  unbounded unauthenticated probe storm could exhaust the ledger's connections — a further reason to keep the
+  surface network-restricted. Daemon `/metrics` scrapes share one ledger read, repeated at most every 10 s
+  however many scrape it (review PERF-03). The gateway's tool calls and token lookups and the dashboard's
+  `/api/*` reads and writes instead borrow from bounded in-process pools (`db.pool`, at most 8 connections each, review
   PERF-02), so a storm there queues for a connection rather than opening more. Still per request: the
   dashboard's named-operator lookup and each denial record (fast-fail, throttled). Set `BR0KR_HEALTH_PORT=0`
   to disable the daemon surface entirely (under the bundled Compose stack the daemon healthcheck reads the

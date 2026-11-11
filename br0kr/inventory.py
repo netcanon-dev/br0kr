@@ -582,12 +582,15 @@ def list_migrations(conn: psycopg.Connection[Any], limit: int = 100) -> list[dic
     return [_migration_row(r) for r in rows]
 
 
-# Fleet-wide admission SLOs from the lease transition timestamps (0019). One pass over `lease`: current
-# queue depth + the oldest waiter's age (from PENDING rows), and admission-latency percentiles over a recent
-# window — queue-wait (created→admitted) and provision latency (admitted→active). Each percentile is an
-# ordered-set aggregate with its OWN FILTER (windowed + NON-NULL), so a NULL timestamp (a row that never
-# reached the state, or predates 0019) is excluded and can't skew the SLO; an empty window yields NULL, not
-# 0. (A big ledger would want an index on admitted_at/active_at; fine at homelab scale — see the harness.)
+# Fleet-wide admission SLOs from the lease transition timestamps (0019): current queue depth + the oldest
+# waiter's age (from PENDING rows, through lease_pending_fifo), and admission-latency percentiles over a recent
+# window — queue-wait (created→admitted) and provision latency (admitted→active). Each part is its own scalar
+# read driven by an index, so the cost follows the queue and the window, not the lease history (review PERF-03:
+# this used to be one pass over the whole table on every dashboard poll and metrics refresh). Each percentile
+# reads only its window through the 0050 partial indexes (lease_admitted_at, lease_active_at) and only NON-NULL
+# timestamps, so a row that never reached the state (or predates 0019) can't skew it; an empty window yields
+# NULL, not 0. scripts/harness_slo.py proves the answer equals the old single pass and that the plan uses both
+# indexes.
 # The active (non-terminal) replication job states, rendered as a SQL IN-list DIRECTLY from
 # replication.LIVE_STATES (the single definition) so the fleet count can never drift from the set the
 # one-active index + request path use — the derive-don't-repeat discipline build.py uses for _CLAIMED_IN.
@@ -595,26 +598,17 @@ _REPL_ACTIVE_IN = "(" + ",".join(f"'{s}'" for s in replication.LIVE_STATES) + ")
 
 _FLEET_STATS = f"""
   SELECT
-    count(*) FILTER (WHERE state = 'PENDING')                                              AS queue_depth,
-    EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE state = 'PENDING')))          AS oldest_pending_age_s,
-    percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at)))
-      FILTER (WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s))
-                                                                                           AS admit_wait_p50,
-    percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at)))
-      FILTER (WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s))
-                                                                                           AS admit_wait_p95,
-    percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at)))
-      FILTER (WHERE active_at IS NOT NULL AND admitted_at IS NOT NULL
-                    AND active_at >= now() - make_interval(mins => %(win)s))               AS provision_p50,
-    percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at)))
-      FILTER (WHERE active_at IS NOT NULL AND admitted_at IS NOT NULL
-                    AND active_at >= now() - make_interval(mins => %(win)s))               AS provision_p95,
-    -- Placement / reachability fleet-health stats (0031-0033). held_leases is same-scan on `lease`; the rest
-    -- are scalar sub-SELECTs over the (small) reachability + instance ledgers (cheap at homelab scale). Each
-    -- surfaces a fail-closed backlog an operator must clear: a held lease waiting on a lost placement, a
-    -- declared pair proven-wrong (quarantined) or never runtime-proven (unverified), an instance the placement
-    -- gate cannot size for headroom, or a cluster node that can reach NO declared pool (cannot host a clone).
-    count(*) FILTER (WHERE state = 'ADMITTED' AND hold_reason IS NOT NULL) AS held_leases,
+    (SELECT count(*) FROM lease WHERE state = 'PENDING')                                   AS queue_depth,
+    (SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) FROM lease WHERE state = 'PENDING')
+                                                                                           AS oldest_pending_age_s,
+    aw.p50 AS admit_wait_p50, aw.p95 AS admit_wait_p95,
+    pv.p50 AS provision_p50, pv.p95 AS provision_p95,
+    -- Placement / reachability fleet-health stats (0031-0033), each a scalar sub-SELECT: held_leases over the live
+    -- leases (lease_node_active), the rest over the (small) reachability + instance ledgers. Each surfaces a
+    -- fail-closed backlog an operator must clear: a held lease waiting on a lost placement, a declared pair
+    -- proven-wrong (quarantined) or never runtime-proven (unverified), an instance the placement gate cannot size
+    -- for headroom, or a cluster node that can reach NO declared pool (cannot host a clone).
+    (SELECT count(*) FROM lease WHERE state = 'ADMITTED' AND hold_reason IS NOT NULL) AS held_leases,
     (SELECT count(*) FROM storage_node WHERE verified_at IS NULL AND quarantined_at IS NULL)
                                                                            AS unverified_reachability_pairs,
     (SELECT count(*) FROM storage_node WHERE quarantined_at IS NOT NULL)   AS quarantined_reachability_pairs,
@@ -635,7 +629,15 @@ _FLEET_STATS = f"""
     (SELECT count(DISTINCT s.id) FROM storage s
        JOIN storage_node sn ON sn.storage_id = s.id
       WHERE s.content_types IS NULL)                                      AS storage_content_undeclared
-  FROM lease
+  FROM (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at))) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at))) AS p95
+          FROM lease
+         WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s)) AS aw,
+       (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at))) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at))) AS p95
+          FROM lease
+         WHERE active_at IS NOT NULL AND admitted_at IS NOT NULL
+           AND active_at >= now() - make_interval(mins => %(win)s)) AS pv
 """
 
 

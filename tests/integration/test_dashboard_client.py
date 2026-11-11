@@ -151,16 +151,43 @@ def test_a_render_crash_is_reported_as_a_page_script_error(served_script: Path) 
 
 
 def test_a_tile_strip_keeps_its_tiles_but_flags_a_failed_read(served_script: Path) -> None:
-    """When /api/fleet fails after a good read, the tiles stay (a blip must not blank them) and the strip's own
-    error line names the reason and the time of the tiles; the next good read clears the line. With no good read
-    at all, the ledger strip shows only the error. Guards the old loader, which returned silently and left the
-    tiles looking current."""
+    """When the overview's fleet block fails after a good read (null, fleet_error), the tiles stay (a blip must
+    not blank them) and the strip's own error line names the reason and the time of the tiles; the next good read
+    clears the line. With no good ledger block at all, the ledger strip shows only the error. Guards the old
+    loader, which returned silently and left the tiles looking current."""
     got = _run(served_script, "strip_fails_after_success")
     assert got["tilesKept"] is True
     assert "could not load fleet stats — query_failed" in got["note"] and "the tiles below are from" in got["note"]
     assert got["noteAfter"] == ""
     first = _run(served_script, "strip_first_load_fails")
-    assert first["tiles"] == "" and "could not load the ledger DR posture — unauthorized" in first["note"]
+    assert first["tiles"] == "" and "could not load the ledger DR posture — query_failed" in first["note"]
+
+
+def test_a_poll_is_one_request_that_also_fills_the_fleet_and_ledger_strips(served_script: Path) -> None:
+    """A poll on a page without an operator token sends exactly one request, /api/overview, and the fleet and
+    ledger tile strips render from the blocks it carries. Guards review PERF-03's finding: every poll was three
+    requests and three ledger connections per open tab (overview, then /api/fleet and /api/ledger)."""
+    got = _run(served_script, "one_request_per_poll")
+    assert got["paths"] == ["/api/overview"]
+    assert got["fleet"] != "" and got["ledger"] != ""
+
+
+def test_a_strip_block_the_page_cannot_draw_marks_only_its_strip(served_script: Path) -> None:
+    """A ledger block the renderer throws on (slots not a list) puts 'page script error' in the ledger strip's
+    own error line, while the overview panels and the fleet strip still render and the header says 'updated'.
+    Guards a strip drawn before or around the overview taking every panel down with it."""
+    got = _run(served_script, "strip_render_throws")
+    assert got["status"].startswith("updated ") and "page script error" in got["note"]
+    assert got["fleet"] != "" and got["clusters"] != ""
+
+
+def test_a_server_from_before_the_strip_blocks_still_fills_the_strips(served_script: Path) -> None:
+    """When the overview carries no fleet or ledger block (a server from before PERF-03, as after a rollback with
+    the tab still open), the page reads /api/fleet and /api/ledger on their own and renders both strips with no
+    error. Guards the strips reading 'query_failed' on every poll against an older server."""
+    got = _run(served_script, "strips_from_an_older_server")
+    assert "/api/fleet" in got["paths"] and "/api/ledger" in got["paths"]
+    assert got["fleet"] != "" and got["ledger"] != "" and got["notes"] == ""
 
 
 def test_a_refused_action_posts_an_error_to_the_status_region(served_script: Path) -> None:
@@ -423,10 +450,11 @@ def test_a_read_token_on_a_read_gated_server_keeps_the_reads(served_script: Path
 
 def test_operator_panels_load_every_third_poll_and_only_for_the_open_tab(served_script: Path) -> None:
     """Unlocked on the Capacity tab, the first poll checks the token once and loads the build list (the attention
-    line needs it on every tab), settings and the audit log once. The next three polls read only overview, fleet
-    and ledger, plus the build list on the third. No agent tokens, operators, grants or sources are read, since
-    their tabs are closed. Switching to Security loads its panels at once. The 'acting as' header comes from the
-    one token check. Guards the old nine reads every 5 seconds per unlocked page."""
+    line needs it on every tab), settings and the audit log once. The next three polls read only the overview
+    (which carries the fleet and ledger strips), plus the build list on the third. No agent tokens, operators,
+    grants or sources are read, since their tabs are closed. Switching to Security loads its panels at once. The
+    'acting as' header comes from the one token check. Guards the old nine reads every 5 seconds per unlocked
+    page."""
     got = _run(served_script, "operator_cadence")
     first, nxt = got["first"], got["next"]
     assert first.count("/api/whoami") == 1 and "/api/template/builds" in first
@@ -434,7 +462,7 @@ def test_operator_panels_load_every_third_poll_and_only_for_the_open_tab(served_
     assert not set(first) & {"/api/tokens", "/api/operators", "/api/template/grants", "/api/template/sources"}
     assert nxt.count("/api/overview") == 3 and nxt.count("/api/template/builds") == 1
     assert not set(nxt) & {"/api/whoami", "/api/tokens", "/api/operators", "/api/template/grants",
-                           "/api/template/sources", "/api/settings", "/api/audit"}
+                           "/api/template/sources", "/api/settings", "/api/audit", "/api/fleet", "/api/ledger"}
     assert {"/api/tokens", "/api/operators"} <= set(got["onSwitch"])
     assert got["whoami"] == "acting as tester"
 

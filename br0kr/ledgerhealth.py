@@ -286,7 +286,8 @@ def read(conn: psycopg.Connection[Any]) -> LedgerReplication:
         return result
     except Exception as exc:                       # a visibility read must NEVER raise into a scrape
         # WARNING, not debug: swallowing this at debug level is precisely how the 45-hour outage
-        # stayed invisible. The operator sees it once per scrape interval at most.
+        # stayed invisible. The operator sees it at most once per daemon metrics snapshot (every 10 s at most)
+        # or dashboard poll.
         log.warning("ledger replication read failed — DR posture is UNKNOWN, not necessarily broken",
                     exc_info=True)
         return LedgerReplication(readable=False, reason=f"{REASON_QUERY_FAILED}:{type(exc).__name__}")

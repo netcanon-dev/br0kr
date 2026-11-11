@@ -55,8 +55,9 @@ def setup() -> dict[str, int]:
 
 
 def scrape_ledger(dsn: str) -> observability.LedgerProbe:
-    """The same query the daemon's _scrape_ledger runs, bound to a given DSN (so case C can point at a
-    bad one). Any error → (False, {}) — a momentarily-unreachable ledger reads as not-reachable."""
+    """The leases-by-state query a leader's metrics snapshot runs (daemon._read_counts), bound to a given DSN
+    (so case C can point at a bad one). Any error → (False, {}) — a momentarily-unreachable ledger reads as
+    not-reachable."""
     try:
         with closing(db.connect(dsn, autocommit=True)) as c:
             rows = c.execute("SELECT state::text, count(*) FROM lease GROUP BY state").fetchall()

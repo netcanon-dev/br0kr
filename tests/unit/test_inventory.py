@@ -433,9 +433,18 @@ class _FSConn:
 def test_fleet_stats_sql_uses_windowed_nonnull_percentiles_for_both_legs():
     """The SLO query computes percentiles for BOTH admission legs (created->admitted and admitted->active)
     with each ordered-set aggregate FILTERed to NON-NULL + the recent window — so a lease that never reached
-    the state (or predates 0019) can't skew the SLO, and an old sample can't. Guards the FILTER being
-    dropped (which would fold NULLs / the whole history into the percentile)."""
+    the state (or predates 0019) can't skew the SLO, and an old sample can't; and each percentile reads only its
+    window (a WHERE over lease the 0050 partial indexes serve), not the whole history in one FILTERed pass.
+    Guards the window or NULL predicate being dropped (which would fold NULLs / the whole history into the
+    percentile), and the query sliding back into a full scan of the lease table per dashboard poll (PERF-03);
+    scripts/harness_slo.py proves the answer matches the old single pass and that the plan uses both indexes."""
     sql = inventory._FLEET_STATS
+    flat = " ".join(sql.split())
+    assert ("FROM lease WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s)"
+            in flat)
+    assert ("FROM lease WHERE active_at IS NOT NULL AND admitted_at IS NOT NULL AND active_at >= now() - "
+            "make_interval(mins => %(win)s)" in flat)
+    assert "FILTER" not in flat
     assert sql.count("percentile_cont") == 4                       # p50 + p95 for each of the two legs
     assert "admitted_at - created_at" in sql and "active_at - admitted_at" in sql
     assert "admitted_at IS NOT NULL" in sql and "active_at IS NOT NULL" in sql

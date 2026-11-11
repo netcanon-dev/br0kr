@@ -54,7 +54,8 @@ it. The harnesses themselves are catalogued in [scripts/README.md](../scripts/RE
   cpu/mem/disk used-vs-total callouts, per-project allowances vs live usage, the **active leases** holding
   capacity (an Active-leases table with a **+ create VM** button and per-row detail/renew/cancel/migrate when
   unlocked, plus a live "watch it boot → ssh user@ip" status modal), and the admission queue — plus a **fleet admission-SLO tile strip** on the Capacity tab
-  (queue depth + admit-wait / provision-latency percentiles from `fleet_stats`, via the `GET /api/fleet` read).
+  (queue depth + admit-wait / provision-latency percentiles from `fleet_stats`, in the `fleet` block of the
+  `GET /api/overview` read, also served alone as `GET /api/fleet`).
   Aggregate reads (`list_nodes/clusters/storage/projects/templates/list_leases` + `queue_view`) are also
   agent-facing MCP tools. Reads are open + zero-dep; **opt-in, token-gated operator actions** when
   `BR0KR_DASHBOARD_TOKEN` is set — **create a VM on behalf of a chosen project** (act-as-project: it debits

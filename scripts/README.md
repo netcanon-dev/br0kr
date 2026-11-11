@@ -128,7 +128,7 @@ Wrappers that share a port cannot run at the same time.
 |---------|--------|------|
 | `run_inventory.sh` | Aggregate inventory reads: a cluster roll-up with no lease-count multiplication, the queue view. | 5453 |
 | `run_health.sh` | `/healthz` and `/metrics` over a real socket. | 5449 |
-| `run_slo.sh` | Lease transition timestamps and the `fleet_stats` percentiles. | 5466 |
+| `run_slo.sh` | Lease transition timestamps and the `fleet_stats` percentiles; the per-window query matches the old single pass and reads through the 0050 indexes. | 5466 |
 | `run_pr3.sh` | The placement counters in `fleet_stats` and the observability channel. | 5477 |
 
 ## Live proofs (a real Proxmox node)
