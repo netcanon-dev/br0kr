@@ -894,7 +894,7 @@ def create_logical_network(
 
 def delete_logical_network(conn: psycopg.Connection[Any], network_id: str) -> dict[str, Any]:
     """Retire a logical network (0039). Its `network_node` rows CASCADE away and any `template` pointing at it is
-    SET NULL (fail-closed — a cross-node clone of that template refuses `network_undeclared` until re-declared),
+    SET NULL (fail-closed — a cross-node clone of that template refuses `template_bridge_undeclared` until re-declared),
     so this never FK-blocks and can never strand a lease (a mid-flight cross-node lease HOLDS + auto-releases).
     `unknown_logical_network` if absent. Does not commit (caller owns the txn)."""
     row = conn.execute("DELETE FROM logical_network WHERE id = %s RETURNING id", (network_id,)).fetchone()
@@ -1161,7 +1161,7 @@ def set_template_logical_network(
 ) -> dict[str, Any]:
     """Point (or clear) the LOGICAL NETWORK a template's net0 is on (0039) — the identity the placement gate
     resolves to the placement node's bridge (and rewrites net0 to) before admitting a CROSS-NODE clone of this
-    template. `logical_network_id` None CLEARS it (reverts to network_undeclared: a cross-node clone refuses
+    template. `logical_network_id` None CLEARS it (reverts to template_bridge_undeclared: a cross-node clone refuses
     until re-declared); a non-None value must reference an existing `logical_network` (`unknown_logical_network`,
     pre-checked so no FK abort). `unknown_template` if absent. Node-local placement is unaffected either way (its
     baked bridge is already correct on its own node). Does not commit (caller owns the txn)."""

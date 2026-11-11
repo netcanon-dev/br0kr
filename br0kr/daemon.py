@@ -515,7 +515,7 @@ class Daemon:
                                                   data_disks=data_disks)
         if self._fleet_is_multi(conn) and (self.vm_template is not None or self.vm_disk is not None):
             reason = (placement.HOLD_ENV_TEMPLATE_WRONG_CLUSTER if self.vm_template is not None
-                      else "env_default_multinode")
+                      else reasons.ENV_DEFAULT_MULTINODE)
             return placement.PlacementDecision(False, reason)
         # Single-node/cluster (or a pure fenced shell): today's behaviour. The env template (if any) clones with
         # NO forced clone-storage — BR0KR_VM_CLONE_STORAGE is retired (§4.5).

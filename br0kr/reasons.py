@@ -60,7 +60,7 @@ MULTI_DISK_DISABLED: Final = "multi_disk_disabled"            # data disks are o
 LOST_INSERT: Final = "lost_insert"                            # a racing insert of the same idem_key vanished; retry
 STALE_REFERENCE: Final = "stale_reference"                    # an id the ask named was deleted mid-admit
 
-# ── Capacity: did not fit now, may later (QUEUEABLE) ────────────────────────────────────────────────────────────
+# ── Capacity: did not fit now, may later (QUEUEABLE, except node_cordoned) ──────────────────────────────────────
 INSUFFICIENT_NODE_CPU: Final = "insufficient_node_cpu"
 INSUFFICIENT_NODE_MEM: Final = "insufficient_node_mem"
 INSUFFICIENT_STORAGE: Final = "insufficient_storage"
@@ -68,7 +68,7 @@ INSUFFICIENT_PROJECT_CPU: Final = "insufficient_project_cpu"
 INSUFFICIENT_PROJECT_MEM: Final = "insufficient_project_mem"
 PROJECT_LEASE_LIMIT: Final = "project_lease_limit"
 NO_CAPACITY: Final = "no_capacity"                            # placement: no candidate node had room
-NODE_CORDONED: Final = "node_cordoned"                        # the named node takes no new leases
+NODE_CORDONED: Final = "node_cordoned"                        # the named node takes no new leases; not queueable
 
 # ── Unknown ids ─────────────────────────────────────────────────────────────────────────────────────────────────
 UNKNOWN_NODE: Final = "unknown_node"
@@ -99,7 +99,7 @@ UNNAMED_PLACEMENT_REFUSAL: Final = "unnamed_placement_refusal"   # a placement r
 STORAGE_CAPABILITY_UNDECLARED: Final = "storage_capability_undeclared"
 STORAGE_NOT_IMPORT_CAPABLE: Final = "storage_not_import_capable"
 
-# ── Holds (lease.hold_reason): admitted, but the daemon will not clone it where it was placed ────────────────────
+# ── Holds (lease.hold_reason): admitted, but the daemon will not provision it where it was placed ────────────────
 INSTANCE_UNAVAILABLE: Final = "instance_unavailable"
 PLACEMENT_REACHABILITY_LOST: Final = "placement_reachability_lost"
 CROSS_PROVISION_REFUSED: Final = "cross_provision_refused"
@@ -107,6 +107,7 @@ PLACEMENT_UNRESOLVABLE: Final = "placement_unresolvable"
 ENV_TEMPLATE_WRONG_CLUSTER: Final = "env_template_wrong_cluster"
 SOURCE_NODE_UNROUTABLE: Final = "source_node_unroutable"
 NETWORK_UNROUTABLE: Final = "network_unroutable"
+ENV_DEFAULT_MULTINODE: Final = "env_default_multinode"        # the daemon's env disk default on a multi-node fleet
 
 # ── Pinned leases ───────────────────────────────────────────────────────────────────────────────────────────────
 PIN_DISABLED: Final = "pin_disabled"
@@ -191,7 +192,7 @@ PROJECT: Final[frozenset[str]] = frozenset({
     UNKNOWN_PROJECT, INSUFFICIENT_PROJECT_CPU, INSUFFICIENT_PROJECT_MEM, PROJECT_LEASE_LIMIT})
 # A template deleted mid-schedule: every candidate would refuse identically.
 TEMPLATE: Final[frozenset[str]] = frozenset({UNKNOWN_TEMPLATE})
-# lease.hold_reason values (br0kr/placement.py HOLD_*).
+# The hold reasons placement names (br0kr/placement.py HOLD_*); the daemon also writes ENV_DEFAULT_MULTINODE.
 HOLD: Final[frozenset[str]] = frozenset({
     INSTANCE_UNAVAILABLE, PLACEMENT_REACHABILITY_LOST, CROSS_PROVISION_REFUSED, PLACEMENT_UNRESOLVABLE,
     ENV_TEMPLATE_WRONG_CLUSTER, SOURCE_NODE_UNROUTABLE, NETWORK_UNROUTABLE})

@@ -483,3 +483,59 @@ def test_a_reserved_idem_key_is_refused_before_admission(monkeypatch, prefix):
                                  req_mem_mb=512)["reason"] == reasons.RESERVED_IDEM_KEY
     assert gateway.schedule_lease(object(), idem_key=key, req_cpu=1.0,
                                   req_mem_mb=512)["reason"] == reasons.RESERVED_IDEM_KEY
+
+
+def test_a_queued_answer_says_where_it_stands_and_what_to_do_next(monkeypatch):
+    """A queued request_lease or schedule_lease answer carries queue_position (lease.queue_position for that lease)
+    and next (QUEUED_NEXT, which names the poll, the heartbeat and the way out); an admission, a refusal and a full
+    queue come back unchanged. Guards an agent getting `queued: true` with no idea how long the line is, or that it
+    must heartbeat to keep its spot (review UX-04)."""
+    monkeypatch.setattr(gateway.lease, "queue_position", lambda _c, lid: {7: 2}.get(lid))
+    queued = {"lease_id": 7, "admitted": False, "queued": True, "idempotent": False, "reason": reasons.QUEUED}
+    assert gateway._with_queue_place(object(), queued) == {**queued, "queue_position": 2, "next": gateway.QUEUED_NEXT}
+    assert all(word in gateway.QUEUED_NEXT for word in ("lease_status", "renew_lease", "cancel_lease", "PENDING",
+                                                         "REJECTED", "released_reason", "new idem_key"))
+    for other in ({"lease_id": 7, "admitted": True, "queued": False, "idempotent": False, "reason": None},
+                  {"lease_id": None, "admitted": False, "queued": False, "reason": reasons.QUEUE_FULL},
+                  {"lease_id": None, "admitted": False, "queued": False, "reason": reasons.UNKNOWN_NODE}):
+        assert gateway._with_queue_place(object(), other) is other
+    monkeypatch.setattr(gateway, "_request_lease", lambda _c, **_k: queued)
+    monkeypatch.setattr(gateway, "_schedule_lease", lambda _c, **_k: {**queued, "node_id": None, "tried": []})
+    asked = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512, queue=True)
+    placed = gateway.schedule_lease(object(), idem_key="k", req_cpu=1.0, req_mem_mb=512, queue=True)
+    assert (asked["queue_position"], asked["next"], asked["pinned"]) == (2, gateway.QUEUED_NEXT, False)
+    assert (placed["queue_position"], placed["next"], placed["tried"]) == (2, gateway.QUEUED_NEXT, [])
+
+
+def test_a_queued_answer_whose_position_cannot_be_read_still_succeeds(monkeypatch, caplog):
+    """The position read runs after the enqueue committed, so it never fails the request: a lease promoted in the
+    meantime (queue_position answers None) and a failed read (a psycopg error, rolled back, logged at WARNING, and a
+    rollback that itself fails on a dead connection swallowed) all give `queue_position: null` with the `next` hint.
+    Guards a connection blip turning a successful enqueue into a tool error the agent would retry, and an agent
+    reading null as a count."""
+    queued = {"lease_id": 7, "admitted": False, "queued": True, "idempotent": False, "reason": reasons.QUEUED}
+    monkeypatch.setattr(gateway.lease, "queue_position", lambda _c, _lid: None)
+    assert gateway._with_queue_place(object(), queued)["queue_position"] is None
+
+    def broken(_c, _lid):
+        raise gateway.psycopg.OperationalError("connection lost")
+
+    class _Conn:
+        rolled_back = 0
+
+        def __init__(self, dead: bool = False):
+            self.dead = dead
+
+        def rollback(self):
+            self.rolled_back += 1
+            if self.dead:
+                raise gateway.psycopg.InterfaceError("the connection is closed")
+
+    monkeypatch.setattr(gateway.lease, "queue_position", broken)
+    for conn in (_Conn(), _Conn(dead=True)):
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="br0kr.gateway"):
+            out = gateway._with_queue_place(conn, queued)
+        assert (out["queue_position"], out["next"], conn.rolled_back) == (None, gateway.QUEUED_NEXT, 1)
+        assert any("queue position read failed for queued lease 7" in r.getMessage() for r in caplog.records)
+

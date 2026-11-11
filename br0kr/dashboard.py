@@ -963,7 +963,7 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
                                           c, k["node_id"], k["logical_network_id"])),
     "/api/template/create": (_parse_template, lambda c, **k: admin.create_template(c, **k)),
     "/api/template/edit": (_parse_template, lambda c, **k: admin.set_template(c, **k)),
-    # 0039: point a template's net0 at a logical network. Empty/absent clears it (reverts to network_undeclared).
+    # 0039: point a template's net0 at a logical network. Empty/absent clears it (template_bridge_undeclared).
     # Token-gated + audited.
     "/api/template/network": (lambda b: {"template_id": _req_str(b, "template_id"),
                                          "logical_network_id": _opt_str(b, "logical_network_id")},

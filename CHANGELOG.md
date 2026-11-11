@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **Every reason code an agent can receive, with what to do: `docs/reference/reason-codes.md`.** ~15 were written
+  down nowhere; a test keeps the table equal to `br0kr/reasons.py`. Queued answers add `queue_position` (UX-04).
 - **A day-2 runbook and scheduled ledger backups.** Upgrade, rollback, rotation and decommission lived in memory;
   `day2-operations.md` writes them down, and profile `backup` dumps the ledger hourly from inside the stack (OPS-04).
 - **Shipped alert rules, and the counters they need.** Nothing fired on no leader, failing ticks or erroring admits;

@@ -22,6 +22,7 @@ listener (review OPS-03).
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import re
@@ -91,6 +92,31 @@ def _reserved_key(idem_key: str) -> bool:
 
 
 _LEASE_EXISTS = "SELECT 1 FROM lease WHERE idem_key = %s"
+
+# What an agent does with a queued answer (review UX-04): the same for every queued request.
+QUEUED_NEXT = ("poll lease_status until state leaves PENDING: ADMITTED, PROVISIONING or ACTIVE means it is yours, "
+               "REJECTED means it ended (read released_reason, then ask again with a new idem_key); call renew_lease "
+               "before ttl_seconds elapse to hold the spot (max_wait_seconds caps the wait); cancel_lease gives it up")
+
+
+def _with_queue_place(conn: psycopg.Connection[Any], answer: dict[str, Any]) -> dict[str, Any]:
+    """A queued request_lease / schedule_lease answer, plus where it stands and what to do next: ``queue_position``
+    (how many PENDING leases, across the whole queue, are older than it; advisory, as in queue_status) and ``next``
+    (QUEUED_NEXT). The position is None when the lease is no longer PENDING by the time it is read (promoted in the
+    meantime) or the read fails: the enqueue has already committed, so a failed advisory read never fails the
+    request. Any other answer is returned unchanged. One read (lease.queue_position), which commits (review UX-04)."""
+    lease_id = answer.get("lease_id")
+    if not answer.get("queued") or lease_id is None:
+        return answer
+    try:
+        position = lease.queue_position(conn, int(lease_id))
+    except psycopg.Error:
+        with contextlib.suppress(psycopg.Error):
+            conn.rollback()
+        log.warning("queue position read failed for queued lease %s; answering without it", lease_id,
+                    exc_info=True)
+        position = None
+    return {**answer, "queue_position": position, "next": QUEUED_NEXT}
 
 
 def _multi_disk_refused(conn: psycopg.Connection[Any], idem_key: str,
@@ -262,7 +288,8 @@ def request_lease(
     pinned: bool = False,
 ) -> dict[str, Any]:
     """Reserve capacity for a VM on a named node: _request_lease's admission, queue, cloud-init, template and
-    data-disk rules, plus ``pinned`` in the answer.
+    data-disk rules, plus ``pinned`` in the answer, and ``queue_position`` + ``next`` in a queued one
+    (_with_queue_place).
 
     PINNED (optional, 0049): ``pinned=True`` asks for a lease the TTL reaper never reclaims, so it needs no
     heartbeat (release it when done). The project must allow pins (max_pinned > 0, else pin_disabled) and have a
@@ -277,7 +304,7 @@ def request_lease(
                        ssh_pubkey=ssh_pubkey, ci_user=ci_user, ip_config=ip_config, template_id=template_id,
                        ttl_seconds=ttl_seconds, queue=queue, max_wait_seconds=max_wait_seconds,
                        queue_max=queue_max, data_disks=data_disks)
-    return pin.settle(conn, r, pinned=pinned)
+    return _with_queue_place(conn, pin.settle(conn, r, pinned=pinned))
 
 
 def _schedule_lease(
@@ -387,7 +414,8 @@ def schedule_lease(
     pinned: bool = False,
 ) -> dict[str, Any]:
     """Reserve capacity and let the broker pick the node: _schedule_lease's placement and queue rules, plus
-    ``pinned`` in the answer. ``pinned=True`` asks for a pinned lease, with request_lease's rules (br0kr/pin.py)."""
+    ``pinned`` in the answer, and ``queue_position`` + ``next`` in a queued one (_with_queue_place).
+    ``pinned=True`` asks for a pinned lease, with request_lease's rules (br0kr/pin.py)."""
     if pinned:
         refused = pin.refuse_before_admit(conn, idem_key=idem_key, project_id=project_id, queue=queue)
         if refused:
@@ -398,7 +426,7 @@ def schedule_lease(
                         ssh_pubkey=ssh_pubkey, ci_user=ci_user, ip_config=ip_config, template_id=template_id,
                         ttl_seconds=ttl_seconds, queue=queue, max_wait_seconds=max_wait_seconds,
                         queue_max=queue_max, data_disks=data_disks)
-    return pin.settle(conn, r, pinned=pinned)
+    return _with_queue_place(conn, pin.settle(conn, r, pinned=pinned))
 
 
 def renew_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:

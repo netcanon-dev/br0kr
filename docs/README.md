@@ -17,6 +17,8 @@ docs/
 │   └── security-and-hygiene.md  # secret/PII hygiene (the controls live in /SECURITY.md)
 ├── architecture.md            # PLAN-OF-RECORD for the whole broker (status-legended)
 ├── api.md                     # GENERATED API reference: every MCP tool and dashboard route
+├── reference/                 # agent-facing references, kept in step with the code by tests
+│   └── reason-codes.md        # every reason code an agent can receive, and what to do about it
 ├── status.md                  # what is built, dormant and next, per feature (status-legended)
 ├── pdm-api-contract.md        # the assumed Proxmox Datacenter Manager API (unverified)
 ├── designs/                   # per-feature design specs (status-legended)
@@ -32,6 +34,7 @@ docs/
 | **`standards/`** | Stable — changes are deliberate | Binding rules every contributor follows. The "law" of the repo. |
 | **`architecture.md`, `status.md`, `designs/*.md`** | Living — tracks reality | Plan-of-record for the broker or one feature: the design, the *why*, the rollout. Carries the repo-wide status legend (✅ done · ◐ partial, or built but disabled · ⏳ next) and a `## See also` footer. |
 | **`reviews/<date>-<slug>.md`** | **Frozen** | The dated, reproducible record of a review/audit run. **EXPECTED-STALE:** a later audit must never flag a past run's evidence as drift — it is a historical record, not a live doc. |
+| **`reference/`** | Living — test-pinned to the code | Agent-facing lookups, e.g. [reference/reason-codes.md](reference/reason-codes.md): every reason code and what to do about it. |
 | **`runbooks/`** | Living — operational | Step-by-step operator procedures (HA, failover, restore). Practiced, not aspirational. e.g. [runbooks/ledger-ha.md](runbooks/ledger-ha.md). |
 
 ## Conventions

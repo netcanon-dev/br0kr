@@ -175,9 +175,10 @@ def test_request_lease_queues_on_a_queueable_reject(monkeypatch):
     monkeypatch.setattr(admission, "admit", lambda c, req:
                         admission.AdmissionResult(None, admitted=False, idempotent=False, reason="insufficient_node_cpu"))
     monkeypatch.setattr(admission, "enqueue", lambda c, **kw: admission.EnqueueResult(99, queued=True, reason=None))
+    monkeypatch.setattr(gateway.lease, "queue_position", lambda _c, lid: 3 if lid == 99 else None)
     out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=4, req_mem_mb=2048, queue=True)
     assert out == {"lease_id": 99, "admitted": False, "queued": True, "idempotent": False, "reason": "queued",
-                   "pinned": False}
+                   "pinned": False, "queue_position": 3, "next": gateway.QUEUED_NEXT}
 
 
 def test_request_lease_without_queue_flag_rejects_normally(monkeypatch):
@@ -207,9 +208,10 @@ def test_request_lease_idempotent_queued_replay_does_not_reenqueue(monkeypatch):
     monkeypatch.setattr(admission, "admit", lambda c, req:
                         admission.AdmissionResult(5, admitted=False, idempotent=True, reason="queued"))
     monkeypatch.setattr(admission, "enqueue", lambda c, **kw: pytest.fail("a 'queued' replay must not re-enqueue"))
+    monkeypatch.setattr(gateway.lease, "queue_position", lambda _c, lid: 0 if lid == 5 else None)
     out = gateway.request_lease(object(), idem_key="k", node_id="n1", req_cpu=4, req_mem_mb=2048, queue=True)
     assert out == {"lease_id": 5, "admitted": False, "queued": True, "idempotent": True, "reason": "queued",
-                   "pinned": False}
+                   "pinned": False, "queue_position": 0, "next": gateway.QUEUED_NEXT}
 
 
 def test_cancel_lease_three_outcomes(monkeypatch):

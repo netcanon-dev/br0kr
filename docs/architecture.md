@@ -76,7 +76,8 @@ rejected as "node full" by the very lease it already created.
   code in a reason position there, on a `reason="..."` literal anywhere, and on a code no test or harness
   exercises. Not in it yet: the lease-lifecycle release reasons the reaper and reconciler write
   (`lease.released_reason`, read back from `lease_status`) and the migration and replication job reasons a
-  read-tier token reads from `migration_status` / `replication_status`.
+  read-tier token reads from `migration_status` / `replication_status`. `docs/reference/reason-codes.md` documents
+  both, with what an agent does about each code (`tests/unit/test_reason_codes_doc.py` keeps it in step).
 - **Per-project allowance (`db/migrations/0005_projects.sql`, the `project:` scope in `br0kr/admission.py`)**
   — a tenant budget so one project can't drain a whole cluster. A `project` row carries cpu/mem/lease-count
   limits (operator-managed config-as-data, `CHECK > 0`); `lease.project_id` is **nullable** (None =

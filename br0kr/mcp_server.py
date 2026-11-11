@@ -311,17 +311,25 @@ def request_lease(
     always counted against YOUR token's project, so project_id may be omitted (passing a
     DIFFERENT project is refused with {"error":"project_forbidden"}); the request is also
     refused if your project is over its cpu/mem/lease-count quota. Returns {lease_id, admitted,
-    queued, idempotent, reason}. If admitted is false, reason says why (e.g.
+    queued, idempotent, reason, pinned}. If admitted is false, reason says why (e.g.
     insufficient_node_cpu, insufficient_project_cpu, project_lease_limit, idem_key_conflict,
-    lease_not_live). Heartbeat the returned lease_id before its ttl_seconds elapse or the
-    broker reclaims it.
+    lease_not_live); docs/reference/reason-codes.md lists every code with what to do about it.
+    Heartbeat the returned lease_id before its ttl_seconds elapse or the broker reclaims it.
+
+    SIZE AND LIFETIME: ttl_seconds is the heartbeat window, at least 10 seconds (else invalid_ttl).
+    A disk on a quota pool is storage_id AND req_disk_gb > 0 together: one without the other is
+    refused (storage_without_disk / disk_without_storage). When the operator enforces clone
+    storage content, a target pool not declared for VM images is refused storage_not_capable.
 
     Set queue=True to WAIT IN LINE instead of being rejected when there's no room right now:
     the request is parked (state PENDING, queued=true) and the broker admits it automatically,
-    in arrival order, the moment capacity/quota frees. Then poll lease_status (PENDING →
-    ADMITTED → ACTIVE) and call renew_lease to hold your place (a crashed agent's spot frees);
-    max_wait_seconds caps the total wait, after which the spot expires (REJECTED). A queue at
-    its depth cap returns reason 'queue_full'. cancel_lease drops a spot you no longer want.
+    in arrival order, the moment capacity/quota frees. A queued answer also carries
+    queue_position (how many queued requests across the whole queue are older; advisory, null when
+    not known or no longer waiting) and next (what to do).
+    Then poll lease_status (PENDING → ADMITTED → ACTIVE) and call renew_lease to hold your place
+    (a crashed agent's spot frees); max_wait_seconds caps the total wait, after which the spot
+    expires (REJECTED). A queue at its depth cap returns reason 'queue_full'. cancel_lease drops a
+    spot you no longer want.
 
     VM ACCESS (optional): to actually log into the VM, pass ssh_pubkey = YOUR OWN ssh PUBLIC key (e.g.
     "ssh-ed25519 AAAA... you@host"). The broker injects it via cloud-init; you keep the private key. ci_user
@@ -433,17 +441,22 @@ def schedule_lease(
     is refused outright if your project is over its (global) cpu/mem/lease-count quota. idem_key
     MUST be a stable id for THIS request — retry with the SAME key to get the same lease back (it
     returns the same lease wherever it was placed; reusing it for a different ask is refused).
-    Returns {lease_id, node_id, admitted, queued, idempotent, reason, tried}. `tried` is the
+    Returns {lease_id, node_id, admitted, queued, idempotent, reason, tried, pinned}. `tried` is the
     per-candidate trace — a list of {node_id, reason} recording each node the broker attempted and why it
     did not take the lease (reason=None for the node that DID) — so you can see exactly which nodes were
     considered. If admitted is false, reason says why (e.g. no_capacity, unknown_cluster,
-    insufficient_project_cpu, project_lease_limit, idem_key_conflict). Heartbeat the returned lease_id before its
-    ttl_seconds elapse or the broker reclaims it.
+    insufficient_project_cpu, project_lease_limit, idem_key_conflict); docs/reference/reason-codes.md lists
+    every code with what to do about it. Heartbeat the returned lease_id before its ttl_seconds elapse or the
+    broker reclaims it. ttl_seconds and the storage_id / req_disk_gb pairing follow request_lease's rules
+    (invalid_ttl, storage_without_disk, disk_without_storage, storage_not_capable).
 
     Set queue=True to WAIT IN LINE instead of being rejected when nothing has room right now:
     the request is parked (state PENDING, queued=true) and the broker picks a node and admits it
-    automatically, in arrival order, when room frees. Poll lease_status and call renew_lease to
-    hold your place; max_wait_seconds caps the wait; a full queue returns reason 'queue_full'.
+    automatically, in arrival order, when room frees. A queued answer also carries queue_position
+    (how many queued requests across the whole queue are older; advisory, null when not known or no
+    longer waiting) and next (what to do). Poll lease_status
+    and call renew_lease to hold your place; max_wait_seconds caps the wait; a full queue returns
+    reason 'queue_full'.
 
     VM ACCESS (optional): pass ssh_pubkey = YOUR OWN ssh PUBLIC key to be injected via cloud-init (with
     ci_user / ip_config as for request_lease); the broker places the lease and injects the key on whatever
@@ -552,8 +565,9 @@ def lease_status(ctx: Context, lease_id: int) -> dict[str, Any]:
     connection facts. Returns {lease_id, state, exists, ip_address, ci_user, vmid, node_id, access_requested,
     released_reason, hold_reason}. ``released_reason`` says WHY a terminal lease ended (e.g.
     'cross_provision_detected', 'placement_blocked:<reason>', 'queue_timeout') and ``hold_reason`` why an
-    ADMITTED templated lease is being HELD by the placement re-check (e.g. 'no_reachable_instance',
-    'cross_provision_refused') instead of provisioning — both NULL in the normal path (0033). If you
+    ADMITTED lease is being HELD by the placement re-check (e.g. 'instance_unavailable',
+    'cross_provision_refused') instead of provisioning — both NULL in the normal path (0033);
+    docs/reference/reason-codes.md says what each one means and what to do. If you
     requested cloud-init access, once the lease is ACTIVE and the guest has booted, ip_address is its IP
     and ci_user the login user — ssh ci_user@ip_address with your own private key (ip_address is null
     until discovered, or always for a lease with no cloud-init). You may only inspect a lease that belongs

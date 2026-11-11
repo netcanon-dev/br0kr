@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from br0kr import build, daemon, lease, nodes, placement, settings
+from br0kr import build, daemon, lease, nodes, placement, reasons, settings
 
 pytestmark = pytest.mark.unit
 
@@ -554,6 +554,15 @@ def test_placement_for_env_template_on_multinode_fails_closed():
     ns = _pns(vm_template=9900, _fleet_is_multi=lambda _c: True)
     dec = daemon.Daemon._placement_for(ns, _PConn(), "n1", None, None, None)
     assert not dec.ok and dec.reason == placement.HOLD_ENV_TEMPLATE_WRONG_CLUSTER
+
+
+def test_placement_for_env_disk_on_multinode_fails_closed():
+    """A template-less lease served by the daemon's BR0KR_VM_DISK default (no env template) on a MULTI-node fleet
+    fails closed with env_default_multinode, the hold reason an agent then reads in lease_status. Guards the
+    create-blank twin of the env retirement gate, and its code drifting from br0kr/reasons.py (review UX-04)."""
+    ns = _pns(vm_disk="local-lvm:8", _fleet_is_multi=lambda _c: True)
+    dec = daemon.Daemon._placement_for(ns, _PConn(), "n1", None, None, None)
+    assert not dec.ok and dec.reason == reasons.ENV_DEFAULT_MULTINODE
 
 
 def test_placement_for_env_single_node_is_allowed():

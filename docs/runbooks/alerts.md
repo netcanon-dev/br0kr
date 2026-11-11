@@ -164,13 +164,16 @@ token ([api.md](../api.md) lists them):
 
 | hold_reason | meaning | fix |
 |---|---|---|
-| `instance_unavailable` | the template instance it was placed against is gone, retired or not READY | rebuild the template, or bind a READY instance (`POST /api/instance/bind`) |
+| `instance_unavailable` | the template instance it was placed against is gone, retired or not READY | the daemon never re-picks an instance, so this lease cannot heal: the agent releases it and asks again; make sure a READY instance exists for new asks (`list_template_instances`) |
 | `placement_reachability_lost` | the template's storage no longer reaches the node (quarantined or unbound) | run the `verify_declarations` MCP tool, fix the storage, then clear the quarantine (`POST /api/storage/quarantine/clear`) |
 | `cross_provision_refused` | the debited pool stopped reaching this node | as above, for the lease's pool |
 | `placement_unresolvable` | the clone storage cannot be resolved now | check the template's storage declarations |
 | `env_template_wrong_cluster` | the legacy `BR0KR_VM_TEMPLATE` default on a multi-node fleet | have agents pass `template_id` |
 | `source_node_unroutable` | a cross-node clone, but this daemon serves no driver for the source node | check that node's registry row and token |
 | `network_unroutable` | the node lacks the template's network bridge | declare the node's bridge for the template's logical network (`POST /api/network/node`) |
+| `env_default_multinode` | the legacy `BR0KR_VM_DISK` default on a multi-node fleet | have agents pass `template_id` |
+
+Every hold reason, with what the agent should do, is in [reason-codes.md](../reference/reason-codes.md).
 
 ### Br0krQueueOldestAgeHigh
 

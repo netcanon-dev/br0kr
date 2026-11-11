@@ -120,7 +120,9 @@ Once connected the agent sees the tools and calls them like any other MCP tool. 
 1. `list_templates` / `list_nodes` / `project_capacity` — see what's available and what budget is left.
 2. `request_lease` with `req_cpu` / `req_mem_mb` / `storage_id` + `req_disk_gb` / a `template_id` + the agent's
    **ssh public key** → the broker admits (or enqueues) race-free and returns the LEASE
-   `{lease_id, admitted, queued, reason}` — **not** the IP (that arrives later). **Pass `storage_id` +
+   `{lease_id, admitted, queued, reason}` — **not** the IP (that arrives later); a refusal's `reason` is in
+   [reason-codes.md](../reference/reason-codes.md) with what to do about it, and a queued answer adds
+   `queue_position` and `next`. **Pass `storage_id` +
    `req_disk_gb`** to debit disk against the pool; omit them and the lease debits ZERO disk (a storage scope
    only bounds requests that name it). (Use `schedule_lease` with `queue=true` to wait for a slot instead of
    being rejected when full.)
@@ -260,6 +262,9 @@ every guest boots pre-provisioned, no first-boot step at all.
 
 ## 8 · Troubleshooting
 
+Every code an answer can carry, with the agent's next step and the operator's lever, is in
+[reason-codes.md](../reference/reason-codes.md).
+
 - **A tool returns `{"error": "..."}` instead of a result** — that's the authorization layer. `no_token` /
   `invalid_token` (the header/env token is missing, wrong, revoked, or expired) · `forbidden_scope` (the
   token's tier can't call that verb — e.g. a `read` token calling `request_lease`) · `project_forbidden` /
@@ -275,6 +280,7 @@ every guest boots pre-provisioned, no first-boot step at all.
   See [/SECURITY.md](../../SECURITY.md) C12 and [docker-deploy.md](docker-deploy.md).
 
 ## See also
+- [../reference/reason-codes.md](../reference/reason-codes.md) — every reason code an agent can receive, and what to do about it
 - [../api.md](../api.md) — every MCP tool (tier, parameters) and every dashboard route, generated from the code
 - [first-vm.md](first-vm.md) — a first lease end to end, calling the gateway by hand before any agent is wired up
 - [operator-tier.md](operator-tier.md) — minting/using the cross-tenant `operator` token (the operator-only verbs, the operator gateway, fleet observability)

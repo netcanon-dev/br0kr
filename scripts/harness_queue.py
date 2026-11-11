@@ -31,6 +31,9 @@ free capacity — never over-admit a node, the very fear the broker exists to cl
                            (partial success), leaving the other tenant's lease ADMITTED.
   bulk_isolation           a per-id op that RAISES mid-batch is rolled back ALONE (its lease stays ADMITTED)
                            while the others commit (release) — the per-id commit/rollback partial-success guarantee.
+  queued_answer_position   three queue=true request_lease asks on a full node answer queue_position 0, 1, 2 and
+                           the `next` hint; a retry of the second answers 1 again, and 0 once the first is gone
+                           (the gateway's real read, review UX-04).
 
 A threading.Barrier starts the racers together. Exit 0 + GO iff every invariant holds.
 """
@@ -44,7 +47,7 @@ from pathlib import Path
 import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import admission, auth, bulk, inventory, lease, migrate, scheduler  # noqa: E402
+from br0kr import admission, auth, bulk, gateway, inventory, lease, migrate, scheduler  # noqa: E402
 from br0kr.admission import AdmissionRequest  # noqa: E402
 
 CONN = os.environ["PGCONN"]
@@ -429,6 +432,28 @@ def check_bulk_isolation() -> bool:
     return ok
 
 
+def check_queued_answer_position() -> bool:
+    reset(); seed_node("n1", cpu=4, mem=100_000)
+    admit_active("qp-holder", project=None, node="n1", cpu=4)   # the node is full: every ask below queues
+
+    def ask(idem: str) -> dict:
+        with connect() as c:
+            return gateway.request_lease(c, idem_key=idem, node_id="n1", req_cpu=4, req_mem_mb=2048, queue=True)
+
+    first, second, third = ask("qp-a"), ask("qp-b"), ask("qp-c")
+    positions = [r.get("queue_position") for r in (first, second, third)]
+    hinted = all(r.get("queued") and r.get("next") == gateway.QUEUED_NEXT for r in (first, second, third))
+    replay = ask("qp-b")
+    with psycopg.connect(CONN, autocommit=True) as ac:
+        ac.execute("UPDATE lease SET state='REJECTED', released_reason='cancelled' WHERE id=%s", (first["lease_id"],))
+    after = ask("qp-b")
+    ok = (positions == [0, 1, 2] and hinted and replay.get("idempotent") is True
+          and replay.get("queue_position") == 1 and after.get("queue_position") == 0)
+    print(f"[queued_answer_position]  positions={positions} hinted={hinted} replay={replay.get('queue_position')} "
+          f"after_first_gone={after.get('queue_position')}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main() -> int:
     load_schema()
     print("=== admission-queue gate (migrations) ===\n")
@@ -447,6 +472,7 @@ def main() -> int:
         check_queue_view_blocked_reason,
         check_bulk_release_per_id_ownership,
         check_bulk_isolation,
+        check_queued_answer_position,
     ]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))
