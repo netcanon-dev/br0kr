@@ -130,6 +130,22 @@ check tenant_gateway_withholds_operator_tools "$tw" "$(echo "$tenant_tools" | wc
 ow=1; has "$operator_tools" request_lease && has "$operator_tools" node_cordon && ow=0
 check operator_gateway_serves_operator_tools "$ow" "$(echo "$operator_tools" | wc -w) tools"
 
+# The async wait_for_lease answers over the real HTTP transport, enveloped (reviews FEAT-03, UX-03): called with no
+# token it refuses at once with {ok: false, reason: no_token}. Proves the async tool, its async envelope and its
+# worker-thread authorisation work in the served gateway, not only under a unit test's event loop.
+wait_answer="$("${DC[@]}" exec -T gateway python -c 'import anyio, json
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+async def main():
+    async with streamablehttp_client("http://localhost:8080/mcp") as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool("wait_for_lease", {"lease_id": 1, "timeout_s": 5})
+            print(json.dumps(res.structuredContent, sort_keys=True))
+anyio.run(main)' 2>/dev/null)"
+ww=1; [ "$wait_answer" = '{"error": "no_token", "ok": false, "reason": "no_token"}' ] && ww=0
+check async_wait_tool_answers_enveloped "$ww" "${wait_answer:-no answer}"
+
 # The operator gateway is published on the host's loopback only, and answers /healthz there.
 obind="$(docker port "$("${DC[@]}" ps -q gateway-operator | head -1)" 8080/tcp 2>/dev/null | head -1)"
 check operator_gateway_loopback_only "$([ "$obind" = "127.0.0.1:${OPORT}" ] && echo 0 || echo 1)" "bind=${obind:-?}"

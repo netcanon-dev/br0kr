@@ -67,7 +67,6 @@ reconciler (one holds the leader lock), `br0kr-gateway` serves agents over MCP (
   detail per feature; the proofs are catalogued in [scripts/README.md](scripts/README.md).
 - ◐ Dormant: the Proxmox Datacenter Manager driver and cross-cluster lease migration, proven against a mock
   PDM and disabled by default until there is real PDM hardware to verify against.
-- ⏳ Next: a bounded server-side `wait_for_lease`.
 - Not planned, with the reasons: [Non-goals](docs/architecture.md#non-goals).
 
 ## What's here

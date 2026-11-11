@@ -8,6 +8,7 @@ applied where tools are registered while the module's functions keep their plain
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import logging
 import re
@@ -67,6 +68,8 @@ def test_a_refused_call_is_not_ok_and_names_the_refusal_on_every_tool(monkeypatc
     assert len(tools) == len(envelope.RESULT_FLAG)
     for name, tool in tools.items():
         out = tool.fn(SimpleNamespace(), **_dummy_args(tool.fn))
+        if inspect.iscoroutine(out):   # wait_for_lease is async
+            out = asyncio.run(out)
         assert out["ok"] is False and out["reason"] == reasons.FORBIDDEN_SCOPE, (name, out)
         assert out["error"] == reasons.FORBIDDEN_SCOPE and _SNAKE.fullmatch(out["reason"]), (name, out)
 
@@ -174,6 +177,7 @@ _SUCCESS: dict[str, dict[str, Any]] = {
     "release_lease": {"lease_id": 1, "released": True},
     "cancel_lease": {"lease_id": 1, "cancelled": True, "outcome": "released"},
     "lease_status": {"lease_id": 1, "exists": True, "state": "ACTIVE", "hold_reason": None, "released_reason": None},
+    "wait_for_lease": {"lease_id": 1, "exists": True, "state": "ACTIVE", "reached": True, "waited_s": 12.0},
     "queue_status": {"lease_id": 1, "state": "PENDING", "queue_position": 0, "blocked_reason": None,
                      "exists": True},
     "migration_status": {"migration_id": 1, "exists": True, "state": "DONE", "reason": "migrated"},

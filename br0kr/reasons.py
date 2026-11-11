@@ -85,6 +85,7 @@ UNKNOWN_MIGRATION: Final = "unknown_migration"
 # ── The admission queue ─────────────────────────────────────────────────────────────────────────────────────────
 QUEUED: Final = "queued"                                      # parked; poll lease_status, heartbeat to hold the spot
 QUEUE_FULL: Final = "queue_full"
+WAIT_TIMEOUT: Final = "wait_timeout"                          # wait_for_lease: not there yet; call it again
 NO_REACHABLE_INSTANCE_REPLICATING: Final = "no_reachable_instance_replicating"   # parked behind a template copy
 
 # ── Placement: where a templated clone may land ─────────────────────────────────────────────────────────────────

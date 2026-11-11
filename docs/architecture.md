@@ -607,6 +607,10 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
      step is `scripts/run_pdm.sh` against it, then a live cross-cluster proof, then enabling it. See
      [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
 
+10. ⏳ Push notification of lease state changes (webhooks). Until then `wait_for_lease` waits server-side, at
+    most 60 s a call, so an agent does not poll; webhooks would need a delivery table, retries and an egress
+    allow-list (review FEAT-03).
+
 ## Non-goals
 
 Out of scope by decision, not by omission. Each has its reason, so a request for one can be answered by

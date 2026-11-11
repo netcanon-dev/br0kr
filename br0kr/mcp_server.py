@@ -54,7 +54,9 @@ accurate and task-focused.
 """
 from __future__ import annotations
 
+import contextlib
 import functools
+import inspect
 import logging
 import os
 import threading
@@ -195,9 +197,9 @@ def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
                       source_ip=_client_ip(ctx))
         return {"error": reasons.NO_TOKEN}
     # Any bearer at all reaches this lookup, before it is known to be valid (review SEC-01). FastMCP 1.30 runs
-    # br0kr's sync tools on its event loop, so lookups are already one at a time today; the gate caps them at
-    # `_AUTH_GATE.slots` should that dispatch ever become concurrent (an SDK change, or async tools), and a caller
-    # that cannot get a slot within a second is told `busy` without touching the ledger.
+    # br0kr's sync tools on its event loop, one at a time, but the async wait_for_lease runs this in worker threads,
+    # so lookups can be concurrent; the gate caps them at `_AUTH_GATE.slots`, and a caller that cannot get a slot
+    # within a second is told `busy` without touching the ledger.
     try:
         with _AUTH_GATE.slot(), closing(db.connect_with_retry(autocommit=True)) as ac:
             principal = auth.resolve(ac, secret)
@@ -295,6 +297,11 @@ def _enveloped(fn: Callable[..., Any]) -> Callable[..., Any]:
     builds the tool from. A KeyError here, at registration, means a tool has no envelope.RESULT_FLAG entry."""
     name = fn.__name__
     envelope.RESULT_FLAG[name]   # fail at import, not at an agent's first call, for a tool with no verdict rule
+    if inspect.iscoroutinefunction(fn):   # an async tool stays async, so FastMCP awaits it off nothing but the loop
+        @functools.wraps(fn)
+        async def awaited(*args: Any, **kwargs: Any) -> Any:
+            return envelope.envelope(name, await fn(*args, **kwargs))
+        return awaited
 
     @functools.wraps(fn)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -342,10 +349,9 @@ def request_lease(
     lease_not_live); docs/reference/reason-codes.md lists every code with what to do about it.
     Heartbeat the returned lease_id before its ttl_seconds elapse or the broker reclaims it.
 
-    SIZE AND LIFETIME: ttl_seconds is the heartbeat window, at least 10 seconds (else invalid_ttl).
-    A disk on a quota pool is storage_id AND req_disk_gb > 0 together: one without the other is
-    refused (storage_without_disk / disk_without_storage). When the operator enforces clone
-    storage content, a target pool not declared for VM images is refused storage_not_capable.
+    LIMITS: ttl_seconds >= 10 (else invalid_ttl); storage_id and req_disk_gb > 0 go together (else
+    storage_without_disk / disk_without_storage); a target pool not declared for VM images may be
+    refused storage_not_capable.
 
     Set queue=True to WAIT IN LINE instead of being rejected when there's no room right now:
     the request is parked (state PENDING, queued=true) and the broker admits it automatically,
@@ -611,6 +617,123 @@ def lease_status(ctx: Context, lease_id: int) -> dict[str, Any]:
         if not owned:
             return {"error": oerr}
         return gateway.lease_status(c, lease_id)
+
+
+# wait_for_lease (review FEAT-03). FastMCP runs br0kr's sync tools on its event loop, so a sync tool that waited would
+# stall every other call on this gateway, /healthz included. This one is async: it sleeps on the loop and runs its
+# ledger work in worker threads from limiters of its own, never the default one /healthz uses: one for authorisation
+# (callers not yet known to be valid, so a flood of them cannot slow the waits already running) and one for the
+# reads, connects and closes of admitted waits. WAIT_SLOTS caps the waits in
+# flight (each holds a connection for up to WAIT_CAP_SECONDS) and WAIT_SLOTS_PER_TOKEN one token's share of them; one
+# more answers `busy`. The counters are only touched on the event loop between awaits, so they need no lock. `_clock`
+# and `_sleep` are seams for the tests.
+WAIT_CAP_SECONDS = 60
+WAIT_POLL_SECONDS = 2.0
+WAIT_SLOTS = 8
+WAIT_SLOTS_PER_TOKEN = 3
+_waiting = 0
+_waiting_by_token: dict[int | None, int] = {}
+_wait_threads: dict[str, anyio.CapacityLimiter] = {}
+_clock = time.monotonic
+_sleep = anyio.sleep
+
+
+async def _in_wait_thread(fn: Callable[..., Any], *args: Any, pool: str = "wait") -> Any:
+    """`fn(*args)` in a worker thread from wait_for_lease's limiter for `pool` ("auth" or "wait"), each created on
+    first use, on the event loop."""
+    limiter = _wait_threads.get(pool)
+    if limiter is None:
+        limiter = _wait_threads[pool] = anyio.CapacityLimiter(WAIT_SLOTS + 4)
+    return await anyio.to_thread.run_sync(fn, *args, limiter=limiter)
+
+
+async def _close_wait_conn(conn: psycopg.Connection[Any]) -> None:
+    """Close the wait's connection even when the wait was cancelled (a client that disconnected): the close runs
+    shielded, so the cancellation cannot skip it and leak a ledger connection."""
+    with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+        await _in_wait_thread(conn.close)
+
+
+def _owned_status(conn: psycopg.Connection[Any], lease_id: int, principal: auth.Principal) -> dict[str, Any]:
+    """lease_status behind the same ownership gate as the lease_status tool, ending the read transaction so a held
+    connection never idles in one between polls."""
+    try:
+        owned, oerr = auth.lease_owned_by(conn, lease_id, principal.project_id)
+        if not owned:
+            return {"error": oerr}
+        return gateway.lease_status(conn, lease_id)
+    finally:
+        conn.rollback()
+
+
+async def _wait(lease_id: int, principal: auth.Principal, until_state: str, budget: float,
+                want_ip: bool) -> dict[str, Any]:
+    """Poll the lease every WAIT_POLL_SECONDS on one connection until gateway.wait_settled stops it or `budget`
+    seconds pass. A connection lost mid-wait (a ledger failover) is replaced once, through `_conn`'s retrying
+    connect (its retries are bounded by db.connect_with_retry, and can run past the budget); a second loss, or a
+    loss after the budget is spent, raises. The budget always counts from the start of the wait. A wait that did
+    not get there names why: wait_timeout (still on its way), lease_not_live (it ended) or unknown_lease."""
+    start = _clock()
+    conn = await _in_wait_thread(_conn)
+    reconnected = False
+    try:
+        while True:
+            try:
+                status: dict[str, Any] = await _in_wait_thread(_owned_status, conn, lease_id, principal)
+            except (psycopg.OperationalError, psycopg.InterfaceError):
+                if reconnected or _clock() - start >= budget:
+                    raise
+                reconnected = True
+                log.warning("wait_for_lease lost its ledger connection; reconnecting once", exc_info=True,
+                            extra={"lease_id": lease_id})
+                await _close_wait_conn(conn)
+                conn = await _in_wait_thread(_conn)
+                continue
+            if "error" in status:
+                return status
+            stop, reached = gateway.wait_settled(status, until_state, want_ip)
+            waited = _clock() - start
+            if stop or waited >= budget:
+                out = {**status, "reached": reached, "waited_s": round(waited, 1)}
+                if not reached:
+                    out["reason"] = (reasons.WAIT_TIMEOUT if not stop else
+                                     reasons.LEASE_NOT_LIVE if status.get("exists") else reasons.UNKNOWN_LEASE)
+                return out
+            await _sleep(min(WAIT_POLL_SECONDS, budget - waited))
+    finally:
+        await _close_wait_conn(conn)
+
+
+@_tool
+async def wait_for_lease(ctx: Context, lease_id: int,
+                         until_state: Literal["ADMITTED", "PROVISIONING", "ACTIVE"] = "ACTIVE",
+                         timeout_s: int = 30, want_ip: bool = True) -> dict[str, Any]:
+    """Wait server-side (timeout_s, at most 60 s) until your lease reaches until_state (ADMITTED, PROVISIONING or
+    ACTIVE; default ACTIVE) or ends, instead of polling lease_status. For ACTIVE with want_ip, a lease that asked
+    for ssh access also waits for its ip_address. Returns lease_status's answer plus reached and waited_s; ok is
+    reached. Else reason wait_timeout: call again (keep renewing; read hold_reason; no IP ever? want_ip=false), or
+    lease_not_live: it ended (read released_reason). Too many waits: {"error":"busy"}, retry or poll
+    lease_status. Your project's leases only. Read tier."""
+    global _waiting
+    principal = await _in_wait_thread(_authorize, ctx, "wait_for_lease", pool="auth")
+    if isinstance(principal, dict):
+        return principal
+    token = principal.token_id
+    if _waiting >= WAIT_SLOTS or _waiting_by_token.get(token, 0) >= WAIT_SLOTS_PER_TOKEN:
+        log.warning("wait_for_lease refused busy: %d waits running, %d for this token", _waiting,
+                    _waiting_by_token.get(token, 0), extra={"lease_id": lease_id, "token_id": token})
+        return {"error": reasons.BUSY}
+    _waiting += 1
+    _waiting_by_token[token] = _waiting_by_token.get(token, 0) + 1
+    try:
+        return await _wait(lease_id, principal, until_state, min(max(timeout_s, 0), WAIT_CAP_SECONDS), want_ip)
+    finally:
+        _waiting -= 1
+        left = _waiting_by_token[token] - 1
+        if left:
+            _waiting_by_token[token] = left
+        else:
+            del _waiting_by_token[token]
 
 
 @_tool

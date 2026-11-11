@@ -32,6 +32,7 @@ operator tools need an operator token. A tenant token always acts on its own pro
 | [`queue_status`](#queue_status) | read | all gateways | Check a QUEUED lease: its state and how many requests are AHEAD of it in line (its GLOBAL position across the whole queue). |
 | [`queue_view`](#queue_view) | read | all gateways | View YOUR project's admission queue: depth plus the oldest-first head of your waiting requests (up to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's target node has been cordoned (it won't promote until an operator uncordons it or you cancel and re-request elsewhere), else null (a null with room still waiting is transient — it will promote). |
 | [`replication_status`](#replication_status) | read | all gateways | Status of a replication job: its state (REQUESTED → COPYING → CONVERTING → READY \| FAILED), mechanism, attempts, any (pre-redacted) error, the target (cluster/storage), the declared size, `replication_enabled` (whether the data plane is advancing jobs yet), and `age_seconds`. |
+| [`wait_for_lease`](#wait_for_lease) | read | all gateways | Wait server-side (timeout_s, at most 60 s) until your lease reaches until_state (ADMITTED, PROVISIONING or ACTIVE; default ACTIVE) or ends, instead of polling lease_status. |
 | [`whoami`](#whoami) | read | all gateways | Identify the tenant + privilege THIS token acts as — so you can confirm WHICH project the connector is bound to before you request or release anything. |
 | [`cancel_lease`](#cancel_lease) | consume | all gateways | Give up a QUEUED request (or release a live lease you no longer want). |
 | [`cancel_leases`](#cancel_leases) | consume | all gateways | Give up MANY queued requests (or release the live ones) in one call — the bulk form of cancel_lease. |
@@ -155,6 +156,15 @@ Tier **read**, served by all gateways. View YOUR project's admission queue: dept
 Tier **read**, served by all gateways. Status of a replication job: its state (REQUESTED → COPYING → CONVERTING → READY \| FAILED), mechanism, attempts, any (pre-redacted) error, the target (cluster/storage), the declared size, `replication_enabled` (whether the data plane is advancing jobs yet), and `age_seconds`.
 
 - `replication_id` (integer, required)
+
+### wait_for_lease
+
+Tier **read**, served by all gateways. Wait server-side (timeout_s, at most 60 s) until your lease reaches until_state (ADMITTED, PROVISIONING or ACTIVE; default ACTIVE) or ends, instead of polling lease_status.
+
+- `lease_id` (integer, required)
+- `until_state` (string, default `ACTIVE`)
+- `timeout_s` (integer, default `30`)
+- `want_ip` (boolean, default `true`)
 
 ### whoami
 

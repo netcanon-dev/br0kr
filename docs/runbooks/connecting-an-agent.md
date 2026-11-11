@@ -126,8 +126,12 @@ Once connected the agent sees the tools and calls them like any other MCP tool. 
    `req_disk_gb`** to debit disk against the pool; omit them and the lease debits ZERO disk (a storage scope
    only bounds requests that name it). (Use `schedule_lease` with `queue=true` to wait for a slot instead of
    being rejected when full.)
-3. Poll `lease_status(lease_id)` until `state` is `ACTIVE` and `ip_address` is non-null (agent-discovered via
-   the guest's qemu-guest-agent), then SSH into that IP with the agent's **own private key** — see
+3. `wait_for_lease(lease_id)` until it answers `ok: true` (`reached: true`): one call waits on the server
+   (`timeout_s`, default 30, at most 60) for `state` `ACTIVE` and a non-null `ip_address` (agent-discovered via
+   the guest's qemu-guest-agent), so the agent does not poll `lease_status` turn after turn. On `wait_timeout`
+   call it again and keep calling `renew_lease` within the lease's `ttl_seconds`; a guest image without the
+   qemu-guest-agent never reports an IP, so wait with `want_ip=false` there. On `lease_not_live` the lease ended:
+   read `released_reason`. Then SSH into that IP with the agent's **own private key** — see
    [vm-access.md](vm-access.md).
 4. `renew_lease` to hold it, `release_lease` when done (or let the reaper reclaim it on TTL). For a VM that
    must outlive the session (a dev box, a service), ask for `pinned=true`: the broker never reclaims a pinned

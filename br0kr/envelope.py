@@ -49,6 +49,7 @@ RESULT_FLAG: dict[str, Verdict] = {
     "release_lease": "released",
     "cancel_lease": "cancelled",
     "lease_status": "exists",
+    "wait_for_lease": "reached",
     "queue_status": "exists",
     "renew_leases": None,
     "release_leases": None,
@@ -93,6 +94,7 @@ RESULT_FLAG: dict[str, Verdict] = {
 # The reason a lookup that found nothing gets, when its answer names none.
 NOT_FOUND: dict[str, str] = {
     "lease_status": reasons.UNKNOWN_LEASE,
+    "wait_for_lease": reasons.UNKNOWN_LEASE,
     "queue_status": reasons.UNKNOWN_LEASE,
     "migration_status": reasons.UNKNOWN_MIGRATION,
     "node_capacity": reasons.UNKNOWN_NODE,

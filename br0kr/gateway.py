@@ -476,6 +476,29 @@ def lease_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
     return {"lease_id": lease_id, "exists": True, **info}
 
 
+# The states a lease passes through on its way to a guest, in order: wait_for_lease returns once a lease is at or past
+# the one asked for (review FEAT-03). Any other state (RELEASING, RELEASED, REJECTED, RELEASE_FAILED) means it ended.
+_PROGRESS: tuple[str, ...] = ("PENDING", "ADMITTED", "PROVISIONING", "ACTIVE")
+WAIT_STATES: tuple[str, ...] = _PROGRESS[1:]
+
+
+def wait_settled(status: Mapping[str, Any], until_state: str, want_ip: bool) -> tuple[bool, bool]:
+    """For one lease_status answer, (stop waiting, the lease got there). It got there when its state is at or past
+    `until_state` in _PROGRESS; when that state is ACTIVE and `want_ip` is set, a lease that asked for ssh access
+    also needs its `ip_address` (the daemon stamps it once the guest boots). A lease that does not exist, or has
+    left the path (released, rejected), stops the wait without getting there. Pure, so the waiting loop's decision
+    is tested without a clock."""
+    state = status.get("state")
+    if not status.get("exists") or state not in _PROGRESS:
+        return True, False
+    if _PROGRESS.index(state) < _PROGRESS.index(until_state):
+        return False, False
+    if (until_state == "ACTIVE" and want_ip and status.get("access_requested")
+            and not status.get("ip_address")):
+        return False, False
+    return True, True
+
+
 def cancel_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
     """Cancel a lease: drop it while it is still queued, or release it (destroying its VM) once it is live.
 

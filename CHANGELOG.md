@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **`wait_for_lease`: one call waits server-side (up to 60 s) for a lease to be ready.** Agents polled
+  `lease_status` turn after turn; the tool is async, so a wait never stalls the gateway (FEAT-03).
 - **One way to tell whether any tool call worked: `ok`, and a `reason` when false.** Agents met five failure
   shapes; `br0kr/envelope.py` adds both keys to every MCP answer, keeping the old ones (`test_envelope.py`, UX-03).
 - **Every reason code an agent can receive, with what to do: `docs/reference/reason-codes.md`.** ~15 were written

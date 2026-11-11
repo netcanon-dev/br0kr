@@ -151,12 +151,14 @@ Pass your own SSH public key; optionally a `ci_user` and a static `ip_config` (d
 // -> { "lease_id": 7, "admitted": true, ... }
 ```
 
-Then poll `lease_status` until the guest has booted and the agent reports its IP:
+Then wait until the guest has booted and the agent reports its IP. `wait_for_lease` does the waiting on the
+server (`timeout_s`, default 30, at most 60 a call; call it again on `reason: wait_timeout`), so the agent needs
+no poll loop of its own:
 
 ```jsonc
-// lease_status(7)
-{ "lease_id": 7, "state": "ACTIVE", "ip_address": "192.168.1.214", "ci_user": "runner",
-  "vmid": 9901, "node_id": "pve1", "exists": true }
+// wait_for_lease(7)
+{ "ok": true, "lease_id": 7, "state": "ACTIVE", "ip_address": "192.168.1.214", "ci_user": "runner",
+  "vmid": 9901, "node_id": "pve1", "exists": true, "reached": true, "waited_s": 24.0 }
 // agent:  ssh runner@192.168.1.214   (with its own private key)
 ```
 

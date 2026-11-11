@@ -77,6 +77,7 @@ VERB_TIER: dict[str, str] = {
     "queue_view": "read",
     "list_leases": "read",          # the caller's ACTIVE leases (operator token: all tenants')
     "lease_status": "read",
+    "wait_for_lease": "read",       # lease_status, waited for server-side (at most 60 s)
     "lease_statuses": "read",       # bulk read: status of many of your leases in one call
     "queue_status": "read",
     "migration_status": "read",

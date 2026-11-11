@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from br0kr import auth, db, gateway, mcp_server, multidisk, ratelimit, settings
+from br0kr import auth, db, gateway, mcp_server, multidisk, ratelimit, reasons, settings
 
 pytestmark = pytest.mark.unit
 
@@ -1651,3 +1651,261 @@ def test_detect_template_bridge_reports_an_unroutable_node_or_no_net0_bridge(mon
     monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     monkeypatch.setattr(mcp_server.nodes, "from_ledger", lambda _c, env: registry)
     assert mcp_server.detect_template_bridge(object(), "debian12") == expected
+
+
+# ── wait_for_lease (review FEAT-03) ───────────────────────────────────────────────────────────────────────────────
+class _WaitConn:
+    """A connection wait_for_lease holds for one wait: closing it and rolling it back are observed."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.rollbacks = 0
+
+    def close(self) -> None:
+        self.closed = True
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def _status(state: str, *, ip: str | None = None, access: bool = True, exists: bool = True) -> dict:
+    return {"lease_id": 7, "exists": exists, "state": state, "ip_address": ip, "access_requested": access,
+            "released_reason": None, "hold_reason": None}
+
+
+def _run_wait(monkeypatch, statuses, *, token: int = 1, conns: list | None = None, threads: dict | None = None,
+              **kw):
+    """Run wait_for_lease against a scripted sequence of `_owned_status` results (the last one repeats; an
+    exception instance is raised), on a fake clock that only the waits advance. Returns (answer, the sleeps it
+    took, the connections it opened). `threads`, if given, records the thread each ledger seam ran on."""
+    import asyncio
+    import threading
+
+    clock = [100.0]
+    sleeps: list[float] = []
+    opened: list[_WaitConn] = [] if conns is None else conns
+    seq = list(statuses)
+
+    def note(seam: str) -> None:
+        if threads is not None:
+            threads.setdefault(seam, set()).add(threading.get_ident())
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    def authorize(_ctx, _verb):
+        note("authorize")
+        return auth.Principal("projA", "read", token)
+
+    def conn():
+        note("conn")
+        opened.append(_WaitConn())
+        return opened[-1]
+
+    def owned_status(_conn, _lid, _principal):
+        note("owned_status")
+        item = seq.pop(0) if len(seq) > 1 else seq[0]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(mcp_server, "_authorize", authorize)
+    monkeypatch.setattr(mcp_server, "_conn", conn)
+    monkeypatch.setattr(mcp_server, "_owned_status", owned_status)
+    monkeypatch.setattr(mcp_server, "_clock", lambda: clock[0])
+    monkeypatch.setattr(mcp_server, "_sleep", sleep)
+    monkeypatch.setattr(mcp_server, "_wait_threads", {})   # a limiter belongs to one event loop
+    # A bound on real time, so a wait that never ends (a broken once-only reconnect) fails instead of hanging.
+    out = asyncio.run(asyncio.wait_for(mcp_server.wait_for_lease(SimpleNamespace(), 7, **kw), 10))
+    return out, sleeps, opened
+
+
+def test_wait_for_lease_returns_as_soon_as_the_lease_gets_there(monkeypatch):
+    """A lease that goes PENDING, ADMITTED, then ACTIVE with its IP ends the wait on the read that sees it, polling
+    every 2 s in between, and answers lease_status's keys plus reached and waited_s; the held connection is closed
+    and both slot counters are back to empty. Guards the wait running to its timeout after the lease is ready, and
+    a slot that is never given back (after 8 calls the tool would answer busy forever)."""
+    out, sleeps, conns = _run_wait(monkeypatch, [_status("PENDING"), _status("ADMITTED"),
+                                                _status("ACTIVE", ip="10.0.0.5")])
+    assert (out["state"], out["ip_address"], out["reached"], out["waited_s"]) == ("ACTIVE", "10.0.0.5", True, 4.0)
+    assert "reason" not in out and sleeps == [mcp_server.WAIT_POLL_SECONDS] * 2
+    assert [c.closed for c in conns] == [True]
+    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+
+
+def test_wait_for_lease_times_out_with_the_last_status(monkeypatch):
+    """A lease that stays queued ends the wait at timeout_s with its last status, reached false and reason
+    wait_timeout (call again), the final sleep trimmed to the time left. Guards the wait overrunning what the agent
+    asked for, and a timeout reading as success to an agent that branches on ok."""
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("PENDING")], timeout_s=5)
+    assert (out["state"], out["reached"], out["waited_s"], out["reason"]) == ("PENDING", False, 5.0,
+                                                                            reasons.WAIT_TIMEOUT)
+    assert sleeps == [2.0, 2.0, 1.0]
+
+
+def test_wait_for_lease_never_waits_past_the_cap(monkeypatch):
+    """A timeout_s over the cap waits 60 seconds and no longer, and a negative one reads once without waiting.
+    Guards one call holding a worker and a ledger connection for as long as an agent asks (the review's 60 s cap,
+    pinned as a number so a changed constant fails here)."""
+    assert mcp_server.WAIT_CAP_SECONDS == 60
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("PENDING")], timeout_s=600)
+    assert out["waited_s"] == 60 == sum(sleeps)
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("PENDING")], timeout_s=-3)
+    assert (out["waited_s"], sleeps) == (0.0, [])
+
+
+def test_wait_for_lease_stops_when_the_lease_ends_and_waits_for_the_ip(monkeypatch):
+    """A lease that is released while waited on ends the wait at once with reached false and reason
+    lease_not_live (its released_reason says why); an ACTIVE lease that asked for access keeps the wait going until
+    its IP appears, and with want_ip false it does not. Guards waiting a full minute on a lease that is gone, and
+    handing back an ACTIVE lease with no address to ssh to."""
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("ADMITTED"), _status("RELEASED")])
+    assert (out["state"], out["reached"], out["reason"], sleeps) == ("RELEASED", False, reasons.LEASE_NOT_LIVE,
+                                                                     [2.0])
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("ACTIVE"), _status("ACTIVE", ip="10.0.0.9")])
+    assert (out["ip_address"], out["reached"], len(sleeps)) == ("10.0.0.9", True, 1)
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("ACTIVE")], want_ip=False)
+    assert (out["reached"], sleeps) == (True, [])
+
+
+def test_wait_for_lease_refuses_another_tenants_lease_and_too_many_waits(monkeypatch):
+    """The ownership gate's refusal (lease_forbidden) comes straight back and the connection is still closed. With
+    every wait slot taken, or this token's share of them, the call answers busy before opening a connection, while
+    another token with slots left still waits. Guards a wait leaking another tenant's lease state, an unbounded
+    number of held connections, and one tenant locking every other tenant out of waiting."""
+    out, sleeps, conns = _run_wait(monkeypatch, [{"error": "lease_forbidden"}])
+    assert (out, sleeps, [c.closed for c in conns]) == ({"error": "lease_forbidden"}, [], [True])
+    monkeypatch.setattr(mcp_server, "_waiting", mcp_server.WAIT_SLOTS)
+    out, _sleeps, conns = _run_wait(monkeypatch, [_status("PENDING")])
+    assert out == {"error": "busy"} and conns == []
+    monkeypatch.setattr(mcp_server, "_waiting", mcp_server.WAIT_SLOTS_PER_TOKEN)
+    monkeypatch.setattr(mcp_server, "_waiting_by_token", {1: mcp_server.WAIT_SLOTS_PER_TOKEN})
+    out, _sleeps, conns = _run_wait(monkeypatch, [_status("PENDING")], token=1)
+    assert out == {"error": "busy"} and conns == []
+    out, _sleeps, conns = _run_wait(monkeypatch, [_status("ACTIVE", ip="10.0.0.5")], token=2)
+    assert out["reached"] is True and mcp_server._waiting_by_token == {1: mcp_server.WAIT_SLOTS_PER_TOKEN}
+
+
+def test_a_cancelled_wait_closes_its_connection_and_frees_its_slot(monkeypatch):
+    """A wait cancelled mid-sleep (the client disconnected; MCP cancels through an anyio cancel scope) still
+    closes its ledger connection and gives its slots back. Guards the cleanup being skipped by the cancellation it
+    runs under: a leaked connection per abandoned wait, and slots that never come back."""
+    import asyncio
+
+    import anyio
+
+    conns: list[_WaitConn] = []
+
+    async def scenario():
+        with anyio.move_on_after(0.05):
+            await mcp_server.wait_for_lease(SimpleNamespace(), 7)
+
+    async def real_sleep(seconds: float) -> None:
+        await anyio.sleep(30)
+
+    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _verb: auth.Principal("projA", "read", 1))
+    monkeypatch.setattr(mcp_server, "_conn", lambda: conns.append(_WaitConn()) or conns[-1])
+    monkeypatch.setattr(mcp_server, "_owned_status", lambda _c, _lid, _p: _status("PENDING"))
+    monkeypatch.setattr(mcp_server, "_sleep", real_sleep)
+    monkeypatch.setattr(mcp_server, "_wait_threads", {})
+    asyncio.run(scenario())
+    assert [c.closed for c in conns] == [True]
+    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+
+
+def test_a_wait_rides_one_lost_connection_and_frees_its_slot_on_errors(monkeypatch):
+    """A connection lost mid-wait (a ledger failover) is replaced once and the wait carries on; a second loss
+    raises, every connection opened is closed, and the slots are free again, as they are when the connect itself
+    fails; the budget still counts from the start of the wait. Guards a failover turning every running wait into a
+    raw driver error, a reconnect that extends the wait, and a slot leaked by an error."""
+    import psycopg
+
+    lost = psycopg.OperationalError("server closed the connection unexpectedly")
+    out, _sleeps, conns = _run_wait(monkeypatch, [lost, _status("ACTIVE", ip="10.0.0.5")])
+    assert out["reached"] is True and [c.closed for c in conns] == [True, True]
+    out, sleeps, _conns = _run_wait(monkeypatch, [_status("PENDING"), lost, _status("PENDING")], timeout_s=5)
+    assert (out["waited_s"], sleeps) == (5.0, [2.0, 2.0, 1.0])   # the reconnect did not restart the budget
+    conns = []
+    with pytest.raises(psycopg.OperationalError):
+        _run_wait(monkeypatch, [lost, lost], conns=conns)
+    assert [c.closed for c in conns] == [True, True]
+    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+
+    def no_ledger():
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(mcp_server, "_conn", no_ledger)
+    import asyncio
+    with pytest.raises(psycopg.OperationalError):
+        asyncio.run(mcp_server.wait_for_lease(SimpleNamespace(), 7))
+    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+
+
+def test_wait_for_lease_does_its_ledger_work_off_the_event_loop(monkeypatch):
+    """Authorisation, opening the connection and each read run in worker threads, never on the thread running the
+    event loop, and authorisation on a limiter of its own. Guards a refactor calling one of them directly in the
+    coroutine (that call would block the loop, and with it every other tool and /healthz, for as long as the ledger
+    takes to answer), and a flood of unauthenticated waits taking the threads running waits need."""
+    import threading
+
+    threads: dict = {}
+    _run_wait(monkeypatch, [_status("PENDING"), _status("ACTIVE", ip="10.0.0.5")], threads=threads)
+    loop_thread = threading.get_ident()   # asyncio.run drives the loop on this thread
+    assert set(threads) == {"authorize", "conn", "owned_status"}
+    assert all(loop_thread not in idents for idents in threads.values()), threads
+    assert set(mcp_server._wait_threads) == {"auth", "wait"}   # authorisation runs on its own limiter
+
+
+def test_owned_status_gates_ownership_and_always_ends_the_read(monkeypatch):
+    """The real `_owned_status`: a lease outside the caller's project answers lease_forbidden without reading the
+    lease; an owned one answers gateway.lease_status; the read transaction is rolled back on every path, a raise
+    included. Guards a wait leaking another tenant's lease state, and a held connection idling in a transaction
+    between polls."""
+    principal = auth.Principal("projA", "read", 1)
+    owned = {7: True}
+    monkeypatch.setattr(auth, "lease_owned_by",
+                        lambda _c, lid, _p: (True, None) if owned.get(lid) else (False, "lease_forbidden"))
+    calls: list[int] = []
+
+    def lease_status(_c, lid):
+        calls.append(lid)
+        if lid == 9:
+            raise RuntimeError("boom")
+        return _status("ACTIVE")
+
+    monkeypatch.setattr(gateway, "lease_status", lease_status)
+    conn = _WaitConn()
+    assert mcp_server._owned_status(conn, 8, principal) == {"error": "lease_forbidden"} and calls == []
+    assert mcp_server._owned_status(conn, 7, principal)["state"] == "ACTIVE" and calls == [7]
+    owned[9] = True
+    with pytest.raises(RuntimeError):
+        mcp_server._owned_status(conn, 9, principal)
+    assert conn.rollbacks == 3
+
+
+def test_wait_settled_is_at_or_past_the_state_asked_for():
+    """gateway.wait_settled stops a wait at or past until_state (an ACTIVE lease satisfies a wait for ADMITTED), on
+    a lease that left the path or does not exist, and holds an ACTIVE lease that asked for access until its IP when
+    want_ip is set. Guards the order of states drifting from the path a lease actually takes."""
+    ws = gateway.wait_settled
+    assert ws(_status("PENDING"), "ADMITTED", True) == (False, False)
+    assert ws(_status("ACTIVE", ip="1.2.3.4"), "ADMITTED", True) == (True, True)
+    assert ws(_status("ACTIVE"), "ADMITTED", True) == (True, True)
+    assert ws(_status("ACTIVE"), "ACTIVE", True) == (False, False)
+    assert ws(_status("ACTIVE", access=False), "ACTIVE", True) == (True, True)
+    assert ws(_status("RELEASING"), "ACTIVE", True) == (True, False)
+    assert ws(_status("REJECTED"), "ACTIVE", True) == (True, False)
+    assert ws(_status("PENDING", exists=False), "ACTIVE", True) == (True, False)
+    assert gateway.WAIT_STATES == ("ADMITTED", "PROVISIONING", "ACTIVE")
+
+
+def test_wait_for_lease_is_async_so_a_wait_does_not_stall_the_gateway():
+    """The registered tool is a coroutine function, so FastMCP awaits it instead of running it on its event loop
+    (where br0kr's sync tools run): a minute-long wait leaves every other call, and /healthz, served. Its
+    until_state is a closed choice in the published schema. Guards a refactor turning it back into a sync tool."""
+    import inspect
+
+    tool = {t.name: t for t in mcp_server.mcp._tool_manager.list_tools()}["wait_for_lease"]
+    assert tool.is_async and inspect.iscoroutinefunction(tool.fn)
+    assert tool.parameters["properties"]["until_state"]["enum"] == list(gateway.WAIT_STATES)

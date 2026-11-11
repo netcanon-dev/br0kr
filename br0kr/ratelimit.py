@@ -12,8 +12,9 @@ agent. These two primitives bound that, in process, with no ledger round trip:
     key per request still meets the ceiling). Its key map is bounded (least recently seen evicted).
 
 Both are thread-safe (the shim is a thread-per-connection server) and take an injectable clock, so the tests
-are deterministic. In the gateway the token lookup is already serialized today (FastMCP 1.30 runs br0kr's sync
-tools on its event loop); its gate is the bound for when that dispatch becomes concurrent. They hold only counts
+are deterministic. In the gateway the token lookup is serialized for br0kr's sync tools (FastMCP 1.30 runs them
+on its event loop) but concurrent for the async wait_for_lease, which authorises in worker threads; the gate bounds
+those. They hold only counts
 in memory: a restart resets them, which is acceptable for a flood bound. A per-IP limit at the edge (a Cloudflare
 rate-limiting rule, see docs/runbooks/public-tunnel.md) is the defence in depth in front of them.
 """
