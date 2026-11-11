@@ -6,11 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 newest changes go under `[Unreleased]` and are promoted to a dated, versioned
 section at a release. Versioning follows [Semantic Versioning](https://semver.org).
 
-**Discipline:** one entry per behaviour-affecting change, **rationale-first** —
-lead with *why* (the bug, the gap, the decision); the diff already shows the
-*what*. An entry that names the test/doc it landed with is a good entry.
+**Discipline:** one entry per behaviour-affecting change, **at most three lines**:
+lead with *why* (the bug, the gap, the decision), name the test or doc it landed
+with, and link the design doc or PR that holds the detail. The diff shows the
+*what*. `tests/unit/test_repo_hygiene.py` holds `[Unreleased]` to the three lines.
+The entries under 0.1.0 predate the rule and are kept as written.
+
+PR numbers in entries before 0.1.0 refer to the pre-public history and do not
+resolve in this repository.
 
 ## [Unreleased]
+
+## [0.1.0] — 2026-11-11
+
+The first tagged release. br0kr is a Postgres-backed capacity broker that gives AI agents race-free,
+admission-controlled VMs on Proxmox: an MCP gateway with tenant and operator tools, a reconciler daemon that
+clones, boots, renews and reaps, an operator dashboard, per-project quotas with an admission queue, a template
+catalog built from allowlisted sources and replicated between pools, and a Postgres primary/standby ledger with
+health, metrics and a DR-posture view. It runs a homelab fleet in production. Every ledger invariant is proven
+against a real Postgres, and leasing, cloud-init access and template builds also on a real Proxmox node.
+
+- **Dormant:** the Proxmox Datacenter Manager driver and cross-cluster lease migration, proven against a mock PDM
+  and disabled by default until there is real PDM hardware to verify against.
+- **Off by default:** the template replication engine (`BR0KR_REPLICATE_LIMIT=0`; its `rebuild_source` mechanism
+  is not live-verified yet) and multi-disk leases (the `multi_disk_enabled` setting).
+- **Known limitations:** a cross-node clone rewrites only `net0`, so a multi-NIC template's other NICs keep their
+  baked bridges; bridge suggestions match by name only, so the operator verifies the L2 network out of band.
 
 ### Security
 - **CI verifies the gitleaks binary it downloads (`.github/workflows/ci.yml`, `.github/workflows/security.yml`).**

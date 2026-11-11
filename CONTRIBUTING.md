@@ -24,8 +24,22 @@ capacity or a real guest, so the contribution shape is opinionated.
   secret-scan, type and unit steps CI runs.
 - **Conventional Commits** with the component as scope (`fix(admission): ...`),
   and a body that opens with *why*. The diff shows the *what*.
-- A `CHANGELOG.md` `[Unreleased]` entry for anything behaviour-affecting, and
-  a `SECURITY.md` row update for any change to a control or trust boundary.
+- A `CHANGELOG.md` `[Unreleased]` entry for anything behaviour-affecting (at
+  most three lines: why first, then a link to the design doc or PR), and a
+  `SECURITY.md` row update for any change to a control or trust boundary.
+
+## Releases
+
+Releases are cut by hand; no workflow runs on a tag, so a tag publishes nothing
+by itself.
+
+1. In one PR, set `br0kr/__init__.py` `__version__` to the new version and
+   promote `[Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] — YYYY-MM-DD`, with a
+   short summary block on top and a new empty `[Unreleased]` above it.
+   `tests/unit/test_repo_hygiene.py` fails while the newest section and
+   `__version__` disagree.
+2. After it merges, tag that commit `vX.Y.Z` on `main` and create the GitHub
+   release from the summary block.
 
 ## Dependencies
 

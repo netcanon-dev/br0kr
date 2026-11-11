@@ -8,7 +8,8 @@ They guard the *policy*, not the bytes; the checker guards the bytes.
 
 The CI harness tests at the bottom guard the wiring of the real-Postgres harness job the same way:
 pure file reads, so they run everywhere, while the job itself is the only place the harnesses run.
-The mypy test pins the strict flags the engine has earned, so they cannot quietly flip back."""
+The mypy test pins the strict flags the engine has earned, so they cannot quietly flip back, and the
+CHANGELOG tests keep a release's version and its notes in step."""
 from __future__ import annotations
 
 import importlib.util
@@ -201,3 +202,41 @@ def test_mypy_rejects_untyped_defs_and_any_returns():
     cfg = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["mypy"]
     assert cfg["disallow_untyped_defs"] is True and cfg["warn_return_any"] is True
     assert cfg["files"] == ["br0kr"]
+
+
+def _changelog_sections() -> list[tuple[str, str]]:
+    """(heading, body) for each `## [...]` section of CHANGELOG.md, in file order; the heading keeps its `[`."""
+    text = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    sections = []
+    for part in re.split(r"^## (?=\[)", text, flags=re.MULTILINE)[1:]:
+        head, _, body = part.partition("\n")
+        sections.append((head.strip(), body))
+    return sections
+
+
+def test_changelog_releases_the_version_the_code_carries():
+    """CHANGELOG.md opens with `[Unreleased]`, then the newest versioned section `[X.Y.Z] — YYYY-MM-DD`, whose
+    version equals `br0kr.__version__`. Guards a release tagged with a version nobody bumped, or a bump whose
+    changes were never promoted out of `[Unreleased]`: docs/standards/ci-cd.md requires a release tag to equal
+    the in-code version (review DOCS-04)."""
+    from br0kr import __version__
+    heads = [head for head, _ in _changelog_sections()]
+    assert heads[0] == "[Unreleased]", heads[:2]
+    newest = re.fullmatch(r"\[(\d+\.\d+\.\d+)\] — \d{4}-\d{2}-\d{2}", heads[1])
+    assert newest is not None, f"the second section is not a dated release: {heads[1]!r}"
+    assert newest.group(1) == __version__, f"CHANGELOG releases {newest.group(1)}, the code says {__version__}"
+
+
+def test_unreleased_changelog_entries_stay_short():
+    """Each `[Unreleased]` entry (a `- ` bullet plus its indented continuation lines) is at most three lines of
+    at most 120 characters: why first, then a link to the design doc or PR that holds the detail. The entries
+    released in 0.1.0 had grown into paragraphs, some lines thousands of characters long, which made the file
+    unreadable as release notes. Guards the changelog drifting back to essays (review DOCS-04)."""
+    entries: list[list[str]] = []
+    for line in _changelog_sections()[0][1].splitlines():
+        if line.startswith("- "):
+            entries.append([line])
+        elif line.startswith("  ") and entries:
+            entries[-1].append(line)
+    too_long = [e[0][:70] for e in entries if len(e) > 3 or any(len(line) > 120 for line in e)]
+    assert not too_long, f"[Unreleased] entries over three lines or 120 columns: {too_long}"
