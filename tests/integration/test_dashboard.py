@@ -335,6 +335,28 @@ def test_operator_gated_reads_still_need_the_operator_token_under_read_auth(monk
     assert called == []                                                  # never reached the verb/ledger
 
 
+def test_get_access_table_matches_the_live_gating_route_by_route(monkeypatch):
+    """docs/api.md tells callers who may read each GET route, from dashboard.GET_ACCESS, but do_GET does the
+    gating in its own per-route branches. This drives EVERY route of the real server (operator and read tokens
+    both configured) with no bearer, the read token and the operator token, and checks the refusals match the
+    documented class: open refuses nobody; read refuses only the missing bearer; operator refuses the read token
+    too. No ledger connects (the injected one, the named-operator lookup's and the denial recorder's all raise),
+    so a route that passes its gate answers 503 (or 400 for a missing parameter), never 401/403. Guards the
+    published reference calling a route open when it is gated, or the reverse."""
+    def unreachable() -> object:
+        raise OSError("no ledger in this test")
+
+    monkeypatch.setattr(dashboard, "_op_connect", unreachable)     # the named-operator lookup fails closed
+    monkeypatch.setattr(dashboard, "_deny_connect", unreachable)   # the best-effort denial audit is skipped
+    want = {"open": (False, False, False), "read": (True, False, False), "operator": (True, True, False)}
+    with _serving(unreachable, token="op", read_token="rt") as port:
+        for path, tag in dashboard._ROUTES.items():
+            codes = (_get(port, path)[0], _get(port, path, token="rt")[0], _get(port, path, token="op")[0])
+            refused = tuple(code in (401, 403) for code in codes)
+            access = dashboard.GET_ACCESS[tag]
+            assert refused == want[access], f"{path} is documented {access!r} but answered {codes}"
+
+
 def test_cancel_requires_the_operator_token(monkeypatch):
     """A POST action is refused unless authorized: with NO server token it is 403 'disabled' (the
     read-only default) even with a bearer; with a token configured, a missing or wrong bearer is 401 — and

@@ -148,7 +148,8 @@ Then poll until the VM is up (a clone and first boot take a minute or two):
 mcp lease_status '{"lease_id": 1}'
 ```
 
-**Proves it:** `"state": "ACTIVE"` with an `ip_address` and `"ci_user": "br0kr"`. Still `ADMITTED` after a
+**Proves it:** `"state": "ACTIVE"` with an `ip_address`. `ci_user` is `null` because the request named none:
+the guest's login user is then the broker's default, `br0kr` (`BR0KR_CI_USER`). Still `ADMITTED` after a
 few minutes means the daemon is not acting on the node: check step 4's registry line and
 `docker compose logs daemon` for a `provision` error (a `403` names the missing Proxmox grant). `ACTIVE` with
 `ip_address: null` that stays null means the template's guest agent is not running (step 2).

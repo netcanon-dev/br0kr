@@ -320,7 +320,9 @@ def lease_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
 
 
 def cancel_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
-    """Drop a QUEUED (PENDING) request before it is promoted → REJECTED. If the request was already
+    """Cancel a lease: drop it while it is still queued, or release it (destroying its VM) once it is live.
+
+    A QUEUED (PENDING) request is dropped before it is promoted → REJECTED. If the request was already
     promoted (now a live lease), it is RELEASED instead (same intent: you no longer want it). Idempotent.
     Returns {lease_id, cancelled, outcome}: ``outcome`` is 'cancelled' (was queued), 'released' (was
     live), or 'noop' (already terminal / unknown)."""

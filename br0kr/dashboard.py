@@ -156,6 +156,19 @@ _ROUTES: dict[str, str] = {
 # off ui_assets.ASSETS so the route table and the served bytes can never disagree.
 _ROUTES.update(dict.fromkeys(ui_assets.ASSETS, "asset"))
 
+# Who may call each GET route, for the generated API reference (docs/api.md). "open" needs no token; "read" is open
+# unless BR0KR_DASHBOARD_READ_TOKEN is set, then needs the read token, the operator token or a named operator;
+# "operator" needs the operator token or a named operator. do_GET does the actual gating; tests/integration/
+# test_dashboard.py proves this table matches it route by route, and a unit test requires every tag to have a row.
+GET_ACCESS: dict[str, str] = {
+    "page": "open", "asset": "open", "health": "open", "meta": "open", "whoami": "open",
+    "overview": "read", "nodes": "read", "clusters": "read", "storage": "read", "projects": "read",
+    "templates": "read", "template_instances": "read", "replications": "read", "leases": "read",
+    "lease_status": "read", "queue": "read", "migrations": "read", "fleet": "read", "ledger": "read",
+    "tokens": "operator", "operators": "operator", "grants": "operator", "sources": "operator",
+    "builds": "operator", "settings": "operator", "audit": "operator", "audit_export": "operator",
+}
+
 # tag → (connection → JSON-able dict). Each references the inventory function at CALL time (not bound at
 # import), so a test that monkeypatches inventory.list_nodes in its home module is seen here.
 _API: dict[str, Callable[[psycopg.Connection[Any]], dict[str, Any]]] = {
@@ -721,15 +734,19 @@ def _parse_settings(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_settings_edit(conn: psycopg.Connection[Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """Verb for /api/settings/edit: apply the validated override patch (settings.set_settings returns None),
-    then return the dict the action contract expects."""
+    """Apply a validated patch to the operator settings, the ledger override layer the daemon and gateway hot-apply.
+
+    The verb for /api/settings/edit: settings.set_settings returns None, so this returns the dict the action
+    contract expects."""
     settings.set_settings(conn, patch)
     return {"updated": True}
 
 
 def _do_reload(conn: psycopg.Connection[Any]) -> dict[str, Any]:
-    """Verb for /api/reload: set the cross-process reload flag (request_reload returns None), then return the
-    dict the action contract expects."""
+    """Ask the daemon to reload its fleet config on its next tick, by setting the flag it reads and clears.
+
+    The verb for /api/reload (the dashboard can't signal the daemon's process): settings.request_reload returns
+    None, so this returns the dict the action contract expects."""
     settings.request_reload(conn)
     return {"reload_requested": True}
 
@@ -795,10 +812,12 @@ def _audit_page(conn: psycopg.Connection[Any], filters: dict[str, Any]) -> dict[
 
 
 def _force_fail_replication_action(c: psycopg.Connection[Any], **k: Any) -> dict[str, Any]:
-    """Force-fail a wedged replication job, then FREE its byte reservation (the documented contract; Fable HIGH).
-    The CAS is committed HERE before the settle so a crash can't settle a still-non-terminal job — mirrors the MCP
-    surface's CAS-then-settle ordering. The settle is UNCONDITIONAL (idempotent): on an already_terminal retry it
-    REPAIRS a reservation left ADMITTED by a crash between a prior CAS commit and its settle (Fable LOW).
+    """Force-fail a wedged replication job, then free its byte reservation.
+
+    That pairing is the documented contract (a Fable HIGH finding). The CAS is committed HERE before the settle
+    so a crash can't settle a still-non-terminal job — mirrors the MCP surface's CAS-then-settle ordering. The
+    settle is UNCONDITIONAL (idempotent): on an already_terminal retry it REPAIRS a reservation left ADMITTED by a
+    crash between a prior CAS commit and its settle (Fable LOW).
     `_action`'s own trailing commit then no-ops."""
     r = replication.force_fail_replication(c, k["replication_id"], k["reason"])
     c.commit()   # commit the (possibly no-op) CAS before settling

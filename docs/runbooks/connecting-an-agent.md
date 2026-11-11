@@ -130,9 +130,97 @@ Once connected the agent sees the tools and calls them like any other MCP tool. 
 4. `renew_lease` to hold it, `release_lease` when done (or let the reaper reclaim it on TTL).
 
 The MCP layer is pure request/response; admission, per-VMID fencing, and the double-allocation floor all happen
-*below* it, unchanged by which client connected.
+*below* it, unchanged by which client connected. Every tool, its tier and its parameters: [api.md](../api.md).
 
-## 6 · First-boot setup — bring your own
+## 6 · From a CI job, with no MCP client
+
+A CI job borrows a VM the same way an agent does, through the same gateway, tiers and project binding, but it has
+no MCP client. [`scripts/br0kr_mcp_call.py`](../../scripts/br0kr_mcp_call.py) is one: a single standard-library
+Python file (copy it into your repository; nothing to `pip install`) that calls any tool and prints its JSON
+result. It reads the bearer from `BR0KR_API_TOKEN` and never from an argument, so the token stays out of process
+lists and CI logs. The gateway URL comes from `BR0KR_MCP_URL` or `--url`; `--cafile ca.pem`, before the
+subcommand, trusts only that CA, for a gateway behind a private one.
+
+- `call TOOL '{"arg": ...}'` calls one tool. `wait LEASE_ID --need-ip` polls `lease_status` until the lease is
+  `ACTIVE` with an address. It gives up early if the lease ends first, and rides out a gateway restart.
+- Exit `0`: the tool answered. **That includes an admission refusal:** `schedule_lease` answers
+  `{"admitted": false, "queued": false, "reason": ...}` with exit 0, so check `admitted or queued` before using
+  the `lease_id`.
+- Exit `1`: the broker said no (an `{"error": ...}`, a lease that ended first, a wait that ran out of time). The
+  answer is on stdout, and a one-line reason on stderr.
+- Exit `2`: no answer came back (no token, bad arguments, an unreachable gateway). A request that timed out after
+  it was sent may still have landed: repeat it with the same `idem_key` and you get that lease back.
+
+A GitHub Actions job that reserves a VM, runs its tests on it and always gives it back. It needs a `consume`
+token for the CI project in the `BR0KR_API_TOKEN` secret, `jq`, and a runner that reaches both the gateway and
+the network the VMs get their addresses on: in practice a self-hosted runner on that network. (A GitHub-hosted
+runner can reach a gateway published through [public-tunnel.md](public-tunnel.md), but not a VM on a private
+LAN.)
+
+```yaml
+jobs:
+  vm-test:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 45                      # shorter than ttl_seconds: a killed job's VM is still reaped
+    env:
+      BR0KR_MCP_URL: https://br0kr.example.org/mcp
+    steps:
+      - uses: actions/checkout@v4            # pin every action to a commit SHA in a real workflow
+      - name: Reserve a VM
+        id: lease
+        env:
+          BR0KR_API_TOKEN: ${{ secrets.BR0KR_API_TOKEN }}
+          JOB_INDEX: ${{ strategy.job-index }}
+        run: |
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/vm_key"     # a throwaway key pair for this run
+          args=$(jq -nc --arg key "$(cat "$RUNNER_TEMP/vm_key.pub")" \
+                        --arg idem "gha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-$JOB_INDEX" \
+            '{idem_key: $idem, req_cpu: 2, req_mem_mb: 4096, template_id: "debian12",
+              ssh_pubkey: $key, ci_user: "ci", ttl_seconds: 3600, queue: true}')
+          for try in 1 2 3; do                 # exit 2 = no answer: the same idem_key is safe to repeat
+            out=$(python3 ci/br0kr_mcp_call.py call schedule_lease "$args") && break
+            rc=$?; [ "$rc" = 2 ] || exit "$rc"; sleep 10
+          done
+          jq -c '{lease_id, admitted, queued, reason}' <<<"$out"
+          jq -e '.admitted or .queued' <<<"$out" > /dev/null          # refused: the reason is printed above
+          echo "lease_id=$(jq -r .lease_id <<<"$out")" >> "$GITHUB_OUTPUT"
+      - name: Wait for it to boot
+        id: vm
+        env:
+          BR0KR_API_TOKEN: ${{ secrets.BR0KR_API_TOKEN }}
+          LEASE_ID: ${{ steps.lease.outputs.lease_id }}
+        run: |
+          st=$(python3 ci/br0kr_mcp_call.py wait "$LEASE_ID" --need-ip --wait-timeout 900)
+          echo "ip=$(jq -r .ip_address <<<"$st")" >> "$GITHUB_OUTPUT"
+      - name: Test on it
+        env:
+          VM_IP: ${{ steps.vm.outputs.ip }}
+        run: |
+          ssh -i "$RUNNER_TEMP/vm_key" -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" "ci@$VM_IP" 'bash -s' < ci/run-tests.sh
+      - name: Give it back
+        if: always() && steps.lease.outputs.lease_id != ''
+        env:
+          BR0KR_API_TOKEN: ${{ secrets.BR0KR_API_TOKEN }}
+          LEASE_ID: ${{ steps.lease.outputs.lease_id }}
+        run: python3 ci/br0kr_mcp_call.py call cancel_lease "{\"lease_id\": $LEASE_ID}"
+```
+
+- **The login user is named in the request** (`ci_user: "ci"`), so the job knows whom to ssh as. A lease that
+  omits it boots with the broker's default (`BR0KR_CI_USER`, `br0kr` unless set), and `lease_status` then reports
+  `ci_user` as null.
+- **The token reaches only the steps that call the broker**, never `actions/checkout` or the tests.
+- **The VM's host key is trusted on first sight** (`accept-new`), into a file kept for this run only, so a later
+  job on a recycled address with a new key isn't refused. That is a fair trade for a throwaway VM on a network
+  you trust.
+- **The `idem_key` is fixed for this job, matrix leg and run attempt.** Repeating the reserve call, as the loop
+  does when no answer came back, returns the same lease instead of a second one; parallel jobs and matrix legs
+  each get their own, and a re-run gets a fresh one.
+- **`cancel_lease` is the clean-up** because it handles both cases: it drops a request still in the queue and
+  releases a lease that is live. A job that runs longer than `ttl_seconds` calls `renew_lease` in between, or the
+  reaper reclaims the VM under it.
+
+## 7 · First-boot setup — bring your own
 
 The broker injects only the **access** slice of cloud-init — the agent's ssh key (`sshkeys`), the login user
 (`ciuser`), and the network (`ipconfig0`) — **not** arbitrary user-data (`runcmd`/`packages`/`write_files`).
@@ -166,7 +254,7 @@ truly need cloud-init semantics.)
 with `request_template_download` (provision tier) and select it via `request_lease`'s `template_id` — then
 every guest boots pre-provisioned, no first-boot step at all.
 
-## 7 · Troubleshooting
+## 8 · Troubleshooting
 
 - **A tool returns `{"error": "..."}` instead of a result** — that's the authorization layer. `no_token` /
   `invalid_token` (the header/env token is missing, wrong, revoked, or expired) · `forbidden_scope` (the
@@ -183,6 +271,7 @@ every guest boots pre-provisioned, no first-boot step at all.
   See [/SECURITY.md](../../SECURITY.md) C12 and [docker-deploy.md](docker-deploy.md).
 
 ## See also
+- [../api.md](../api.md) — every MCP tool (tier, parameters) and every dashboard route, generated from the code
 - [first-vm.md](first-vm.md) — a first lease end to end, calling the gateway by hand before any agent is wired up
 - [operator-tier.md](operator-tier.md) — minting/using the cross-tenant `operator` token (the operator-only verbs, the operator gateway, fleet observability)
 - [vm-access.md](vm-access.md) — the ssh-key handshake for reaching the VM the broker hands back

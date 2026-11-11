@@ -17,6 +17,7 @@ locking, migrations and failover.
 | Stack smoke | `run_*_smoke.sh` | Brings up the Compose stack under a throwaway project and `.env`, checks it, takes it down. No Proxmox. |
 | CI runner | `run_ci_harnesses.sh` | Runs the harnesses in its `HARNESSES` list against an existing Postgres, one fresh database each. CI's `harness — real Postgres` job runs it. |
 | Operator tool | `deploy.sh`, `tls-up.sh`, `backup_ledger.sh`, `restore_ledger.sh`, `bake_template_agent.sh` | Used on a running broker host; see the [operator tools](#operator-tools) table. |
+| Client and reference | `br0kr_mcp_call.py`, `gen_api_reference.py` | The CI client for the gateway, and the generator of the API reference; see [client and reference](#client-and-reference). |
 | Helper | `_pgconn.sh` | Sourced by the ledger tools: moves a DSN password into `PGPASSWORD` so it never reaches `argv`. |
 
 Run any proof from the repo root, for example `bash scripts/run_admission.sh`. Needs Docker and Python 3.11+;
@@ -162,6 +163,13 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 | `backup_ledger.sh` | A `pg_dump` of the ledger, mode `0600`, with retention. | [ledger-ha](../docs/runbooks/ledger-ha.md#backups-durability) |
 | `restore_ledger.sh` | Restores a dump in one transaction; refuses over live leases without `--force`. | [ledger-ha](../docs/runbooks/ledger-ha.md#restore-drill-practice-this-before-you-need-it) |
 | `bake_template_agent.sh` | Installs and enables `qemu-guest-agent` inside a cloud image before it becomes a template. | [vm-access §2](../docs/runbooks/vm-access.md#2-prepare-a-cloud-init-template-operator-once-per-cluster) |
+
+## Client and reference
+
+| Script | What it does | Read more |
+|--------|--------------|-----------|
+| `br0kr_mcp_call.py` | A standard-library MCP client for a shell or a CI job: `call` any gateway tool, `wait` for a lease to go `ACTIVE`. Reads the token from `BR0KR_API_TOKEN` only. Tested against a real FastMCP server by `tests/integration/test_mcp_call_client.py`. | [connecting-an-agent §6](../docs/runbooks/connecting-an-agent.md#6--from-a-ci-job-with-no-mcp-client) |
+| `gen_api_reference.py` | Regenerates `docs/api.md` from the MCP tool registry and the dashboard's route and action tables; `--check` exits 1 when it is stale. Run it after changing a tool, a parameter, a tier, a first docstring sentence or a route. | [api.md](../docs/api.md) |
 
 ## Adding a harness
 

@@ -190,7 +190,8 @@ rejected as "node full" by the very lease it already created.
   **Bulk forms** (`renew_leases`/`release_leases`/`cancel_leases`/`lease_statuses`) fan a single-lease verb
   over many ids in one call via `br0kr/bulk.py` — pure orchestration (per-id ownership gate, per-id
   commit/rollback isolation, deduped + bounded), so a fleet agent needs one round-trip, and they debit no
-  capacity scope.
+  capacity scope. Every tool with its tier and parameters is in [api.md](api.md), generated from this registry
+  by `scripts/gen_api_reference.py`; a CI job with no MCP client calls them through `scripts/br0kr_mcp_call.py`.
 - **Agent auth (`br0kr/auth.py`)** — the gateway is no longer anonymous: every tool requires a per-project
   API token (operator-minted from the dashboard, `br0kr/admin.py`). `mcp_server._authorize` resolves the
   bearer (HTTP `Authorization` header, or `BR0KR_API_TOKEN` on stdio) to a `Principal(project_id, scope)`

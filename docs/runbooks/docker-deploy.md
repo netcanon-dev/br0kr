@@ -854,6 +854,7 @@ git add -A && git checkout-index -a -f
 
 ## See also
 - [connecting-an-agent.md](connecting-an-agent.md) — once the stack is up, pointing an agent's MCP client at the gateway (transport + token)
+- [../api.md](../api.md) — the API reference: the gateway's tools and the dashboard's routes, with who may call each
 - [oauth-connector.md](oauth-connector.md) + [public-tunnel.md](public-tunnel.md) — the OAuth-only (Claude Desktop) connector and how to make it reachable from the cloud
 - [ledger-ha.md](ledger-ha.md) — the ledger HA model, single-primary rule, and failover behaviour
 - [/SECURITY.md](../../SECURITY.md) — C9 (single-writer) + C12 (agent auth + the cleartext-bearer residual TLS closes) + C17 (public reachability) + the secret-management invariants

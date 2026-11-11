@@ -109,9 +109,9 @@ it. The harnesses themselves are catalogued in [scripts/README.md](../scripts/RE
   tick but **DISABLED BY DEFAULT** (`BR0KR_MIGRATE_LIMIT=0`); an operator triggers it from the dashboard, an
   agent watches its own lease via the MCP `migration_status` read. `br0kr/migration.py` +
   [docs/runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
-- ⏳ Next: a pinned (long-lived) lease, a generated API reference with a CI client, and a bounded
-  server-side `wait_for_lease` for agents. The two dormant items above wait for PDM hardware; when it
-  exists, the first step is `bash scripts/run_pdm.sh` pointed at the real box.
+- ⏳ Next: a pinned (long-lived) lease, and a bounded server-side `wait_for_lease` for agents. The two
+  dormant items above wait for PDM hardware; when it exists, the first step is `bash scripts/run_pdm.sh`
+  pointed at the real box.
 - Not planned, with the reasons: see [Non-goals](architecture.md#non-goals) (other backends, a cloud
   burst tier, runner autoscaling, priority or preemption, VM lifecycle operations, a full CLI, IaC providers).
 

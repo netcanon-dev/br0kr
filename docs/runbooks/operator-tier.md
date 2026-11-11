@@ -199,6 +199,7 @@ migration as pre-wired, not proven-live.
   Don't embed it in a repo, a log, or an agent that only needs tenant access.
 
 ## See also
+- [../api.md](../api.md) — every tool with its tier, the operator-only ones marked, plus the dashboard's HTTP routes
 - [connecting-an-agent.md](connecting-an-agent.md) — the general connect path (mint a token, pick a transport, paste the client config); this runbook is its operator-tier specialization
 - [/SECURITY.md](../../SECURITY.md) — C12(e) the operator-token trust boundary; C12 the cleartext-bearer residual + TLS mitigation
 - [cross-cluster-migration.md](cross-cluster-migration.md) — the migration saga `migrate_lease` triggers, and how to enable + live-verify it
