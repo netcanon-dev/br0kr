@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from br0kr import lease, migration, pve
+from br0kr import lease, migration, pve, reasons
 from br0kr.pdm import InventoryItem
 
 pytestmark = pytest.mark.unit
@@ -301,3 +301,15 @@ def test_cancel_migration_rejects_unknown_and_terminal(monkeypatch):
     assert unknown == {"migration_id": 9, "cancelled": False, "state": None, "reason": "unknown_migration"}
     term = migration.cancel_migration(_ScriptConn([_mig_row("DONE")]), 5)
     assert term == {"migration_id": 5, "cancelled": False, "state": "DONE", "reason": "already_terminal"}
+
+
+def test_settling_a_migration_reservation_releases_it_with_its_own_reason(monkeypatch):
+    """A migration's target reservation is retired with released_reason `migration_reservation_settled` (what an
+    operator reading lease_status sees), straight to RELEASED with no destroy; a None id is a no-op. Guards the
+    release reason drifting from the vocabulary (review CODE-01)."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(migration.lease, "release", lambda _c, lid, *, reason: calls.append(("release", lid, reason)))
+    monkeypatch.setattr(migration.lease, "mark_released", lambda _c, lid: calls.append(("released", lid)))
+    migration._settle_reservation(object(), None)
+    migration._settle_reservation(object(), 5)
+    assert calls == [("release", 5, reasons.MIGRATION_RESERVATION_SETTLED), ("released", 5)]

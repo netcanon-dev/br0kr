@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from br0kr import gateway, multidisk, scheduler
+from br0kr import gateway, lease, multidisk, reasons, scheduler
 from br0kr.admission import AdmissionResult, EnqueueResult
 
 pytestmark = pytest.mark.unit
@@ -469,3 +469,17 @@ def test_the_fixed_outcomes_exist_at_zero_before_any_call():
     for tool in ("request_lease", "schedule_lease"):
         for outcome in ("admitted", "queued", "replay", "error"):
             assert (tool, outcome) in snap
+
+
+@pytest.mark.parametrize("prefix", lease.RESERVED_IDEM_PREFIXES)
+def test_a_reserved_idem_key_is_refused_before_admission(monkeypatch, prefix):
+    """An idem_key in a reserved reservation namespace (the migration and replication reservations) is refused
+    `reserved_idem_key` by both request verbs before admit() or the scheduler runs: such a lease would never become a
+    VM, and could collide with a live reservation. Guards an agent minting an internal reservation (review CODE-01)."""
+    monkeypatch.setattr(gateway.admission, "admit", lambda *_a, **_k: pytest.fail("admit must not run"))
+    monkeypatch.setattr(gateway.scheduler, "schedule", lambda *_a, **_k: pytest.fail("schedule must not run"))
+    key = prefix + "7"
+    assert gateway.request_lease(object(), idem_key=key, node_id="n1", req_cpu=1.0,
+                                 req_mem_mb=512)["reason"] == reasons.RESERVED_IDEM_KEY
+    assert gateway.schedule_lease(object(), idem_key=key, req_cpu=1.0,
+                                  req_mem_mb=512)["reason"] == reasons.RESERVED_IDEM_KEY

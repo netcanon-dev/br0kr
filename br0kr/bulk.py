@@ -29,6 +29,8 @@ from typing import Any
 
 import psycopg
 
+from br0kr import reasons
+
 log = logging.getLogger(__name__)
 
 # The most DISTINCT lease ids one bulk call may act on — an OPERATOR-scale bound, never a tool argument, so
@@ -61,7 +63,7 @@ def bulk_lease_op(
     if not seen:
         return {"results": [], "count": 0}
     if len(seen) > max_bulk:
-        return {"error": "batch_too_large", "max": max_bulk, "given": len(seen)}
+        return {"error": reasons.BATCH_TOO_LARGE, "max": max_bulk, "given": len(seen)}
     results: list[dict[str, Any]] = []
     for lid in seen:
         try:
@@ -71,5 +73,5 @@ def bulk_lease_op(
         except Exception:          # one id's failure must NOT abort the batch — roll it back, report, keep going
             conn.rollback()        # discard this id's partial/aborted work; leave a clean txn for the next id
             log.exception("bulk lease op failed for lease %s", lid, extra={"lease_id": lid})
-            results.append({"lease_id": lid, "error": "internal_error"})
+            results.append({"lease_id": lid, "error": reasons.INTERNAL_ERROR})
     return {"results": results, "count": len(results)}

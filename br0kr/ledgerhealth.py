@@ -105,6 +105,15 @@ _SYNC_REQUIRED = "SELECT current_setting('synchronous_standby_names') <> ''"
 # The grant a least-privilege role needs before pg_stat_replication returns anything but NULLs.
 MONITOR_GRANT_HINT = "GRANT pg_monitor TO <the role in PGCONN>"
 
+# The posture's `reason` codes (LedgerReplication.reason): their own vocabulary, read by the dashboard tile and the
+# /metrics scrape, not by agents, so they live here rather than in br0kr/reasons.py. A failed read is
+# `query_failed:<ExceptionClass>`.
+REASON_OK = "ok"
+REASON_NOT_CONFIGURED = "not_configured"
+REASON_IN_RECOVERY = "in_recovery"
+REASON_STATS_MASKED = "stats_masked"
+REASON_QUERY_FAILED = "query_failed"
+
 
 @dataclass(frozen=True)
 class SlotHealth:
@@ -180,7 +189,7 @@ class LedgerReplication:
         return max(seen) if seen else None
 
 
-UNREADABLE = LedgerReplication(readable=False, reason="query_failed")
+UNREADABLE = LedgerReplication(readable=False, reason=REASON_QUERY_FAILED)
 
 _IN_RECOVERY = "SELECT pg_is_in_recovery()"
 
@@ -248,7 +257,7 @@ def read(conn: psycopg.Connection[Any]) -> LedgerReplication:
                         "ledger replication: pg_stat_replication is privilege-masked (columns NULL) — DR "
                         "posture is UNKNOWN, not broken. Fix with: %s", MONITOR_GRANT_HINT,
                     )
-                    return LedgerReplication(readable=False, reason="stats_masked")
+                    return LedgerReplication(readable=False, reason=REASON_STATS_MASKED)
                 if str(state) == STATE_BACKUP:
                     continue                      # a pg_basebackup session is not a standby
                 standbys_total += 1
@@ -261,7 +270,7 @@ def read(conn: psycopg.Connection[Any]) -> LedgerReplication:
 
         result = LedgerReplication(
             readable=True,
-            reason="ok",
+            reason=REASON_OK,
             is_primary=not in_recovery,
             standbys_total=standbys_total,
             standbys_streaming=standbys_streaming,
@@ -271,16 +280,16 @@ def read(conn: psycopg.Connection[Any]) -> LedgerReplication:
             slots=slots,
         )
         if in_recovery:
-            result = _with_reason(result, "in_recovery")
+            result = _with_reason(result, REASON_IN_RECOVERY)
         elif not result.configured:
-            result = _with_reason(result, "not_configured")
+            result = _with_reason(result, REASON_NOT_CONFIGURED)
         return result
     except Exception as exc:                       # a visibility read must NEVER raise into a scrape
         # WARNING, not debug: swallowing this at debug level is precisely how the 45-hour outage
         # stayed invisible. The operator sees it once per scrape interval at most.
         log.warning("ledger replication read failed — DR posture is UNKNOWN, not necessarily broken",
                     exc_info=True)
-        return LedgerReplication(readable=False, reason=f"query_failed:{type(exc).__name__}")
+        return LedgerReplication(readable=False, reason=f"{REASON_QUERY_FAILED}:{type(exc).__name__}")
     finally:
         _settle(conn)
 

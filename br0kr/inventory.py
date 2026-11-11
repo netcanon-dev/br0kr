@@ -32,7 +32,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import lease, replication
+from br0kr import lease, reasons, replication
 from br0kr.admission import CAPACITY_STATES
 
 log = logging.getLogger(__name__)
@@ -341,7 +341,7 @@ def _queue_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "storage_id": storage_id, "req_disk_gb": int(req_disk_gb),
         "age_seconds": round(float(age_seconds), 1),
         "wait_remaining_seconds": None if wait_remaining_seconds is None else round(float(wait_remaining_seconds), 1),
-        "blocked_reason": "node_cordoned" if blocked_cordoned else None,
+        "blocked_reason": reasons.NODE_CORDONED if blocked_cordoned else None,
     }
 
 

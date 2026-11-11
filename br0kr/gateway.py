@@ -40,6 +40,7 @@ from br0kr import (
     migration,
     multidisk,
     pin,
+    reasons,
     replication,
     scheduler,
     settings,
@@ -58,7 +59,8 @@ ADMIT_OUTCOMES = metrics.LabelledCounter(
     "Admission answers from request_lease / schedule_lease by verb and outcome (admitted, queued, replay, error, "
     "or the refusal reason).",
     ("tool", "outcome"))
-_FIXED_OUTCOMES = ("admitted", "queued", "replay", "error")
+# `queued` is the queued answer's reason code by design: the label and the reason are the same string.
+_FIXED_OUTCOMES = ("admitted", reasons.QUEUED, "replay", "error")
 ADMIT_OUTCOMES.preset((tool, o) for tool in ("request_lease", "schedule_lease") for o in _FIXED_OUTCOMES)
 _REASON_LABEL = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
@@ -71,7 +73,7 @@ def admit_outcome(answer: Mapping[str, Any]) -> str:
     if answer.get("admitted") or answer.get("queued"):
         if answer.get("idempotent"):
             return "replay"
-        return "admitted" if answer.get("admitted") else "queued"
+        return "admitted" if answer.get("admitted") else reasons.QUEUED
     reason = answer["error"] if "error" in answer else answer.get("reason")
     if isinstance(reason, str) and _REASON_LABEL.fullmatch(reason) and reason not in _FIXED_OUTCOMES:
         return reason
@@ -177,14 +179,14 @@ def _request_lease(
     single-disk path — it never even reads the knob."""
     if _reserved_key(idem_key):
         return {"lease_id": None, "admitted": False, "queued": False, "idempotent": False,
-                "reason": "reserved_idem_key"}
+                "reason": reasons.RESERVED_IDEM_KEY}
     # Multi-disk go-live gate (design §9 PR-5): a FRESH data-disk ask is refused until the operator flips
     # multi_disk_enabled ON, so the request surface can DEPLOY inert. An EMPTY ask short-circuits before any
     # knob read (single-disk path unchanged); an idempotent retry of an existing multi-disk lease falls through
     # so a mid-flight knob-OFF can't orphan a live lease (see _multi_disk_refused).
     if _multi_disk_refused(conn, idem_key, data_disks):
         return {"lease_id": None, "admitted": False, "queued": False, "idempotent": False,
-                "reason": "multi_disk_disabled"}
+                "reason": reasons.MULTI_DISK_DISABLED}
     r = admission.admit(
         conn,
         AdmissionRequest(
@@ -197,9 +199,9 @@ def _request_lease(
     if r.admitted:
         return {"lease_id": r.lease_id, "admitted": True, "queued": False,
                 "idempotent": r.idempotent, "reason": None}
-    if r.reason == "queued":   # idempotent replay of an already-queued request
+    if r.reason == reasons.QUEUED:   # idempotent replay of an already-queued request
         return {"lease_id": r.lease_id, "admitted": False, "queued": True,
-                "idempotent": True, "reason": "queued"}
+                "idempotent": True, "reason": reasons.QUEUED}
     # Waiter coupling (§4.3/§5.4): the ask has NO reachable instance right now, but a live replication is copying
     # one the node could use once READY — PARK behind that job (awaiting_replication_id) so it fast-fails via
     # sweep_waiters if the copy FAILs, instead of waiting to queue_timeout. Only when the caller is willing to
@@ -209,7 +211,7 @@ def _request_lease(
     # behind it would tell the agent 'a copy is coming' and then die at queue_timeout (design §5.4 line 364) —
     # instead fall through to the HARD no_reachable_instance rejection. enqueue+attach are two txns (enqueue
     # self-commits), so a crash between them leaves an unparked PENDING lease (it just waits to queue_timeout).
-    if (queue and r.reason == "no_reachable_instance" and template_id is not None
+    if (queue and r.reason == reasons.NO_REACHABLE_INSTANCE and template_id is not None
             and replication.replication_enabled(conn)):
         rid = replication.find_covering_replication(conn, template_id=template_id, node_id=node_id)
         if rid is not None:
@@ -221,9 +223,9 @@ def _request_lease(
                 data_disks=data_disks)   # PR-5: the replication-wait park must carry the data-disk child rows too
             if eq.queued and eq.lease_id is not None and replication.attach_waiter(conn, eq.lease_id, rid):
                 return {"lease_id": eq.lease_id, "admitted": False, "queued": True,
-                        "idempotent": False, "reason": "no_reachable_instance_replicating"}
+                        "idempotent": False, "reason": reasons.NO_REACHABLE_INSTANCE_REPLICATING}
             return {"lease_id": eq.lease_id, "admitted": False, "queued": eq.queued,
-                    "idempotent": False, "reason": eq.reason or "queued"}
+                    "idempotent": False, "reason": eq.reason or reasons.QUEUED}
     if queue and r.reason in admission.QUEUEABLE_REJECTS:
         eq = admission.enqueue(
             conn, idem_key=idem_key, node_id=node_id, req_cpu=req_cpu, req_mem_mb=req_mem_mb,
@@ -233,7 +235,7 @@ def _request_lease(
             data_disks=data_disks,   # PR-5: a parked PENDING lease must carry its data-disk child rows
         )
         return {"lease_id": eq.lease_id, "admitted": False, "queued": eq.queued,
-                "idempotent": False, "reason": eq.reason or "queued"}
+                "idempotent": False, "reason": eq.reason or reasons.QUEUED}
     return {"lease_id": r.lease_id, "admitted": False, "queued": False,
             "idempotent": r.idempotent, "reason": r.reason}
 
@@ -331,13 +333,13 @@ def _schedule_lease(
     empty tuple (default) is byte-identical to the single-disk placement path."""
     if _reserved_key(idem_key):
         return {"lease_id": None, "node_id": None, "admitted": False, "queued": False,
-                "idempotent": False, "reason": "reserved_idem_key", "tried": []}
+                "idempotent": False, "reason": reasons.RESERVED_IDEM_KEY, "tried": []}
     # Multi-disk go-live gate (design §9 PR-5) — mirrors request_lease: refuse a FRESH data-disk ask until the
     # operator flips multi_disk_enabled ON. An empty ask never reads the knob (single-disk path unchanged); an
     # idempotent retry of an existing scheduled multi-disk lease falls through for its verdict.
     if _multi_disk_refused(conn, idem_key, data_disks):
         return {"lease_id": None, "node_id": None, "admitted": False, "queued": False,
-                "idempotent": False, "reason": "multi_disk_disabled", "tried": []}
+                "idempotent": False, "reason": reasons.MULTI_DISK_DISABLED, "tried": []}
     r = scheduler.schedule(conn, scheduler.ScheduleRequest(
         idem_key=idem_key, req_cpu=req_cpu, req_mem_mb=req_mem_mb, cluster_id=cluster_id,
         storage_id=storage_id, req_disk_gb=req_disk_gb, project_id=project_id, ttl_seconds=ttl_seconds,
@@ -346,9 +348,9 @@ def _schedule_lease(
     if r.admitted:
         return {"lease_id": r.lease_id, "node_id": r.node_id, "admitted": True, "queued": False,
                 "idempotent": r.idempotent, "reason": None, "tried": r.tried}
-    if r.reason == "queued":   # idempotent replay of an already-queued scheduled request
+    if r.reason == reasons.QUEUED:   # idempotent replay of an already-queued scheduled request
         return {"lease_id": r.lease_id, "node_id": r.node_id, "admitted": False, "queued": True,
-                "idempotent": True, "reason": "queued", "tried": r.tried}
+                "idempotent": True, "reason": reasons.QUEUED, "tried": r.tried}
     if queue and r.reason in admission.QUEUEABLE_REJECTS:
         eq = admission.enqueue(
             conn, idem_key=idem_key, cluster_id=cluster_id, node_id=None, req_cpu=req_cpu,
@@ -358,7 +360,7 @@ def _schedule_lease(
             data_disks=data_disks,   # PR-5: a scheduled PENDING lease must carry its data-disk child rows
         )
         return {"lease_id": eq.lease_id, "node_id": None, "admitted": False, "queued": eq.queued,
-                "idempotent": False, "reason": eq.reason or "queued", "tried": r.tried}
+                "idempotent": False, "reason": eq.reason or reasons.QUEUED, "tried": r.tried}
     return {"lease_id": r.lease_id, "node_id": r.node_id, "admitted": False, "queued": False,
             "idempotent": r.idempotent, "reason": r.reason, "tried": r.tried}
 
@@ -464,7 +466,7 @@ def queue_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
             "SELECT (l.node_id IS NOT NULL AND n.cordoned) FROM lease l "
             "LEFT JOIN node n ON n.id = l.node_id WHERE l.id = %s", (lease_id,)).fetchone()
         if row is not None and row[0]:
-            blocked_reason = "node_cordoned"
+            blocked_reason = reasons.NODE_CORDONED
     return {"lease_id": lease_id, "state": state, "queue_position": position,
             "blocked_reason": blocked_reason, "exists": state is not None}
 
@@ -530,15 +532,15 @@ def validate_self_quota(
     is still allowed). A request above the cap is `exceeds_ceiling`. (No overflow check needed on the WRITE:
     a passing value is <= the ceiling or the current limit, both already in-column.)"""
     if not math.isfinite(cpu_limit):
-        return "non_finite"
+        return reasons.NON_FINITE
     if cpu_limit <= 0 or mem_limit_mb <= 0 or max_leases <= 0:
-        return "non_positive"
+        return reasons.NON_POSITIVE
     if cpu_limit > (ceil_cpu if ceil_cpu is not None else cur_cpu):
-        return "exceeds_ceiling"
+        return reasons.EXCEEDS_CEILING
     if mem_limit_mb > (ceil_mem if ceil_mem is not None else cur_mem):
-        return "exceeds_ceiling"
+        return reasons.EXCEEDS_CEILING
     if max_leases > (ceil_leases if ceil_leases is not None else cur_leases):
-        return "exceeds_ceiling"
+        return reasons.EXCEEDS_CEILING
     return None
 
 
@@ -558,7 +560,7 @@ def set_quota(
     row = conn.execute(_SELF_QUOTA_READ, (project_id,)).fetchone()
     if row is None:
         conn.commit()
-        return {"project_id": project_id, "updated": False, "reason": "unknown_project",
+        return {"project_id": project_id, "updated": False, "reason": reasons.UNKNOWN_PROJECT,
                 "quota": None, "ceiling": None}
     cur_cpu, cur_mem, cur_leases = float(row[0]), int(row[1]), int(row[2])
     ceil_cpu = None if row[3] is None else float(row[3])
@@ -569,7 +571,7 @@ def set_quota(
     # self-service is OFF until the operator sets at least one ceiling — give the agent a clear signal.
     if ceil_cpu is None and ceil_mem is None and ceil_leases is None:
         conn.commit()
-        return {"project_id": project_id, "updated": False, "reason": "self_service_disabled",
+        return {"project_id": project_id, "updated": False, "reason": reasons.SELF_SERVICE_DISABLED,
                 "quota": cur, "ceiling": ceiling}
     reason = validate_self_quota(cpu_limit, mem_limit_mb, max_leases,
                                  ceil_cpu, ceil_mem, ceil_leases, cur_cpu, cur_mem, cur_leases)
@@ -620,21 +622,21 @@ def request_template_download(
         return {"build_id": None, "requested": False, "reason": bad}
     if not imgbuild.valid_size_gb(size_gb):
         conn.commit()
-        return {"build_id": None, "requested": False, "reason": "invalid_size_gb"}
+        return {"build_id": None, "requested": False, "reason": reasons.INVALID_SIZE_GB}
     # Lock THIS project row for the whole check-and-reserve so a concurrent same-project download can't read a
     # stale usage sum and both slip past the ceiling. Different projects lock different rows (no contention).
     prow = conn.execute(
         "SELECT max_template_disk_gb FROM project WHERE id = %s FOR UPDATE", (project_id,)).fetchone()
     if prow is None:
         conn.commit()
-        return {"build_id": None, "requested": False, "reason": "unknown_project"}
+        return {"build_id": None, "requested": False, "reason": reasons.UNKNOWN_PROJECT}
     if prow[0] is None:
         conn.commit()   # NULL ceiling = the operator hasn't opted this tenant into self-service downloads
-        return {"build_id": None, "requested": False, "reason": "template_downloads_disabled"}
+        return {"build_id": None, "requested": False, "reason": reasons.TEMPLATE_DOWNLOADS_DISABLED}
     ceiling = int(prow[0])
     if conn.execute("SELECT 1 FROM cluster WHERE id = %s", (cluster_id,)).fetchone() is None:
         conn.commit()
-        return {"build_id": None, "requested": False, "reason": "unknown_cluster"}
+        return {"build_id": None, "requested": False, "reason": reasons.UNKNOWN_CLUSTER}
     # Content-capability gate (0041, PR-A) — the SAME shared helper the operator build path uses, so a tenant
     # self-service download can't bypass the {import, images} check (the review's fourth-seam fix). Raw pool name
     # → resolved to a row within `cluster_id`; storage_undeclared if unmodeled.
@@ -644,16 +646,16 @@ def request_template_download(
         return {"build_id": None, "requested": False, "reason": bad_content}
     if conn.execute("SELECT 1 FROM template WHERE id = %s", (target_template_id,)).fetchone() is not None:
         conn.commit()
-        return {"build_id": None, "requested": False, "reason": "template_exists"}
+        return {"build_id": None, "requested": False, "reason": reasons.TEMPLATE_EXISTS}
     if conn.execute(
         "SELECT 1 FROM template_build WHERE target_template_id = %s AND state NOT IN ('READY','FAILED') "
         "LIMIT 1", (target_template_id,)).fetchone() is not None:
         conn.commit()
-        return {"build_id": None, "requested": False, "reason": "build_in_progress"}
+        return {"build_id": None, "requested": False, "reason": reasons.BUILD_IN_PROGRESS}
     used = build.project_template_disk_used(conn, project_id)
     if used + size_gb > ceiling:
         conn.commit()
-        return {"build_id": None, "requested": False, "reason": "template_disk_quota_exceeded",
+        return {"build_id": None, "requested": False, "reason": reasons.TEMPLATE_DISK_QUOTA_EXCEEDED,
                 "used_gb": used, "ceiling_gb": ceiling, "requested_gb": size_gb}
     try:
         build_id = build.insert_project_build(
@@ -666,13 +668,13 @@ def request_template_download(
         # the exception escape (the MCP contract is a dict, not a raise). Rollback releases the row lock +
         # clears the aborted txn.
         conn.rollback()
-        return {"build_id": None, "requested": False, "reason": "build_in_progress"}
+        return {"build_id": None, "requested": False, "reason": reasons.BUILD_IN_PROGRESS}
     except psycopg.errors.ForeignKeyViolation:
         # cluster_id is pre-checked but NOT locked (only the project row is FOR UPDATE-locked, so project_id
         # can't vanish here); an operator deleting the CLUSTER between the pre-check and this INSERT trips its
         # FK. Surface it as the SAME `unknown_cluster` the pre-check returns rather than crashing the MCP call.
         conn.rollback()
-        return {"build_id": None, "requested": False, "reason": "unknown_cluster"}
+        return {"build_id": None, "requested": False, "reason": reasons.UNKNOWN_CLUSTER}
     conn.commit()
     log.info("project template download requested: id=%s project=%s target=%s size=%sGB used=%sGB ceiling=%sGB",
              build_id, project_id, target_template_id, size_gb, used, ceiling,
@@ -725,14 +727,14 @@ def request_replication(
             "target_cluster_id": target_cluster_id, "target_storage_id": target_storage_id, "size_gb": None}
     if mechanism not in allowed:
         conn.commit()
-        return {**base, "reason": "mechanism_not_allowed", "allowed": sorted(allowed)}
+        return {**base, "reason": reasons.MECHANISM_NOT_ALLOWED, "allowed": sorted(allowed)}
     if mechanism not in replication.IMPLEMENTED_MECHANISMS:
         conn.commit()   # allowlisted by the operator but not yet coded (a future mechanism); fail-closed
-        return {**base, "reason": "mechanism_not_implemented"}
+        return {**base, "reason": reasons.MECHANISM_NOT_IMPLEMENTED}
     if project_id is not None:
         if conn.execute("SELECT 1 FROM project WHERE id = %s", (project_id,)).fetchone() is None:
             conn.commit()
-            return {**base, "reason": "unknown_project"}
+            return {**base, "reason": reasons.UNKNOWN_PROJECT}
         ok_gov, terr = auth.template_allowed(conn, template_id, project_id)
         if not ok_gov:
             conn.commit()
@@ -763,7 +765,7 @@ def request_replication(
         template_id=template_id, target_cluster_id=target_cluster_id, target_storage_id=target_storage_id)
     if cooldown > 0:
         conn.commit()
-        return {**base, "reason": "replication_cooldown", "cooldown_seconds_remaining": cooldown}
+        return {**base, "reason": reasons.REPLICATION_COOLDOWN, "cooldown_seconds_remaining": cooldown}
     # The node the copy is hosted on: clone_shared hosts on the SOURCE node (`source_node_id`); rebuild_source
     # runs on the reach-chosen `target_node_id`. Each planner returns exactly one, so coalesce.
     host_node_id = plan.get("target_node_id") or plan.get("source_node_id")
@@ -780,7 +782,7 @@ def request_replication(
         # A live job already covers this exact (template, target cluster, target pool) — the one-active index.
         # Rollback clears the aborted txn; NEVER let the exception escape (the contract is a dict, not a raise).
         conn.rollback()
-        return {**base, "reason": "replication_in_progress"}
+        return {**base, "reason": reasons.REPLICATION_IN_PROGRESS}
     except psycopg.errors.ForeignKeyViolation:
         # A referenced entity (template / source instance / target cluster / target storage / node / project)
         # was deleted between the lock-free plan reads and the insert. Re-run the plan on the fresh txn for the
@@ -793,9 +795,9 @@ def request_replication(
             reason = replan["reason"]
         elif project_id is not None and conn.execute(
                 "SELECT 1 FROM project WHERE id = %s", (project_id,)).fetchone() is None:
-            reason = "unknown_project"
+            reason = reasons.UNKNOWN_PROJECT
         else:
-            reason = "target_vanished"
+            reason = reasons.TARGET_VANISHED
         conn.commit()
         return {**base, "reason": reason}
     enabled = replication.replication_enabled(conn)

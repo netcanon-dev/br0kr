@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
+from br0kr import reasons
+
 # A build is live until it reaches one of these; mirrors the lease lifecycle's terminal set. Kept here (the
 # pure module) so the daemon's "claim a live build" and admin's "one active build per target" agree on one
 # definition — a drift guard pins it against the 0015 CHECK in tests.
@@ -271,15 +273,15 @@ def validate_build_request(
     target existence + the one-active-build rule are checked in the verb against the DB; this is the pure,
     no-I/O half. Pure, so the whole policy is unit-testable without a database or a network."""
     if not target_template_id:
-        return "missing_target_template_id"
+        return reasons.MISSING_TARGET_TEMPLATE_ID
     if not valid_template_id(target_template_id):
-        return "invalid_target_template_id"
+        return reasons.INVALID_TARGET_TEMPLATE_ID
     if not storage_id:
-        return "missing_storage_id"
+        return reasons.MISSING_STORAGE_ID
     if not url:
-        return "missing_url"
+        return reasons.MISSING_URL
     if not valid_sha256(sha256):
-        return "invalid_sha256"
+        return reasons.INVALID_SHA256
     if not source_allowed(url, allowed_prefixes):
-        return "source_not_allowed"
+        return reasons.SOURCE_NOT_ALLOWED
     return None

@@ -65,7 +65,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import admission, lease, pdm, pve
+from br0kr import admission, lease, pdm, pve, reasons
 from br0kr.admission import AdmissionRequest
 
 log = logging.getLogger(__name__)
@@ -319,7 +319,7 @@ def _settle_reservation(conn: psycopg.Connection[Any], reservation_id: int | Non
     or TTL-reaped). A None id (aborted before reserving) is a no-op."""
     if reservation_id is None:
         return
-    lease.release(conn, reservation_id, reason="migration_reservation_settled")
+    lease.release(conn, reservation_id, reason=reasons.MIGRATION_RESERVATION_SETTLED)
     lease.mark_released(conn, reservation_id)
 
 
@@ -703,7 +703,7 @@ def _actuate(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm,
         _settle_by_key(conn, mig.id)
         log.info("migration %s: lease %s already on target %s — converging to DONE", mig.id,
                  mig.lease_id, mig.target_node, extra={"lease_id": mig.lease_id})
-        return _set_state(conn, mig.id, "DONE", reason="migrated")
+        return _set_state(conn, mig.id, "DONE", reason=reasons.MIGRATED)
     if facts.reservation_id is not None and lease.heartbeat(conn, facts.reservation_id) is None:
         return _abort(conn, mig, "reservation_lost")
     if facts.lease_state not in lease.LIVE_STATES or facts.lease_vmid is None:
@@ -843,7 +843,7 @@ def _commit(conn: psycopg.Connection[Any], mig: Migration, facts: _Facts, dest: 
     _settle_by_key(conn, mig.id)
     log.info("migration %s DONE: lease %s now on %s (vmid %s); reservation settled", mig.id,
              mig.lease_id, mig.target_node, dest.vmid, extra={"lease_id": mig.lease_id, "vmid": dest.vmid})
-    return _set_state(conn, mig.id, "DONE", reason="migrated")
+    return _set_state(conn, mig.id, "DONE", reason=reasons.MIGRATED)
 
 
 def _abort(conn: psycopg.Connection[Any], mig: Migration, reason: str) -> Migration:

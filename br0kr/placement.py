@@ -36,7 +36,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import audit, multidisk, pve
+from br0kr import audit, multidisk, pve, reasons
 
 log = logging.getLogger(__name__)
 
@@ -44,15 +44,15 @@ log = logging.getLogger(__name__)
 # Admit-time REFUSALS — a templated ask the gate turns away up front (fail-closed). All are operator-mutable
 # (bind a seed / declare reachability / register an instance / pick a reachable pool), so NONE join
 # admission.QUEUEABLE_REJECTS — waiting cannot heal them, only an operator can.
-UNKNOWN_TEMPLATE = "unknown_template"                 # no such catalog id
-TEMPLATE_NOT_ON_CLUSTER = "template_not_on_cluster"   # RETIRED by the PR-5 cross-cluster widening — reserved
+UNKNOWN_TEMPLATE = reasons.UNKNOWN_TEMPLATE                 # no such catalog id
+TEMPLATE_NOT_ON_CLUSTER = reasons.TEMPLATE_NOT_ON_CLUSTER   # RETIRED by the PR-5 cross-cluster widening — reserved
 #   (kept in PLACEMENT_REASONS for back-compat classification) but NEVER produced now; resolve_placement
 #   returns NO_REACHABLE_INSTANCE for a node whose cluster holds no usable copy of a template homed elsewhere.
-NO_REACHABLE_INSTANCE = "no_reachable_instance"       # template on-cluster but no READY instance usable here
-STORAGE_UNREACHABLE = "storage_unreachable_from_node"  # the debited (ask) pool does not reach the target node
-LINKED_CLONE_PINNED = "linked_clone_storage_pinned"   # linked clone + an ask pool ≠ the instance's pool
-STORAGE_UNBOUND = "storage_unbound"                   # the debited pool has no cluster binding (multi-cluster)
-STORAGE_NOT_CAPABLE = "storage_not_capable"           # (0042/PR-D) clone target not `images`-capable — ONLY when
+NO_REACHABLE_INSTANCE = reasons.NO_REACHABLE_INSTANCE       # template on-cluster but no READY instance usable here
+STORAGE_UNREACHABLE = reasons.STORAGE_UNREACHABLE_FROM_NODE  # the debited (ask) pool does not reach the target node
+LINKED_CLONE_PINNED = reasons.LINKED_CLONE_STORAGE_PINNED   # linked clone + an ask pool ≠ the instance's pool
+STORAGE_UNBOUND = reasons.STORAGE_UNBOUND                   # the debited pool has no cluster binding (multi-cluster)
+STORAGE_NOT_CAPABLE = reasons.STORAGE_NOT_CAPABLE           # (0042/PR-D) clone target not `images`-capable — ONLY when
 #   the `clone_content_enforcement` knob is ON (default OFF = never produced): the pool the clone's disk lands on
 #   is declared WITHOUT `images` (or undeclared) — a grant-then-kill caught BEFORE the PVE disk-create. Remedy:
 #   set_storage_content on the pool, or pick an images-capable pool. PER-CANDIDATE (like STORAGE_UNREACHABLE): the
@@ -67,8 +67,8 @@ STORAGE_NOT_CAPABLE = "storage_not_capable"           # (0042/PR-D) clone target
 # the node declares no bridge for it. Node-local + single-node placement NEVER produces these — the network is
 # proven present by the template's own guest running on the node it is homed on. Reason STRINGS are unchanged
 # from 0038 (agent-facing contract stability); only the KEY moved from a raw bridge to a logical-net identity.
-NETWORK_UNDECLARED = "template_bridge_undeclared"     # template.logical_network_id is NULL — no network to resolve
-NETWORK_UNREACHABLE = "network_unreachable_from_node"  # no un-quarantined network_node row for (node, logical net)
+NETWORK_UNDECLARED = reasons.TEMPLATE_BRIDGE_UNDECLARED     # template.logical_network_id is NULL: no network
+NETWORK_UNREACHABLE = reasons.NETWORK_UNREACHABLE_FROM_NODE  # no un-quarantined network_node row for (node, net)
 
 PLACEMENT_REASONS: frozenset[str] = frozenset({
     UNKNOWN_TEMPLATE, TEMPLATE_NOT_ON_CLUSTER, NO_REACHABLE_INSTANCE,
@@ -90,13 +90,13 @@ PLACEMENT_PER_CANDIDATE: frozenset[str] = frozenset({
 # triple no longer holds when the daemon picks it up. Written to lease.hold_reason (a diagnostic, NOT a
 # state); the daemon NEVER substitutes a different instance, it HOLDS (edge-logged) and auto-releases after a
 # bounded number of blocked re-checks. Distinct from the admit refusals above so the two channels don't alias.
-HOLD_INSTANCE_UNAVAILABLE = "instance_unavailable"          # the stamped instance is gone / retired / not READY
-HOLD_REACHABILITY_LOST = "placement_reachability_lost"      # usable(I, node) no longer holds (quarantine/unbind)
-HOLD_CROSS_PROVISION_REFUSED = "cross_provision_refused"    # the debited pool stopped reaching this node
-HOLD_UNRESOLVABLE = "placement_unresolvable"                # clone-storage resolution refuses now (any other)
-HOLD_ENV_TEMPLATE_WRONG_CLUSTER = "env_template_wrong_cluster"  # legacy env template on a multi-node/cluster fleet
-HOLD_SOURCE_UNROUTABLE = "source_node_unroutable"      # cross_node pick but this daemon serves no source-node driver
-HOLD_NETWORK_UNROUTABLE = "network_unroutable"     # cross_node pick, placement node lacks the template bridge (0038)
+HOLD_INSTANCE_UNAVAILABLE = reasons.INSTANCE_UNAVAILABLE          # the stamped instance is gone / retired / not READY
+HOLD_REACHABILITY_LOST = reasons.PLACEMENT_REACHABILITY_LOST      # usable(I, node) no longer holds (quarantine/unbind)
+HOLD_CROSS_PROVISION_REFUSED = reasons.CROSS_PROVISION_REFUSED    # the debited pool stopped reaching this node
+HOLD_UNRESOLVABLE = reasons.PLACEMENT_UNRESOLVABLE                # clone-storage resolution refuses now (any other)
+HOLD_ENV_TEMPLATE_WRONG_CLUSTER = reasons.ENV_TEMPLATE_WRONG_CLUSTER  # legacy env template, multi-node/cluster fleet
+HOLD_SOURCE_UNROUTABLE = reasons.SOURCE_NODE_UNROUTABLE           # cross_node pick, no source-node driver served here
+HOLD_NETWORK_UNROUTABLE = reasons.NETWORK_UNROUTABLE              # cross_node pick, node lacks the template bridge
 
 
 @dataclass(frozen=True)
@@ -228,8 +228,8 @@ def _reach(cur: psycopg.Cursor[Any], *, storage_id: str, node_id: str) -> bool:
 # IDENTICALLY by construction (the lockstep), and it maps to the clone-vocabulary reason STORAGE_NOT_CAPABLE, not
 # the build reasons above (pinned by a test). ONE shared predicate ⇒ build/rebuild/clone read a pool's declared
 # content the SAME way and can never diverge (the same-function rule, §10).
-STORAGE_CAPABILITY_UNDECLARED = "storage_capability_undeclared"  # storage.content_types IS NULL — operator must declare
-STORAGE_NOT_IMPORT_CAPABLE = "storage_not_import_capable"        # declared, but missing a required content token
+STORAGE_CAPABILITY_UNDECLARED = reasons.STORAGE_CAPABILITY_UNDECLARED  # content_types IS NULL: operator must declare
+STORAGE_NOT_IMPORT_CAPABLE = reasons.STORAGE_NOT_IMPORT_CAPABLE        # declared, but missing a required content token
 CONTENT_REASONS: frozenset[str] = frozenset({STORAGE_CAPABILITY_UNDECLARED, STORAGE_NOT_IMPORT_CAPABLE})
 # The content types a template BUILD / rebuild_source needs on its target pool — the ONE definition both the build
 # request seams (build.check_build_storage) and the rebuild engine (plan_rebuild_source + its actuation re-check)
@@ -352,7 +352,7 @@ def _resolve_clone_storage(
         qrow = cur.execute("SELECT cluster_id, COALESCE(pve_name, id) FROM storage WHERE id = %s",
                            (ask,)).fetchone()
         if qrow is None:   # defensive: admit() already validated the ask pool via _STORAGE_AVAIL
-            return PlacementDecision(False, "unknown_storage", instance_id=instance_id, template_vmid=inst_vmid)
+            return PlacementDecision(False, reasons.UNKNOWN_STORAGE, instance_id=instance_id, template_vmid=inst_vmid)
         q_cluster, q_pve = qrow
         if q_cluster is None:
             return PlacementDecision(False, STORAGE_UNBOUND, instance_id=instance_id, template_vmid=inst_vmid)
@@ -410,7 +410,7 @@ def resolve_data_disks(
         srow = cur.execute("SELECT cluster_id, COALESCE(pve_name, id) FROM storage WHERE id = %s",
                            (d.storage_id,)).fetchone()
         if srow is None:
-            return _refuse("unknown_storage", idx, d.storage_id)
+            return _refuse(reasons.UNKNOWN_STORAGE, idx, d.storage_id)
         cluster_id, pve_name = srow
         if cluster_id is None:
             return _refuse(STORAGE_UNBOUND, idx, d.storage_id)
@@ -933,7 +933,7 @@ def verify_declarations(
     try:
         views, unreachable, _ = _gather_node_views(registry, cluster_id, abort_on_acl=True)
     except _AclAbort:
-        return {"ok": False, "reason": "acl_insufficient", "required": "Datastore.Audit on /storage"}
+        return {"ok": False, "reason": reasons.ACL_INSUFFICIENT, "required": "Datastore.Audit on /storage"}
     # Pass 2 — reconcile (no ACL/raise surprises left): quarantine + COMMIT each on hard evidence.
     quarantined: list[dict[str, str]] = []
     content_quarantined: list[dict[str, Any]] = []

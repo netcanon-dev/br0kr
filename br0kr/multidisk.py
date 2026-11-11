@@ -30,6 +30,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from br0kr import reasons
+
 # int8 (bigint) ceiling — lease_data_disk.req_disk_gb is a bigint column (0046), exactly like
 # lease.req_disk_gb; mirrors admission._BIGINT_MAX so an over-range size is a CLEAN reason here, never an
 # uncaught NumericValueOutOfRange escaping the child-row INSERT.
@@ -71,16 +73,16 @@ def validate_data_disks(
     if not data_disks:
         return None
     if not has_template:
-        return "data_disks_require_template"
+        return reasons.DATA_DISKS_REQUIRE_TEMPLATE
     if len(data_disks) > max_disks:
-        return "too_many_data_disks"
+        return reasons.TOO_MANY_DATA_DISKS
     for d in data_disks:
         if not isinstance(d.storage_id, str) or not d.storage_id:
-            return "data_disk_malformed"
+            return reasons.DATA_DISK_MALFORMED
         if isinstance(d.req_disk_gb, bool) or not isinstance(d.req_disk_gb, int):
-            return "data_disk_malformed"
+            return reasons.DATA_DISK_MALFORMED
         if d.req_disk_gb <= 0 or d.req_disk_gb > _BIGINT_MAX:
-            return "data_disk_malformed"
+            return reasons.DATA_DISK_MALFORMED
     return None
 
 
@@ -108,11 +110,11 @@ def coerce_data_disks(raw: object) -> tuple[tuple[DataDisk, ...], str | None]:
     if raw is None:
         return (), None
     if not isinstance(raw, (list, tuple)):
-        return (), "data_disk_malformed"
+        return (), reasons.DATA_DISK_MALFORMED
     out: list[DataDisk] = []
     for item in raw:
         if not isinstance(item, Mapping) or set(item.keys()) != _DATA_DISK_KEYS:
-            return (), "data_disk_malformed"
+            return (), reasons.DATA_DISK_MALFORMED
         out.append(DataDisk(storage_id=item["storage_id"], req_disk_gb=item["req_disk_gb"]))
     return tuple(out), None
 

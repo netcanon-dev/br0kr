@@ -34,7 +34,7 @@ from typing import Any
 import psycopg
 import requests
 
-from br0kr import admission, imgbuild, lease, placement, pve, reconciler
+from br0kr import admission, imgbuild, lease, placement, pve, reasons, reconciler
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -810,7 +810,7 @@ def _settle_reservation(conn: psycopg.Connection[Any], reservation_id: int | Non
     idempotent (both CAS no-op if already settled / TTL-reaped). A None id is a no-op."""
     if reservation_id is None:
         return
-    lease.release(conn, reservation_id, reason="replication_reservation_settled")
+    lease.release(conn, reservation_id, reason=reasons.REPLICATION_RESERVATION_SETTLED)
     lease.mark_released(conn, reservation_id)
 
 

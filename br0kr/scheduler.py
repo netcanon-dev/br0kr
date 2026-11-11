@@ -34,7 +34,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import admission, lease, multidisk, placement, settings
+from br0kr import admission, lease, multidisk, placement, reasons, settings
 from br0kr.admission import CAPACITY_STATES, AdmissionRequest
 
 log = logging.getLogger(__name__)
@@ -51,22 +51,21 @@ _REPLAYABLE = frozenset(lease.LIVE_STATES) | {"PENDING"}
 # `node_cordoned` joins this set: node_headroom already filters cordoned nodes out of the candidate
 # snapshot, but a node cordoned BETWEEN the snapshot and the admit makes admit reject it node_cordoned —
 # treat that exactly like node-full (skip to the next candidate), not as a hard reject for the whole ask.
-_NODE_FULL_REASONS = frozenset({"insufficient_node_cpu", "insufficient_node_mem", "node_cordoned"})
+_NODE_FULL_REASONS = reasons.NODE_FULL
 # Storage rejections: a bad pool id, or a globally-exhausted pool — both definitive for the whole
 # request (the pool is global), so surface them instead of trying every other node. `storage_unbound`
 # (0033: the debited pool has no cluster binding) joins them — no node changes an unbound quota row.
-_STORAGE_REJECTS = frozenset({"unknown_storage", "insufficient_storage", placement.STORAGE_UNBOUND})
+_STORAGE_REJECTS = reasons.STORAGE
 # Project (tenant-budget) rejections: the quota is GLOBAL across all nodes, so an over-quota or
 # unknown-project verdict on one candidate repeats identically on every other candidate. Definitive
 # for the whole request — surface it, don't loop (and needlessly re-lock the project scope) over all.
-_PROJECT_REJECTS = frozenset(
-    {"unknown_project", "insufficient_project_cpu", "insufficient_project_mem", "project_lease_limit"})
+_PROJECT_REJECTS = reasons.PROJECT
 # Template (image) rejections DEFINITIVE for the whole request (every candidate would reject identically) —
 # surface, don't loop. Since the PR-5 cross-cluster widening this is ONLY unknown_template: the candidate set
 # is no longer narrowed to the catalog cluster, so `template_not_on_cluster` is never produced (a node whose
 # cluster holds no usable copy refuses the per-candidate `no_reachable_instance` instead, and the loop tries
 # the next node). unknown_template surfaces the rare case of the template being deleted mid-schedule.
-_TEMPLATE_REJECTS = frozenset({"unknown_template"})
+_TEMPLATE_REJECTS = reasons.TEMPLATE
 # The REQUEST-DEFINITIVE placement refusals: NO candidate node can heal them (unknown_template / an unbound
 # quota row / the dead template_not_on_cluster), so schedule() + promote_scheduled short-circuit on them.
 # Their complement, placement.PLACEMENT_PER_CANDIDATE (no_reachable_instance / storage_unreachable /
@@ -213,14 +212,14 @@ def _resolve_idem(conn: psycopg.Connection[Any], req: ScheduleRequest) -> Schedu
         return None
     lid, state, node_id, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id, template_id = row
     if state not in _REPLAYABLE:
-        return ScheduleResult(lid, node_id, admitted=False, idempotent=True, reason="lease_not_live")
+        return ScheduleResult(lid, node_id, admitted=False, idempotent=True, reason=reasons.LEASE_NOT_LIVE)
     if not _same_resource_ask(req, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id, template_id,
                               stored_disks):
-        return ScheduleResult(lid, node_id, admitted=False, idempotent=False, reason="idem_key_conflict")
+        return ScheduleResult(lid, node_id, admitted=False, idempotent=False, reason=reasons.IDEM_KEY_CONFLICT)
     if state == "PENDING":
         # A retry of an already-queued scheduled request: hand back the SAME waiting spot (node_id is
         # still NULL until the promoter places it), not an admitted grant.
-        return ScheduleResult(lid, node_id, admitted=False, idempotent=True, reason="queued")
+        return ScheduleResult(lid, node_id, admitted=False, idempotent=True, reason=reasons.QUEUED)
     return ScheduleResult(lid, node_id, admitted=True, idempotent=True, reason=None)
 
 
@@ -264,14 +263,9 @@ def _project_shortfall(conn: psycopg.Connection[Any], req: ScheduleRequest) -> s
         return None
     hr = admission.project_headroom(conn, req.project_id)
     if hr is None:
-        return "unknown_project"
-    if hr["cpu_available"] < req.req_cpu:
-        return "insufficient_project_cpu"
-    if hr["mem_mb_available"] < req.req_mem_mb:
-        return "insufficient_project_mem"
-    if hr["lease_slots_available"] < 1:
-        return "project_lease_limit"
-    return None
+        return reasons.UNKNOWN_PROJECT
+    return admission.project_shortfall(req.req_cpu, req.req_mem_mb, hr["cpu_available"], hr["mem_mb_available"],
+                                       hr["lease_slots_available"])
 
 
 # ── The scheduler (orchestration over admit) ───────────────────────────────────
@@ -303,7 +297,7 @@ def schedule(conn: psycopg.Connection[Any], req: ScheduleRequest, policy: str = 
     if req.cluster_id is not None and conn.execute(
             "SELECT 1 FROM cluster WHERE id = %s", (req.cluster_id,)).fetchone() is None:
         conn.commit()
-        return ScheduleResult(None, None, admitted=False, idempotent=False, reason="unknown_cluster")
+        return ScheduleResult(None, None, admitted=False, idempotent=False, reason=reasons.UNKNOWN_CLUSTER)
 
     # Template selection (PR-5 cross-cluster widening): a templated request can be PLACED on ANY cluster that
     # holds a usable REPLICA of the template — not only the template's catalog home. So we NO LONGER narrow the
@@ -317,7 +311,7 @@ def schedule(conn: psycopg.Connection[Any], req: ScheduleRequest, policy: str = 
         trow = conn.execute(_TEMPLATE_CLUSTER, (req.template_id,)).fetchone()
         conn.commit()
         if trow is None:
-            return ScheduleResult(None, None, admitted=False, idempotent=False, reason="unknown_template")
+            return ScheduleResult(None, None, admitted=False, idempotent=False, reason=reasons.UNKNOWN_TEMPLATE)
 
     candidates = rank_candidates(node_headroom(conn, effective_cluster), req.req_cpu, req.req_mem_mb, policy)
     tried: list[dict[str, str | None]] = []
@@ -365,7 +359,7 @@ def schedule(conn: psycopg.Connection[Any], req: ScheduleRequest, policy: str = 
             # up (the parked lease can't self-heal an unreachable-everywhere placement).
             placement_reason = res.reason
             continue
-        if res.idempotent or res.reason in ("idem_key_conflict", "lease_not_live"):
+        if res.idempotent or res.reason in (reasons.IDEM_KEY_CONFLICT, reasons.LEASE_NOT_LIVE):
             # A concurrent scheduler placed this key (maybe on another node) between our pre-check
             # and now — re-resolve node-agnostically so we return that one lease, not a conflict.
             again = _resolve_idem(conn, req)
@@ -412,7 +406,7 @@ def schedule(conn: psycopg.Connection[Any], req: ScheduleRequest, policy: str = 
 
     log.info("schedule found no capacity (%s, tried %s)",
              req.cluster_id or "any cluster", tried, extra={"idem_key": req.idem_key})
-    return ScheduleResult(None, None, admitted=False, idempotent=False, reason="no_capacity", tried=tried)
+    return ScheduleResult(None, None, admitted=False, idempotent=False, reason=reasons.NO_CAPACITY, tried=tried)
 
 
 def _ask_placeable_in_scope(
@@ -494,7 +488,7 @@ def promote_scheduled(
     ).fetchone()
     conn.commit()   # end the read txn; each promote_pinned opens its own locked transaction below
     if row is None:
-        return admission.PromoteResult(False, "gone")   # cancelled / queue-expired / already promoted
+        return admission.PromoteResult(False, reasons.GONE)   # cancelled / queue-expired / already promoted
     cluster_id, req_cpu, req_mem_mb, template_id, ask_storage_id = (
         row[0], float(row[1]), int(row[2]), row[3], row[4])
     if template_id is not None:
@@ -507,11 +501,11 @@ def promote_scheduled(
         trow = conn.execute(_TEMPLATE_CLUSTER, (template_id,)).fetchone()
         conn.commit()
         if trow is None:
-            return admission.PromoteResult(False, "unknown_template")   # template deleted while queued (rare)
+            return admission.PromoteResult(False, reasons.UNKNOWN_TEMPLATE)   # template deleted while queued (rare)
     candidates = rank_candidates(node_headroom(conn, cluster_id), req_cpu, req_mem_mb, policy)
     if not candidates:
-        return admission.PromoteResult(False, "no_capacity")   # nothing in scope has room (snapshot)
-    last = admission.PromoteResult(False, "no_capacity")
+        return admission.PromoteResult(False, reasons.NO_CAPACITY)   # nothing in scope has room (snapshot)
+    last = admission.PromoteResult(False, reasons.NO_CAPACITY)
     placement_res: admission.PromoteResult | None = None   # last PER-CANDIDATE placement refusal
     saw_requeueable = False
     for node_id in candidates:
@@ -519,7 +513,7 @@ def promote_scheduled(
         if res.promoted:
             log.info("promoted scheduled lease %s onto %s (policy=%s)", lease_id, node_id, policy)
             return res
-        if res.reason in ("gone", "template_forbidden") or res.reason in _PLACEMENT_DEFINITIVE:
+        if res.reason in (reasons.GONE, reasons.TEMPLATE_FORBIDDEN) or res.reason in _PLACEMENT_DEFINITIVE:
             # gone (left PENDING: cancelled / queue-expired), template_forbidden (phase A3: the project's grant
             # on a non-public template was revoked while queued), or a REQUEST-DEFINITIVE placement wall
             # (unknown_template / storage_unbound — no node changes them). Every candidate rejects identically,
@@ -553,6 +547,6 @@ def promote_scheduled(
         if _ask_placeable_in_scope(conn, template_id=template_id, cluster_id=cluster_id,
                                    ask_storage_id=ask_storage_id,
                                    data_disks=lease.data_disks_for(conn, lease_id)):
-            return admission.PromoteResult(False, "no_capacity")
+            return admission.PromoteResult(False, reasons.NO_CAPACITY)
         return placement_res
     return last

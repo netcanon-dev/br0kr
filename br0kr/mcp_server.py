@@ -81,6 +81,7 @@ from br0kr import (
     placement,
     pve,
     ratelimit,
+    reasons,
     replication,
     settings,
 )
@@ -184,9 +185,9 @@ def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
     (unlike the retrying resolve connection)."""
     secret = _presented_secret(ctx)
     if not secret:
-        _denials.note(_denial_connect, surface="mcp", action=verb, reason="no_token",
+        _denials.note(_denial_connect, surface="mcp", action=verb, reason=reasons.NO_TOKEN,
                       source_ip=_client_ip(ctx))
-        return {"error": "no_token"}
+        return {"error": reasons.NO_TOKEN}
     # Any bearer at all reaches this lookup, before it is known to be valid (review SEC-01). FastMCP 1.30 runs
     # br0kr's sync tools on its event loop, so lookups are already one at a time today; the gate caps them at
     # `_AUTH_GATE.slots` should that dispatch ever become concurrent (an SDK change, or async tools), and a caller
@@ -195,16 +196,16 @@ def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
         with _AUTH_GATE.slot(), closing(db.connect_with_retry(autocommit=True)) as ac:
             principal = auth.resolve(ac, secret)
     except ratelimit.Busy:
-        return {"error": "busy"}
+        return {"error": reasons.BUSY}
     if principal is None:
-        _denials.note(_denial_connect, surface="mcp", action=verb, reason="invalid_token",
+        _denials.note(_denial_connect, surface="mcp", action=verb, reason=reasons.INVALID_TOKEN,
                       source_ip=_client_ip(ctx))
-        return {"error": "invalid_token"}
+        return {"error": reasons.INVALID_TOKEN}
     if not auth.tier_allows(principal.scope, verb):
-        _denials.note(_denial_connect, surface="mcp", action=verb, reason="forbidden_scope",
+        _denials.note(_denial_connect, surface="mcp", action=verb, reason=reasons.FORBIDDEN_SCOPE,
                       source_ip=_client_ip(ctx), actor="agent", actor_token_id=principal.token_id,
                       project_id=principal.project_id, scope=principal.scope)
-        return {"error": "forbidden_scope", "scope": principal.scope}
+        return {"error": reasons.FORBIDDEN_SCOPE, "scope": principal.scope}
     return principal
 
 
@@ -774,7 +775,7 @@ def project_capacity(ctx: Context, project_id: str | None = None) -> dict[str, A
         # A project-less OPERATOR token (read-tier, so it CAN call this) has no OWN project budget to report;
         # naming a specific project already returns project_forbidden above (bind_project's mismatch branch),
         # so an operator uniformly gets project_forbidden here — never a crash, never another tenant's budget.
-        return {"error": "project_forbidden"}
+        return {"error": reasons.PROJECT_FORBIDDEN}
     with _conn() as c:
         # acting_as spread LAST — the auth-derived echo wins over any same-named gateway key (see cluster_capacity).
         return {**gateway.project_capacity(c, pid), "acting_as": principal.project_id}
@@ -1252,21 +1253,21 @@ def detect_template_bridge(ctx: Context, template_id: str) -> dict[str, Any]:
     with _conn() as c:
         trow = c.execute("SELECT logical_network_id FROM template WHERE id = %s", (template_id,)).fetchone()
         if trow is None:
-            return {"ok": False, "reason": "unknown_template"}
+            return {"ok": False, "reason": reasons.UNKNOWN_TEMPLATE}
         irow = c.execute(
             "SELECT node_id, vmid FROM template_instance "
             "WHERE template_id = %s AND instance_state = 'READY' AND node_id IS NOT NULL AND vmid IS NOT NULL "
             "ORDER BY id LIMIT 1", (template_id,)).fetchone()
         if irow is None:
-            return {"ok": False, "reason": "no_placed_instance"}
+            return {"ok": False, "reason": reasons.NO_PLACED_INSTANCE}
         node_id, vmid = irow
         registry = nodes.from_ledger(c, env=os.environ)
         driver = registry.get(node_id)
         if driver is None:
-            return {"ok": False, "reason": "node_unroutable", "node_id": node_id}
+            return {"ok": False, "reason": reasons.NODE_UNROUTABLE, "node_id": node_id}
         bridge = driver.read_guest_net_bridge(int(vmid))
         if bridge is None:
-            return {"ok": False, "reason": "no_bridge_on_net0", "vmid": int(vmid)}
+            return {"ok": False, "reason": reasons.NO_BRIDGE_ON_NET0, "vmid": int(vmid)}
         return {"ok": True, "template_id": template_id, "bridge": bridge, "logical_network_id": trow[0]}
 
 

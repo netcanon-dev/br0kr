@@ -32,6 +32,8 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **The request path's refusal and error codes are named constants in `br0kr/reasons.py`.** A typo could ship a
+  new, undocumented reason, and the scheduler re-listed admission's sets by hand; `test_reasons.py` pins it (CODE-01).
 - **Admission's race-critical core is written once (`br0kr/admission.py`).** `admit()` and `promote_pinned()` carried
   copies that had to change in lockstep; both now run `_lock_scopes` + `_locked_fit`, and `admit()` logs every
   refusal. Harnesses unchanged and GO; a unit test pins the shared path (review ARCH-01).

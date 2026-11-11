@@ -66,6 +66,17 @@ rejected as "node full" by the very lease it already created.
   derived-capacity re-read + idempotent insert. Pure policy (`scope_keys`, `validate`, `shortfall`)
   is split out and unit-tested hermetically; the concurrency + idempotency are proven against real
   Postgres in `scripts/harness_admission.py`.
+- **Reason vocabulary (`br0kr/reasons.py`)** — the refusal reasons and error codes the request path answers an
+  agent's ask with, one `Final` constant per code, named after its value
+  (`INSUFFICIENT_NODE_CPU = "insufficient_node_cpu"`), plus the sets the request path branches on (`QUEUEABLE`,
+  `NODE_FULL`, `STORAGE`, `PROJECT`, `TEMPLATE`, `HOLD`) and the `INTERNAL` promote outcomes no agent sees. Admission,
+  the scheduler, placement and the gateway import them rather than spelling strings, and the one tenant-budget
+  rule (`admission.project_shortfall`) serves both `admit()` and the scheduler's relabel. A new code goes here
+  first: `tests/unit/test_reasons.py` fails on a literal code in an agent-facing module, on a misspelt or unknown
+  code in a reason position there, on a `reason="..."` literal anywhere, and on a code no test or harness
+  exercises. Not in it yet: the lease-lifecycle release reasons the reaper and reconciler write
+  (`lease.released_reason`, read back from `lease_status`) and the migration and replication job reasons a
+  read-tier token reads from `migration_status` / `replication_status`.
 - **Per-project allowance (`db/migrations/0005_projects.sql`, the `project:` scope in `br0kr/admission.py`)**
   — a tenant budget so one project can't drain a whole cluster. A `project` row carries cpu/mem/lease-count
   limits (operator-managed config-as-data, `CHECK > 0`); `lease.project_id` is **nullable** (None =

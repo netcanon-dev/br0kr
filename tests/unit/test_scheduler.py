@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from br0kr import placement, scheduler
+from br0kr import admission, placement, reasons, scheduler
 from br0kr.scheduler import ScheduleRequest
 
 pytestmark = pytest.mark.unit
@@ -445,3 +445,23 @@ def test_schedule_rejects_a_bad_ttl_before_touching_the_db(ttl):
     req = ScheduleRequest(idem_key="k", req_cpu=1, req_mem_mb=512, ttl_seconds=ttl)
     res = scheduler.schedule(_NoConn(), req)
     assert res.admitted is False and res.reason == "invalid_ttl"
+
+
+def test_the_scheduler_relabels_a_tenant_budget_with_admissions_own_rule(monkeypatch):
+    """admission.project_shortfall is the one tenant-budget rule: cpu, then memory, then a lease slot, a missing
+    availability counting as a shortfall. The scheduler's relabel of a would-be no_capacity calls it with the
+    project's headroom instead of re-listing the checks by hand, as it used to (review CODE-01), so the two paths
+    can never disagree about a budget."""
+    ps = admission.project_shortfall
+    assert ps(2.0, 1024, 4.0, 2048, 1) is None
+    assert ps(2.0, 1024, 1.0, 2048, 1) == reasons.INSUFFICIENT_PROJECT_CPU
+    assert ps(2.0, 1024, 4.0, 512, 1) == reasons.INSUFFICIENT_PROJECT_MEM
+    assert ps(2.0, 1024, 4.0, 2048, 0) == reasons.PROJECT_LEASE_LIMIT
+    assert ps(2.0, 1024, None, 2048, 1) == reasons.INSUFFICIENT_PROJECT_CPU
+    seen: list[tuple] = []
+    monkeypatch.setattr(admission, "project_shortfall", lambda *a: seen.append(a) or "sentinel")
+    monkeypatch.setattr(admission, "project_headroom", lambda _c, _p: {
+        "cpu_available": 8.0, "mem_mb_available": 4096, "lease_slots_available": 3})
+    req = ScheduleRequest(idem_key="k", req_cpu=2.0, req_mem_mb=1024, project_id="p")
+    assert scheduler._project_shortfall(object(), req) == "sentinel"
+    assert seen == [(2.0, 1024, 8.0, 4096, 3)]

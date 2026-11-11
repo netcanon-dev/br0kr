@@ -1618,3 +1618,36 @@ def test_main_starts_the_metrics_listener_only_for_an_http_transport(monkeypatch
     monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "streamable-http")
     mcp_server.main()
     assert started == [("127.0.0.1", 9091)]
+
+
+class _BridgeConn:
+    """detect_template_bridge's reads: the template exists (logical net 'lan') and a READY instance sits on node n1
+    as vmid 9001."""
+
+    def __enter__(self) -> _BridgeConn:
+        return self
+
+    def __exit__(self, *_a: object) -> bool:
+        return False
+
+    def execute(self, sql: str, _params: object = None) -> _BridgeConn:
+        self._sql = sql
+        return self
+
+    def fetchone(self) -> object:
+        return ("lan",) if "FROM template WHERE id" in self._sql else ("n1", 9001)
+
+
+@pytest.mark.parametrize(("registry", "expected"), [
+    ({}, {"ok": False, "reason": "node_unroutable", "node_id": "n1"}),
+    ({"n1": SimpleNamespace(read_guest_net_bridge=lambda _vmid: None)},
+     {"ok": False, "reason": "no_bridge_on_net0", "vmid": 9001}),
+])
+def test_detect_template_bridge_reports_an_unroutable_node_or_no_net0_bridge(monkeypatch, registry, expected):
+    """detect_template_bridge answers `node_unroutable` when this gateway has no PVE driver for the instance's node
+    (no token here), and `no_bridge_on_net0` when the guest's net0 names no bridge, fail-soft with nothing written.
+    Guards both refusals reaching an operator with no test producing them (review CODE-01)."""
+    monkeypatch.setattr(mcp_server, "_conn", lambda: _BridgeConn())
+    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_server.nodes, "from_ledger", lambda _c, env: registry)
+    assert mcp_server.detect_template_bridge(object(), "debian12") == expected

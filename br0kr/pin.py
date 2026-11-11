@@ -36,7 +36,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import lease
+from br0kr import lease, reasons
 
 log = logging.getLogger(__name__)
 
@@ -63,35 +63,35 @@ def set_pinned(conn: psycopg.Connection[Any], lease_id: int, *, pinned: bool) ->
         raise RuntimeError("pin.set_pinned needs a transaction: the project row lock must outlive the count")
     head = conn.execute("SELECT project_id FROM lease WHERE id = %s", (lease_id,)).fetchone()
     if head is None:
-        return _answer(lease_id, pinned=False, updated=False, reason="unknown_lease")
+        return _answer(lease_id, pinned=False, updated=False, reason=reasons.UNKNOWN_LEASE)
     project_id: str | None = head[0]
     max_pinned = 0
     if pinned:
         if project_id is None:
-            return _answer(lease_id, pinned=False, updated=False, reason="pin_needs_project")
+            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_NEEDS_PROJECT)
         prow = conn.execute("SELECT max_pinned FROM project WHERE id = %s FOR NO KEY UPDATE",
                             (project_id,)).fetchone()
         if prow is None:   # the project was deleted since the first read (its leases are now ungoverned)
-            return _answer(lease_id, pinned=False, updated=False, reason="pin_needs_project")
+            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_NEEDS_PROJECT)
         max_pinned = int(prow[0])
     row = conn.execute("SELECT state, pinned, project_id FROM lease WHERE id = %s FOR NO KEY UPDATE",
                        (lease_id,)).fetchone()
     if row is None:
-        return _answer(lease_id, pinned=False, updated=False, reason="unknown_lease")
+        return _answer(lease_id, pinned=False, updated=False, reason=reasons.UNKNOWN_LEASE)
     state, is_pinned, project_now = str(row[0]), bool(row[1]), row[2]
     if state not in lease.LIVE_STATES:
-        return _answer(lease_id, pinned=is_pinned, updated=False, reason="lease_not_live")
+        return _answer(lease_id, pinned=is_pinned, updated=False, reason=reasons.LEASE_NOT_LIVE)
     if is_pinned == pinned:
         return _answer(lease_id, pinned=is_pinned, updated=False, reason=None)
     if pinned:
         if project_now != project_id:   # moved projects under us: only a project delete does that
-            return _answer(lease_id, pinned=False, updated=False, reason="pin_needs_project")
+            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_NEEDS_PROJECT)
         if max_pinned == 0:
-            return _answer(lease_id, pinned=False, updated=False, reason="pin_disabled")
+            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_DISABLED)
         counted = conn.execute(_LIVE_PINNED, (project_id,)).fetchone()
         live_pinned = int(counted[0]) if counted is not None else 0   # count(*) always answers one row
         if live_pinned >= max_pinned:
-            return _answer(lease_id, pinned=False, updated=False, reason="pinned_limit")
+            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PINNED_LIMIT)
         conn.execute("UPDATE lease SET pinned = true WHERE id = %s", (lease_id,))
     else:
         conn.execute("UPDATE lease SET pinned = false, expires_at = now() + make_interval(secs => ttl_seconds) "
@@ -110,9 +110,9 @@ def refuse_before_admit(conn: psycopg.Connection[Any], *, idem_key: str, project
     it names, and an unknown project proceeds so admission gives its own answer. A cheap read without a lock:
     `set_pinned` re-checks the bound under the lock after admission. Ends its read transaction."""
     if queue:
-        return "pin_not_queueable"
+        return reasons.PIN_NOT_QUEUEABLE
     if project_id is None:
-        return "pin_needs_project"
+        return reasons.PIN_NEEDS_PROJECT
     replay = conn.execute("SELECT 1 FROM lease WHERE idem_key = %s", (idem_key,)).fetchone()
     row = conn.execute(f"SELECT max_pinned, ({_LIVE_PINNED}) FROM project WHERE id = %s",
                        (project_id, project_id)).fetchone()
@@ -121,9 +121,9 @@ def refuse_before_admit(conn: psycopg.Connection[Any], *, idem_key: str, project
         return None
     max_pinned, live_pinned = int(row[0]), int(row[1])
     if max_pinned == 0:
-        return "pin_disabled"
+        return reasons.PIN_DISABLED
     if live_pinned >= max_pinned:
-        return "pinned_limit"
+        return reasons.PINNED_LIMIT
     return None
 
 
@@ -146,7 +146,7 @@ def settle(conn: psycopg.Connection[Any], result: dict[str, Any], *, pinned: boo
         conn.commit()
         out["pinned"] = bool(row[0]) if row is not None else False
         if pinned and not out["pinned"]:
-            out["reason"] = "pin_refused_on_replay"
+            out["reason"] = reasons.PIN_REFUSED_ON_REPLAY
         return out
     if not pinned:
         out["pinned"] = False
@@ -156,14 +156,14 @@ def settle(conn: psycopg.Connection[Any], result: dict[str, Any], *, pinned: boo
         r = set_pinned(conn, lid, pinned=True)
     except Exception:   # never leave the caller an unpinned lease it doesn't know is unpinned
         conn.rollback()
-        lease.release(conn, lid, reason="pin_refused")
+        lease.release(conn, lid, reason=reasons.PIN_REFUSED)
         raise
     if r["reason"] is None:
         conn.commit()
         out["pinned"] = True
         return out
     conn.rollback()
-    lease.release(conn, lid, reason="pin_refused")   # self-commits
+    lease.release(conn, lid, reason=reasons.PIN_REFUSED)   # self-commits
     log.info("lease %d released: admitted, but its pin was refused (%s)", lid, r["reason"],
              extra={"lease_id": lid, "reason": r["reason"]})
     out.update(lease_id=None, admitted=False, queued=False, pinned=False, reason=r["reason"])

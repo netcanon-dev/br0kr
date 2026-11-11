@@ -36,7 +36,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import cloudinit, multidisk, placement, settings
+from br0kr import cloudinit, multidisk, placement, reasons, settings
 from br0kr.lease import LIVE_STATES, data_disks_for, promote_to_admitted
 
 log = logging.getLogger(__name__)
@@ -55,13 +55,9 @@ _ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
 # retry of a queued request gets back the SAME waiting spot rather than enqueuing a second.
 _REPLAYABLE = frozenset(LIVE_STATES) | {"PENDING"}
 
-# Rejections that mean "didn't fit right now, but might later" — a queue=true request PARKS on these.
-# Hard rejections (unknown_node/_storage/_project, idem_key_conflict, reserved_idem_key, validation) are
-# NOT queueable: waiting can never make a typo'd id or a malformed ask succeed.
-QUEUEABLE_REJECTS = frozenset({
-    "insufficient_node_cpu", "insufficient_node_mem", "insufficient_storage",
-    "insufficient_project_cpu", "insufficient_project_mem", "project_lease_limit", "no_capacity",
-})
+# Rejections that mean "didn't fit right now, but might later" — a queue=true request PARKS on these; defined with
+# the rest of the vocabulary in br0kr/reasons.py (review CODE-01).
+QUEUEABLE_REJECTS = reasons.QUEUEABLE
 
 # Columns that DEFINE a request, fetched on an idempotent hit to detect a key reused
 # for a different ask (which must NOT silently return the original lease). project_id is
@@ -323,7 +319,7 @@ def validate(req: AdmissionRequest) -> str | None:
     project — it would lock a bogus 'project:' scope and read as unknown_project rather
     than this crisp malformed-input reason)."""
     if not req.idem_key:
-        return "missing_idem_key"
+        return reasons.MISSING_IDEM_KEY
     # Reject a BOOLEAN integer amount BEFORE any numeric check: bool is an int subclass, so `req_disk_gb=True`
     # / `req_mem_mb=True` (a JSON `true`) survives isfinite (True), `< 0` (False), `> _BIGINT_MAX` (False) and
     # `<= 0` (False) and would silently admit a 1 GB / 1 MB lease — the JSON-true-is-1 trap the input-
@@ -332,7 +328,7 @@ def validate(req: AdmissionRequest) -> str | None:
     # float, where a bool coerces to 1.0 — a narrower surface left as-is. (Surfaced by the multi-disk arc,
     # whose data-disk size validation rejects a bool; this closes the boot-vs-data asymmetry.)
     if isinstance(req.req_mem_mb, bool) or isinstance(req.req_disk_gb, bool):
-        return "boolean_resources"
+        return reasons.BOOLEAN_RESOURCES
     # Reject non-finite amounts BEFORE the sign check: req_cpu is a float, and NaN/Infinity survive `<= 0`
     # (both comparisons are False) and would then defeat shortfall()'s `avail < req` test (NaN/Inf make it
     # always False) — admitting REGARDLESS of node/storage/project capacity. That is the core
@@ -343,33 +339,33 @@ def validate(req: AdmissionRequest) -> str | None:
     except OverflowError:
         # A Python int too large to convert to float (e.g. 10**400) raises here — treat it as non-finite
         # rather than letting the OverflowError escape the request surface.
-        return "non_finite_resources"
+        return reasons.NON_FINITE_RESOURCES
     if not finite:
-        return "non_finite_resources"
+        return reasons.NON_FINITE_RESOURCES
     if req.req_cpu <= 0 or req.req_mem_mb <= 0:
-        return "non_positive_resources"
+        return reasons.NON_POSITIVE_RESOURCES
     if req.req_disk_gb < 0:
-        return "negative_disk"
+        return reasons.NEGATIVE_DISK
     # Bound the integer amounts to their ledger column ranges: an over-range value must be a CLEAN reason, not
     # an uncaught NumericValueOutOfRange escaping the lease INSERT (req_mem_mb / req_disk_gb are int8).
     if req.req_mem_mb > _BIGINT_MAX or req.req_disk_gb > _BIGINT_MAX:
-        return "resource_too_large"
+        return reasons.RESOURCE_TOO_LARGE
     # ttl_seconds must satisfy the lease CHECK (>= 10) and fit int4 (the column + the expires_at trigger's
     # make_interval(secs => ttl)); an out-of-range ttl would otherwise escape as a CheckViolation /
     # NumericValueOutOfRange / interval overflow instead of this clean reason.
     if req.ttl_seconds < 10 or req.ttl_seconds > _INT_MAX:
-        return "invalid_ttl"
+        return reasons.INVALID_TTL
     if req.storage_id is not None and req.req_disk_gb <= 0:
-        return "storage_without_disk"
+        return reasons.STORAGE_WITHOUT_DISK
     if req.storage_id is None and req.req_disk_gb > 0:
-        return "disk_without_storage"
+        return reasons.DISK_WITHOUT_STORAGE
     if req.project_id is not None and not req.project_id:
-        return "missing_project_id"
+        return reasons.MISSING_PROJECT_ID
     # template_id, when supplied, must be a non-empty id (a present-but-blank id is neither None=no-template
     # nor a real catalog id — refuse it crisply rather than letting it read as unknown_template). Existence
     # + cluster placement are checked in admit() under the node lock (they need a DB read, like unknown_node).
     if req.template_id is not None and not req.template_id:
-        return "missing_template_id"
+        return reasons.MISSING_TEMPLATE_ID
     # Multi-disk data disks (the multi-disk arc): the SAME config-as-data gate the boot disk passes, applied to
     # each ADDITIONAL data disk — a well-formed pool + positive int8 size (bool REJECTED, the JSON-true-is-1
     # trap), a data disk only on a TEMPLATED lease (a bare reservation clones no guest to attach to), and a
@@ -387,12 +383,12 @@ def validate(req: AdmissionRequest) -> str | None:
         return r
     if req.ci_user is not None:
         if req.ssh_pubkey is None:
-            return "cloud_init_requires_pubkey"
+            return reasons.CLOUD_INIT_REQUIRES_PUBKEY
         if (r := cloudinit.validate_ci_user(req.ci_user)) is not None:
             return r
     if req.ip_config is not None:
         if req.ssh_pubkey is None:
-            return "cloud_init_requires_pubkey"
+            return reasons.CLOUD_INIT_REQUIRES_PUBKEY
         if (r := cloudinit.validate_ip_config(req.ip_config)) is not None:
             return r
     return None
@@ -437,24 +433,35 @@ def shortfall(
     is skipped, exactly as `storage_id is None` skips the scalar path) — admit/promote derive it from the same
     `storage_id`+`data_disks` as the availability read, so the map can never desynchronize from the ask."""
     if node_cpu_avail < req.req_cpu:
-        return "insufficient_node_cpu"
+        return reasons.INSUFFICIENT_NODE_CPU
     if node_mem_avail < req.req_mem_mb:
-        return "insufficient_node_mem"
+        return reasons.INSUFFICIENT_NODE_MEM
     if required_by_pool is not None:
         # Aggregate per-pool floor (canonical order → a deterministic surfaced reason).
         for pool in sorted(required_by_pool):
             av = avail_by_pool.get(pool) if avail_by_pool is not None else None
             if av is None or av < required_by_pool[pool]:
-                return "insufficient_storage"
+                return reasons.INSUFFICIENT_STORAGE
     elif req.storage_id is not None and (storage_avail is None or storage_avail < req.req_disk_gb):
-        return "insufficient_storage"
+        return reasons.INSUFFICIENT_STORAGE
     if req.project_id is not None:
-        if project_cpu_avail is None or project_cpu_avail < req.req_cpu:
-            return "insufficient_project_cpu"
-        if project_mem_avail is None or project_mem_avail < req.req_mem_mb:
-            return "insufficient_project_mem"
-        if project_slots_avail is None or project_slots_avail < 1:
-            return "project_lease_limit"
+        return project_shortfall(req.req_cpu, req.req_mem_mb, project_cpu_avail, project_mem_avail,
+                                 project_slots_avail)
+    return None
+
+
+def project_shortfall(req_cpu: float, req_mem_mb: int, cpu_avail: float | None, mem_avail: int | None,
+                      slots_avail: int | None) -> str | None:
+    """The tenant-budget reason an ask runs into, or None if the project has room: cpu, then memory, then a lease
+    slot. A missing availability (a project row that vanished between the read and here) is a shortfall, never a
+    silent pass. The one rule both `shortfall()` (under the scope lock) and the scheduler's relabel of a would-be
+    `no_capacity` apply, so the two can never disagree about a tenant's budget (review CODE-01)."""
+    if cpu_avail is None or cpu_avail < req_cpu:
+        return reasons.INSUFFICIENT_PROJECT_CPU
+    if mem_avail is None or mem_avail < req_mem_mb:
+        return reasons.INSUFFICIENT_PROJECT_MEM
+    if slots_avail is None or slots_avail < 1:
+        return reasons.PROJECT_LEASE_LIMIT
     return None
 
 
@@ -502,13 +509,13 @@ def replay_result(row: tuple[Any, ...], req: AdmissionRequest,
     """
     lid, state, node_id, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id, template_id = row
     if state not in _REPLAYABLE:
-        return AdmissionResult(lid, admitted=False, idempotent=True, reason="lease_not_live")
+        return AdmissionResult(lid, admitted=False, idempotent=True, reason=reasons.LEASE_NOT_LIVE)
     if not _same_ask(req, node_id, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id, template_id,
                      stored_data_disks):
-        return AdmissionResult(lid, admitted=False, idempotent=False, reason="idem_key_conflict")
+        return AdmissionResult(lid, admitted=False, idempotent=False, reason=reasons.IDEM_KEY_CONFLICT)
     if state == "PENDING":
         # A retry of an already-queued request: hand back the SAME waiting spot, not an admitted grant.
-        return AdmissionResult(lid, admitted=False, idempotent=True, reason="queued")
+        return AdmissionResult(lid, admitted=False, idempotent=True, reason=reasons.QUEUED)
     return AdmissionResult(lid, admitted=True, idempotent=True, reason=None)
 
 
@@ -521,27 +528,27 @@ def replay_result(row: tuple[Any, ...], req: AdmissionRequest,
 # default `<table>_<column>_fkey` for the unnamed FKs in 0001/0004/0005/0013 (pinned by harness_fk_race.py on
 # real PG); an UNRECOGNISED constraint falls back to a generic reason (fail-safe, still never a crash).
 _FK_REASON: dict[str, str] = {
-    "lease_node_id_fkey": "unknown_node",
-    "lease_storage_id_fkey": "unknown_storage",
-    "lease_project_id_fkey": "unknown_project",
-    "lease_template_id_fkey": "unknown_template",
-    "lease_cluster_id_fkey": "unknown_cluster",
+    "lease_node_id_fkey": reasons.UNKNOWN_NODE,
+    "lease_storage_id_fkey": reasons.UNKNOWN_STORAGE,
+    "lease_project_id_fkey": reasons.UNKNOWN_PROJECT,
+    "lease_template_id_fkey": reasons.UNKNOWN_TEMPLATE,
+    "lease_cluster_id_fkey": reasons.UNKNOWN_CLUSTER,
     # 0033 placement stamps: a resolved instance / clone-storage row deleted between the under-lock resolution
     # and the INSERT trips these FKs — map to a clean placement reason, never an uncaught raise.
-    "lease_template_instance_id_fkey": "unknown_template_instance",
-    "lease_clone_storage_id_fkey": "no_reachable_clone_storage",
+    "lease_template_instance_id_fkey": reasons.UNKNOWN_TEMPLATE_INSTANCE,
+    "lease_clone_storage_id_fkey": reasons.NO_REACHABLE_CLONE_STORAGE,
     # 0046 multi-disk data-disk child row: a DATA pool deleted between the under-lock per-pool availability
     # read and the child INSERT trips this FK — map to the same clean unknown_storage as the boot pool, so a
     # benign concurrent-delete race never escapes as an uncaught raise (the lease + all its child rows share
     # one txn, so the rollback drops every row — all-or-nothing).
-    "lease_data_disk_storage_id_fkey": "unknown_storage",
+    "lease_data_disk_storage_id_fkey": reasons.UNKNOWN_STORAGE,
 }
 
 
 def _fk_reason(exc: psycopg.errors.ForeignKeyViolation) -> str:
     """The unknown_* reason for a lease-INSERT FK violation, keyed off the violated constraint name. A name we
     don't recognise → 'stale_reference' (fail-safe — a clean reason, never an uncaught raise)."""
-    return _FK_REASON.get(getattr(exc.diag, "constraint_name", None) or "", "stale_reference")
+    return _FK_REASON.get(getattr(exc.diag, "constraint_name", None) or "", reasons.STALE_REFERENCE)
 
 
 # ── The shared locked core of admit() and promote_pinned() ──────────────────────
@@ -600,9 +607,9 @@ def _locked_fit(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any], ask: Ad
     clone_content_enforcement come from the SHARED operator_setting knobs, so this gate and the daemon agree."""
     node = cur.execute(_NODE_AVAIL, (ask.node_id,)).fetchone()
     if node is None:
-        return _Fit("unknown_node")
+        return _Fit(reasons.UNKNOWN_NODE)
     if node[2]:
-        return _Fit("node_cordoned")
+        return _Fit(reasons.NODE_CORDONED)
     node_cpu, node_mem = float(node[0]), int(node[1])
 
     placement_dec: placement.PlacementDecision | None = None
@@ -610,9 +617,9 @@ def _locked_fit(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any], ask: Ad
         if recheck_governance and ask.project_id is not None:
             grow = cur.execute(_TEMPLATE_GOVERNED, (ask.project_id, ask.template_id)).fetchone()
             if grow is None:   # the template is gone (placement would say the same; refuse here, fail-closed)
-                return _Fit("unknown_template")
+                return _Fit(reasons.UNKNOWN_TEMPLATE)
             if not (grow[0] or grow[1]):   # not public AND not granted
-                return _Fit("template_forbidden")
+                return _Fit(reasons.TEMPLATE_FORBIDDEN)
         eff = settings.effective(conn)
         placement_dec = placement.resolve_placement(
             cur, template_id=ask.template_id, node_id=ask.node_id, ask_storage_id=ask.storage_id,
@@ -622,14 +629,14 @@ def _locked_fit(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any], ask: Ad
             data_disks=ask.data_disks)   # each data disk resolves in the SAME gate (all-or-nothing)
         if not placement_dec.ok:
             # every refusal names its reason; the fallback only keeps a nameless one a refusal
-            return _Fit(placement_dec.reason or "unnamed_placement_refusal")
+            return _Fit(placement_dec.reason or reasons.UNNAMED_PLACEMENT_REFUSAL)
 
     required = multidisk.required_by_pool(ask.storage_id, ask.req_disk_gb, ask.data_disks)
     avail_by_pool: dict[str, int] = {}
     for pool in sorted(required):
         srow = cur.execute(_STORAGE_AVAIL, (pool,)).fetchone()
         if srow is None:
-            return _Fit("unknown_storage")
+            return _Fit(reasons.UNKNOWN_STORAGE)
         avail_by_pool[pool] = int(srow[0])
 
     # An unknown project id is refused (like unknown_node/_storage) rather than admitted ungoverned: a caller
@@ -640,7 +647,7 @@ def _locked_fit(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any], ask: Ad
     if ask.project_id is not None:
         prow = cur.execute(_PROJECT_AVAIL, (ask.project_id,)).fetchone()
         if prow is None:
-            return _Fit("unknown_project")
+            return _Fit(reasons.UNKNOWN_PROJECT)
         proj_cpu, proj_mem, proj_slots = float(prow[0]), int(prow[1]), int(prow[2])
 
     reason = shortfall(ask, node_cpu, node_mem,
@@ -750,7 +757,7 @@ def admit(conn: psycopg.Connection[Any], req: AdmissionRequest) -> AdmissionResu
             stored_disks = tuple(cur.execute(_LEASE_DATA_DISKS, (existing[0],)).fetchall())
             result = replay_result(existing, req, stored_disks)
         else:
-            result = AdmissionResult(None, admitted=False, idempotent=False, reason="lost_insert")
+            result = AdmissionResult(None, admitted=False, idempotent=False, reason=reasons.LOST_INSERT)
         conn.commit()
         return result
 
@@ -778,14 +785,14 @@ def _enqueue_replay(
     CALLER so this stays pure — no I/O (the caller owns the commit)."""
     lid, state = existing[0], existing[1]
     if state not in _REPLAYABLE:
-        return EnqueueResult(lid, queued=False, reason="lease_not_live")
+        return EnqueueResult(lid, queued=False, reason=reasons.LEASE_NOT_LIVE)
     same = (float(req_cpu) == float(existing[3]) and req_mem_mb == existing[4]
             and storage_id == existing[5] and req_disk_gb == existing[6] and project_id == existing[7]
             and template_id == existing[8]
             and (node_id is None or node_id == existing[2])
             and list(stored_data_disks) == [(d.storage_id, int(d.req_disk_gb)) for d in data_disks])
     if not same:
-        return EnqueueResult(lid, queued=False, reason="idem_key_conflict")
+        return EnqueueResult(lid, queued=False, reason=reasons.IDEM_KEY_CONFLICT)
     return EnqueueResult(lid, queued=True, reason=None)
 
 
@@ -853,7 +860,7 @@ def enqueue(
     depth = depth_row[0] if depth_row is not None else 0   # count(*) always returns a row; guard for mypy
     if depth >= global_max:
         conn.commit()
-        return EnqueueResult(None, queued=False, reason="queue_full")
+        return EnqueueResult(None, queued=False, reason=reasons.QUEUE_FULL)
     if project_id is not None:
         pmax_row = cur.execute(_PROJECT_MAX_QUEUED, (project_id,)).fetchone()
         cap = pmax_row[0] if pmax_row and pmax_row[0] is not None else global_max
@@ -861,7 +868,7 @@ def enqueue(
         pdepth = pdepth_row[0] if pdepth_row is not None else 0
         if pdepth >= cap:
             conn.commit()
-            return EnqueueResult(None, queued=False, reason="queue_full")
+            return EnqueueResult(None, queued=False, reason=reasons.QUEUE_FULL)
     try:
         row = cur.execute(_ENQUEUE_INSERT, {
             "idem": idem_key, "node": node_id, "cluster": cluster_id, "cpu": req_cpu, "mem": req_mem_mb,
@@ -893,7 +900,7 @@ def enqueue(
         again = cur.execute(_LOOKUP, (idem_key,)).fetchone()
         if again is None:
             conn.commit()
-            return EnqueueResult(None, queued=False, reason="lost_insert")
+            return EnqueueResult(None, queued=False, reason=reasons.LOST_INSERT)
         stored_disks = tuple(cur.execute(_LEASE_DATA_DISKS, (again[0],)).fetchall())
         conn.commit()
         return _enqueue_replay(again, req_cpu=req_cpu, req_mem_mb=req_mem_mb, storage_id=storage_id,
@@ -938,7 +945,7 @@ def promote_pinned(
         ask = cur.execute(_PENDING_ASK, (lease_id,)).fetchone()
         if ask is None:
             conn.commit()
-            return PromoteResult(False, "gone")   # cancelled / queue-expired / already promoted out of PENDING
+            return PromoteResult(False, reasons.GONE)   # cancelled / queue-expired / already promoted out of PENDING
         stored_node, req_cpu, req_mem_mb, storage_id, req_disk_gb, project_id, template_id = ask
         # The queued lease's data-disk ask (child rows written atomically at enqueue), via the SHARED reader the
         # daemon recheck also uses (lease.data_disks_for) — one seam, so promote's re-lock/re-debit/re-gate and
@@ -948,7 +955,7 @@ def promote_pinned(
         node = onto_node if onto_node is not None else stored_node
         if node is None:
             conn.commit()
-            return PromoteResult(False, "no_node")   # a scheduled entry handed to promote_pinned with no target
+            return PromoteResult(False, reasons.NO_NODE)   # a scheduled entry handed to promote_pinned with no target
         _lock_scopes(cur, node, storage_id, project_id, data_disks)
         # The shared locked core, as admit() runs it, plus the governance re-check (see _locked_fit): everything
         # that may have changed while the lease waited — a cordon, a revoked image grant, a template no longer
@@ -971,7 +978,7 @@ def promote_pinned(
             stamp_placement=placement_dec is not None)
         if won:
             log.info("promoted queued lease %s -> ADMITTED on %s", lease_id, node, extra={"node": node})
-        return PromoteResult(won, None if won else "gone")
+        return PromoteResult(won, None if won else reasons.GONE)
     except Exception:
         # A statement raised mid-promotion: a failed non-autocommit txn is left ABORTED with its scope
         # advisory locks still held. Roll back — freeing the locks and clearing the txn — then re-raise, so

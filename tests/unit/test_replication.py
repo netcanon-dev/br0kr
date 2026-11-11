@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from br0kr import replication
+from br0kr import reasons, replication
 
 pytestmark = pytest.mark.unit
 
@@ -267,3 +267,16 @@ def test_plan_source_pick_folds_source_and_target_reach_and_distinguishes_the_re
     out2 = replication.plan_replication(rc2, template_id="debian12", target_cluster_id="clA",
                                         target_storage_id="SlowStorage")
     assert out2 == {"ok": False, "reason": "storage_unreachable"}
+
+
+def test_settling_a_replication_reservation_releases_it_with_its_own_reason(monkeypatch):
+    """A replication's byte reservation is retired with released_reason `replication_reservation_settled`, straight to
+    RELEASED with no destroy; a None id is a no-op. Guards the release reason drifting from the vocabulary (review
+    CODE-01)."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(replication.lease, "release",
+                        lambda _c, lid, *, reason: calls.append(("release", lid, reason)))
+    monkeypatch.setattr(replication.lease, "mark_released", lambda _c, lid: calls.append(("released", lid)))
+    replication._settle_reservation(object(), None)
+    replication._settle_reservation(object(), 9)
+    assert calls == [("release", 9, reasons.REPLICATION_RESERVATION_SETTLED), ("released", 9)]

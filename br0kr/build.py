@@ -26,7 +26,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import imgbuild, placement
+from br0kr import imgbuild, placement, reasons
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -128,7 +128,7 @@ def check_build_storage(
     Pure read; does NOT commit (the caller owns the txn / self-commits)."""
     row_id = _resolve_build_storage_id(conn, cluster_id=cluster_id, storage_id=storage_id)
     if row_id is None:
-        return "storage_undeclared"
+        return reasons.STORAGE_UNDECLARED
     return placement.content_capable(conn, storage_id=row_id, required=set(required))
 
 
@@ -390,14 +390,14 @@ def force_fail(conn: psycopg.Connection[Any], build_id: int, reason: str | None 
         (build_id, err, build_id)).fetchone()
     if row is None:
         return {"build_id": build_id, "forced": False, "prior_state": None, "vmid": None,
-                "reason": "unknown_build"}
+                "reason": reasons.UNKNOWN_BUILD}
     prior_state, vmid, forced = row[0], (int(row[1]) if row[1] is not None else None), bool(row[2])
     if forced:
         log.warning("template build %s FORCE-FAILED by operator (was %s, vmid %s); NO teardown attempted — if "
                     "a guest exists it may STILL be running and needs operator cleanup", build_id, prior_state,
                     vmid, extra={"build_id": build_id, "vmid": vmid, "prior_state": prior_state})
     return {"build_id": build_id, "forced": forced, "prior_state": prior_state, "vmid": vmid,
-            "reason": None if forced else "already_terminal"}
+            "reason": None if forced else reasons.ALREADY_TERMINAL}
 
 
 def stale_builds(conn: psycopg.Connection[Any], older_than_seconds: int) -> list[BuildJob]:

@@ -91,6 +91,7 @@ from br0kr import (
     placement,
     pve,
     reaper,
+    reasons,
     reconciler,
     remotes,
     replication,
@@ -1180,7 +1181,7 @@ class Daemon:
                 continue
             if res.promoted:
                 promoted += 1     # consumed capacity, but no longer queued → does NOT hold the line
-            elif res.reason in ("gone", "template_forbidden") or res.reason in placement.PLACEMENT_REASONS:
+            elif res.reason in (reasons.GONE, reasons.TEMPLATE_FORBIDDEN) or res.reason in placement.PLACEMENT_REASONS:
                 # gone: left PENDING (cancelled / queue-expired). template_forbidden (phase A3): the project's
                 # grant on a non-public template was revoked while queued. A PLACEMENT reason
                 # (no_reachable_instance / storage_unreachable_from_node / linked_clone_storage_pinned /

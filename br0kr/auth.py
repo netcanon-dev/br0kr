@@ -44,6 +44,8 @@ from typing import Any
 
 import psycopg
 
+from br0kr import reasons
+
 log = logging.getLogger(__name__)
 
 # The TENANT privilege tiers, ranked. A tenant principal may call a verb iff its tier rank ≥ the verb's
@@ -219,7 +221,7 @@ def bind_project(principal: Principal, requested_project_id: str | None) -> tupl
     (it must never spend another tenant's quota). Returns (effective_project_id, None) or (None, reason).
     Pure."""
     if requested_project_id is not None and requested_project_id != principal.project_id:
-        return None, "project_forbidden"
+        return None, reasons.PROJECT_FORBIDDEN
     return principal.project_id, None
 
 
@@ -331,7 +333,7 @@ def template_allowed(
     is_public, granted = row
     if is_public or granted:
         return True, None
-    return False, "template_forbidden"
+    return False, reasons.TEMPLATE_FORBIDDEN
 
 
 def lease_owned_by(
@@ -352,5 +354,5 @@ def lease_owned_by(
     so the check and the act share one transaction (no TOCTOU)."""
     row = conn.execute("SELECT project_id FROM lease WHERE id = %s", (lease_id,)).fetchone()
     if row is None or row[0] != project_id:
-        return False, "lease_forbidden"
+        return False, reasons.LEASE_FORBIDDEN
     return True, None

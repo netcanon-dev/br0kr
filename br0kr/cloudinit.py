@@ -21,6 +21,8 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from br0kr import reasons
+
 # ── Limits (mirrored by the 0010_cloud_init length CHECKs — defence in depth) ───────────────────────
 _MAX_PUBKEY = 4096
 _MAX_CI_USER = 64
@@ -58,19 +60,19 @@ def validate_ssh_pubkey(pubkey: str) -> str | None:
     comment field is free text but is covered by the no-control-char + length checks. Pure — the network
     actuation never re-validates, so this is the sole gate."""
     if not pubkey or not pubkey.strip():
-        return "ssh_pubkey_empty"
+        return reasons.SSH_PUBKEY_EMPTY
     if len(pubkey) > _MAX_PUBKEY:
-        return "ssh_pubkey_too_long"
+        return reasons.SSH_PUBKEY_TOO_LONG
     if _has_control_chars(pubkey):
-        return "ssh_pubkey_malformed"
+        return reasons.SSH_PUBKEY_MALFORMED
     parts = pubkey.strip().split()
     if len(parts) < 2:
-        return "ssh_pubkey_malformed"
+        return reasons.SSH_PUBKEY_MALFORMED
     key_type, blob = parts[0], parts[1]
     if key_type not in _SSH_KEY_TYPES:
-        return "ssh_pubkey_unsupported_type"
+        return reasons.SSH_PUBKEY_UNSUPPORTED_TYPE
     if len(blob) < 16 or not _B64_RE.match(blob):
-        return "ssh_pubkey_malformed"
+        return reasons.SSH_PUBKEY_MALFORMED
     return None
 
 
@@ -79,14 +81,14 @@ def validate_ci_user(ci_user: str) -> str | None:
     uppercase, '.', or any separator is rejected — both because useradd would refuse it and because a
     stray separator could smuggle a second cloud-init parameter into the config string."""
     if not ci_user:
-        return "ci_user_empty"
+        return reasons.CI_USER_EMPTY
     if len(ci_user) > _MAX_CI_USER:
-        return "ci_user_too_long"
+        return reasons.CI_USER_TOO_LONG
     # Control-char gate BEFORE the regex: Python's `$` matches before a TRAILING newline, so the anchored
     # regex alone would accept "runner\n" — and that newline is exactly the line separator Proxmox uses
     # when it writes ciuser into the guest config, the injection these validators exist to stop.
     if _has_control_chars(ci_user) or not _CI_USER_RE.match(ci_user):
-        return "ci_user_malformed"
+        return reasons.CI_USER_MALFORMED
     return None
 
 
@@ -99,19 +101,19 @@ def validate_ip_config(ip_config: str) -> str | None:
     silently ignored by Proxmox, leaving the guest unreachable). The IP/gw VALUES themselves are passed to
     Proxmox as-is (it is the authority on their syntax) — we only guard structure + charset here."""
     if not ip_config:
-        return "ip_config_empty"
+        return reasons.IP_CONFIG_EMPTY
     if len(ip_config) > _MAX_IP_CONFIG:
-        return "ip_config_too_long"
+        return reasons.IP_CONFIG_TOO_LONG
     # Control-char gate BEFORE the anchored regex (`$` matches before a trailing newline) — a newline in
     # ipconfig0 is the precise config-line injection the charset is meant to forbid.
     if _has_control_chars(ip_config) or not _IP_CONFIG_RE.match(ip_config):
-        return "ip_config_malformed"
+        return reasons.IP_CONFIG_MALFORMED
     for field in ip_config.split(","):
         if "=" not in field:
-            return "ip_config_malformed"
+            return reasons.IP_CONFIG_MALFORMED
         key = field.split("=", 1)[0]
         if key not in _IP_CONFIG_KEYS:
-            return "ip_config_malformed"
+            return reasons.IP_CONFIG_MALFORMED
     return None
 
 

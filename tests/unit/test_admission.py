@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from br0kr import admission
+from br0kr import admission, reasons
 from br0kr.admission import AdmissionRequest
 from br0kr.multidisk import DataDisk
 
@@ -352,8 +352,23 @@ def test_shortfall_flags_the_tenant_budget_after_the_physical_scopes():
     assert admission.shortfall(r, 99.0, 99999, None, 8.0, 99999, 0) == "project_lease_limit"
     assert admission.shortfall(r, 99.0, 99999, None, 8.0, 99999, 1) is None        # fits the budget
     assert admission.shortfall(r, 99.0, 99999, None, None, None, None) == "insufficient_project_cpu"
+    assert admission.shortfall(r, 99.0, 99999, None, 8.0, None, 9) == "insufficient_project_mem"
+    assert admission.shortfall(r, 99.0, 99999, None, 8.0, 99999, None) == "project_lease_limit"
     # A physical shortfall still wins over a fitting project budget (node checked first).
     assert admission.shortfall(r, 2.0, 99999, None, 8.0, 99999, 9) == "insufficient_node_cpu"
+
+
+def test_shortfall_applies_the_shared_tenant_budget_rule(monkeypatch):
+    """shortfall() answers a project's budget by calling admission.project_shortfall with the ask and the project's
+    availability, the same rule the scheduler's relabel calls, and never consults it for an ungoverned ask. Guards
+    the locked path growing its own copy of the budget checks again, so the two could disagree (review CODE-01)."""
+    seen: list[tuple] = []
+    monkeypatch.setattr(admission, "project_shortfall", lambda *a: seen.append(a) or "sentinel")
+    governed = _req(req_cpu=4, req_mem_mb=4096, project_id="team-a")
+    assert admission.shortfall(governed, 99.0, 99999, None, 8.0, 8192, 2) == "sentinel"
+    assert seen == [(4, 4096, 8.0, 8192, 2)]
+    assert admission.shortfall(_req(req_cpu=4, req_mem_mb=4096), 99.0, 99999) is None
+    assert len(seen) == 1
 
 
 def test_shortfall_aggregate_mode_checks_every_pool_summed():
@@ -778,3 +793,40 @@ def test_the_lock_and_capacity_reads_live_only_in_the_shared_core():
     assert users["_NODE_AVAIL"] == {"_locked_fit", "headroom"}
     assert users["_PROJECT_AVAIL"] == {"_locked_fit", "project_headroom"}
     assert users["_TEMPLATE_GOVERNED"] == users["shortfall"] == users["resolve_placement"] == {"_locked_fit"}
+
+
+def test_enqueue_reports_lost_insert_when_the_winning_row_is_gone():
+    """The defensive end of enqueue's ON-CONFLICT path: a concurrent same-key INSERT won, but the re-read finds no row
+    (only a hard DELETE can do that; the reaper rejects rather than deletes). enqueue answers `lost_insert`, never a
+    blind queued=True for a lease that does not exist. Guards the reason reaching agents with nothing producing it
+    in any test (review CODE-01)."""
+    r = admission.enqueue(_EnqConn(_EnqCur(None)), idem_key="k", req_cpu=2, req_mem_mb=2048)
+    assert r.queued is False and r.lease_id is None and r.reason == reasons.LOST_INSERT
+
+
+def test_admit_reports_lost_insert_when_the_winning_row_is_gone():
+    """admit()'s defensive end of the ON-CONFLICT path: the INSERT inserted nothing (a same-key request won the
+    race) and the re-read finds no row either (only a hard DELETE does that). admit() answers `lost_insert`,
+    commits once, and never reports a grant for a lease that does not exist. The enqueue() twin is tested above;
+    this is the request_lease path without queue=true (review CODE-01)."""
+
+    class _LostInsertConn(_ScopeConn):
+        def fetchone(self):
+            if self._sql == admission._INSERT:
+                return None                   # ON CONFLICT DO NOTHING: another insert holds the idem_key
+            return super().fetchone()
+
+    conn = _LostInsertConn(node_row=(8.0, 8192, False, "c1"), storage_avail=0)
+    res = admission.admit(conn, _req(req_cpu=1.0, req_mem_mb=512))
+    assert (res.admitted, res.lease_id, res.reason) == (False, None, reasons.LOST_INSERT)
+    assert conn.commits == 1
+
+
+def test_promote_without_a_target_node_answers_no_node():
+    """promote_pinned on a queued scheduled lease (no stored node) called without `onto_node` refuses `no_node`
+    before taking any scope lock: there is nowhere to debit. An internal outcome the scheduler and the daemon read,
+    never an agent; guards the code drifting from the constant those callers compare against (review CODE-01)."""
+    conn = _ScopeConn(node_row=None, storage_avail=0, pending_ask=(None, 1.0, 512, None, 0, None, None))
+    res = admission.promote_pinned(conn, 7)
+    assert (res.promoted, res.reason) == (False, reasons.NO_NODE)
+    assert not any("pg_advisory_xact_lock" in s for s in conn.executed) and conn.commits == 1
