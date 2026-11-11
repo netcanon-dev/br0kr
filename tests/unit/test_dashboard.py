@@ -405,8 +405,9 @@ def test_named_dashboard_operator_is_wired():
     page = dashboard.PAGE
     for needle in ('id="operators-sec"', 'id="whoami"', "function loadOperators(", "function renderOperators(",
                    "async function submitOperator(", "function revokeOperator(",   # revoke is now a modal opener
-                   "async function syncWhoami(", "'/api/operator/create'", "'/api/operator/revoke'",
-                   "'/api/operators'", "'/api/whoami'", "loadOperators();", "syncWhoami();"):
+                   "async function checkToken(", "'/api/operator/create'", "'/api/operator/revoke'",
+                   "'/api/operators'", "'/api/whoami'", "loadOperators(on('security'));",
+                   "'acting as ' + WHO.actor"):
         assert needle in page, needle
 
 

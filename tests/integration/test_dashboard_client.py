@@ -133,9 +133,13 @@ def test_a_failed_first_load_renders_could_not_load_in_every_panel(served_script
 
 def test_no_answer_and_a_missing_read_token_are_named(served_script: Path) -> None:
     """A poll that gets no answer says network error, and a 401 on the overview keeps the existing 'read token
-    required' prompt. Guards both collapsing into one vague message."""
+    required' prompt. Even when /api/meta said reads were open, the header then offers a token field, so the
+    stopped page can be unlocked. Guards both collapsing into one vague message, and a page stopped for a token
+    with no field to enter one."""
     assert "network error" in _run(served_script, "first_load_no_answer")["status"]
-    assert "read token required: paste it above and unlock" in _run(served_script, "read_token_required")["status"]
+    got = _run(served_script, "read_token_required")
+    assert "read token required: paste it above and unlock" in got["status"]
+    assert 'id="tok"' in got["actions"]
 
 
 def test_a_render_crash_is_reported_as_a_page_script_error(served_script: Path) -> None:
@@ -313,6 +317,135 @@ def test_a_locked_page_does_not_report_operator_only_build_failures(served_scrip
     signal after lock."""
     got = _run(served_script, "attention_locked")
     assert "failed template build" not in got["html"] and got["images"] == ""
+
+
+def test_a_hidden_tab_sends_no_requests(served_script: Path) -> None:
+    """While the browser tab is hidden, the page sends nothing for a minute: not the 5-second poll, and not the
+    lease-status modal's own 2-second poller. Showing the tab again resumes both. Guards a background tab
+    costing the server a fresh ledger connection per read, forever (review UI-03's done-when: a hidden tab
+    issues 0 requests for 60 s)."""
+    got = _run(served_script, "hidden_tab_is_silent")
+    assert got["hidden"] == []
+    assert "/api/lease/status" in got["shown"] and "/api/overview" in got["shown"]
+
+
+def test_showing_a_hidden_tab_resumes_the_poll_at_once(served_script: Path) -> None:
+    """With no modal open, a hidden tab sends nothing for a minute, and showing it again polls the overview at
+    once and schedules the next poll. Guards the visibilitychange handler stopping the loop but never restarting
+    it."""
+    got = _run(served_script, "hidden_tab_main_loop")
+    assert got["hidden"] == []
+    assert "/api/overview" in got["shown"] and got["timer"] is True
+
+
+def test_locking_on_a_read_gated_server_shows_the_locked_view_at_once(served_script: Path) -> None:
+    """Locking on a read-gated server stops the poll (no token, nothing to send), so no later render would hide
+    the operator view. The lock redraws it at once: canEdit false, no 'acting as', the operator sections hidden.
+    A tab switch or an attention-line jump afterwards sends nothing for 30 s. Guards a stale canEdit letting a
+    tab switch fire tokenless operator reads, each a 401 and a denied audit row."""
+    got = _run(served_script, "lock_on_gated_server_then_switch_tabs")
+    assert got["unlocked"] == {"canEdit": True, "whoami": "acting as tester"}
+    assert got["after"] == [] and got["canEdit"] is False and got["whoami"] == ""
+    assert got["tokensShown"] == "none" and "read token required" in got["status"]
+
+
+def test_a_late_401_for_a_replaced_token_does_not_drop_the_new_one(served_script: Path) -> None:
+    """An operator read sent with token A answers 401 only after the user locked and unlocked with token B. The
+    page ignores it, since the 401 is about A, and keeps B unlocked with no message. Guards a stale reply logging
+    out a freshly pasted good token."""
+    got = _run(served_script, "stale_401_after_relock")
+    assert got["token"] == "B" and got["canEdit"] is True and got["toasts"] == []
+
+
+def test_operator_panels_load_on_the_first_poll_with_an_accepted_token(served_script: Path) -> None:
+    """When the first token check gets no verdict (whoami 503), the page stays locked ('checking the token…')
+    and keeps the first-load flag, so the poll that does get a verdict loads the open tab's panels at once
+    rather than up to two polls later. Guards empty operator sections showing for ten seconds after a slow
+    check."""
+    got = _run(served_script, "slow_token_check")
+    assert got["before"]["canEdit"] is False and "checking the token" in got["before"]["actions"]
+    assert "/api/tokens" in got["after"] and got["canEdit"] is True
+
+
+def test_failed_polls_back_off_to_a_minute_and_reset_on_success(served_script: Path) -> None:
+    """Each failed overview poll doubles the delay (5 s → 10, 20, 40, then 60 s, the cap) and the header says when
+    the next try is; a good poll resets it to 5 s. A failing poll asks for nothing else: the fleet and ledger
+    strips wait for the overview to answer. Guards an outage being met with three requests every 5 seconds."""
+    got = _run(served_script, "backoff")
+    assert got["delays"] == [5000, 10000, 20000, 40000, 60000, 60000]
+    assert set(got["failing"]) == {"/api/overview"} and len(got["failing"]) == 5
+    assert got["status"].endswith("· next try in 60 s")
+    assert got["after"] == 5000 and got["recovered"].startswith("updated ")
+
+
+def test_a_locked_page_on_a_read_gated_server_sends_nothing_until_unlock(served_script: Path) -> None:
+    """With BR0KR_DASHBOARD_READ_TOKEN set (/api/meta says reads need a token) and no token in the page, the page
+    asks for one and sends no read at all, now or a minute later, and schedules no poll. Unlock starts polling
+    with one token check. Guards the idle locked page drawing three 401s, and three denied audit rows, every 5
+    seconds (review UI-03's done-when allows one 401; this sends none)."""
+    got = _run(served_script, "read_gated_locked")
+    assert got["atBoot"] == [] and got["idle"] == [] and got["timerLeft"] is False
+    assert "read token required" in got["status"]
+    assert got["afterUnlock"][:2] == ["/api/whoami", "/api/overview"] and got["timerAfterUnlock"] is True
+
+
+def test_a_refused_read_token_costs_one_401_then_the_page_stops(served_script: Path) -> None:
+    """A token the reads refuse is checked once with /api/whoami (which records no audit denial), then the
+    overview's one 401 drops the token, says so, and stops the poll: nothing more for a minute. Guards a
+    revoked token sending a 401 every 5 seconds."""
+    got = _run(served_script, "refused_read_token")
+    assert got["atBoot"] == ["/api/whoami", "/api/overview"] and got["idle"] == []
+    assert got["token"] is None and "read token required" in got["status"]
+    assert any("The token was refused for reads (unauthorized)." in t["text"] for t in got["toasts"])
+
+
+def test_a_token_that_is_not_an_operator_token_unlocks_nothing_with_open_reads(served_script: Path) -> None:
+    """With open reads, a token /api/whoami does not accept unlocks nothing, so the page drops it and says so,
+    and never sends an operator read with it; the open reads carry on. Guards every operator panel 401ing on
+    every poll for a mistyped token."""
+    got = _run(served_script, "refused_operator_token_open_reads")
+    assert got["paths"].count("/api/whoami") == 1
+    assert not set(got["paths"]) & {"/api/tokens", "/api/operators", "/api/template/builds", "/api/settings"}
+    assert got["paths"].count("/api/overview") >= 4
+    assert got["token"] is None and 'id="tok"' in got["actions"]
+    assert any("The token was refused (unauthorized)." in t["text"] for t in got["toasts"])
+
+
+def test_a_read_token_on_a_read_gated_server_keeps_the_reads(served_script: Path) -> None:
+    """On a read-gated server, a viewer's read token is not an operator token (whoami says unauthorized) but is
+    valid for reads: the page keeps it, polls the overview, shows 'reads unlocked', and sends no operator read.
+    Guards the token check dropping a good read token."""
+    got = _run(served_script, "read_token_keeps_reads")
+    assert got["token"] == "viewer" and got["canEdit"] is False
+    assert "reads unlocked" in got["actions"] and got["status"].startswith("updated ")
+    assert not set(got["paths"]) & {"/api/tokens", "/api/operators", "/api/template/builds"}
+
+
+def test_operator_panels_load_every_third_poll_and_only_for_the_open_tab(served_script: Path) -> None:
+    """Unlocked on the Capacity tab, the first poll checks the token once and loads the build list (the attention
+    line needs it on every tab), settings and the audit log once. The next three polls read only overview, fleet
+    and ledger, plus the build list on the third. No agent tokens, operators, grants or sources are read, since
+    their tabs are closed. Switching to Security loads its panels at once. The 'acting as' header comes from the
+    one token check. Guards the old nine reads every 5 seconds per unlocked page."""
+    got = _run(served_script, "operator_cadence")
+    first, nxt = got["first"], got["next"]
+    assert first.count("/api/whoami") == 1 and "/api/template/builds" in first
+    assert first.count("/api/settings") == 1 and first.count("/api/audit") == 1
+    assert not set(first) & {"/api/tokens", "/api/operators", "/api/template/grants", "/api/template/sources"}
+    assert nxt.count("/api/overview") == 3 and nxt.count("/api/template/builds") == 1
+    assert not set(nxt) & {"/api/whoami", "/api/tokens", "/api/operators", "/api/template/grants",
+                           "/api/template/sources", "/api/settings", "/api/audit"}
+    assert {"/api/tokens", "/api/operators"} <= set(got["onSwitch"])
+    assert got["whoami"] == "acting as tester"
+
+
+def test_a_token_revoked_after_unlock_is_dropped_on_its_first_401(served_script: Path) -> None:
+    """When an operator read answers 401 (the token was revoked after unlock), the page drops the token, says
+    so, and sends no further operator read. Guards a revoked token drawing a 401 per operator panel per poll
+    until someone notices."""
+    got = _run(served_script, "revoked_operator_token")
+    assert got["token"] is None and got["canEdit"] is False and got["later"] == []
+    assert any("The operator token was refused (unauthorized)." in t["text"] for t in got["toasts"])
 
 
 def test_why_explains_codes_by_exact_entry_then_by_family(served_script: Path) -> None:

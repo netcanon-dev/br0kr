@@ -40,14 +40,17 @@ class El {
   scrollIntoView(opts) { this.scrolledWith = opts || true; }
 }
 const els = new Map();
+const listeners = {};
 const document = {
+  hidden: false,
   getElementById(id) { if (!els.has(id)) els.set(id, new El('div', id)); return els.get(id); },
   createElement(tag) { return new El(tag); },
   querySelectorAll() { return []; },
-  addEventListener() {},
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
   execCommand() {},
   body: new El('body'),
 };
+async function fire(type) { (listeners[type] || []).forEach(fn => fn({})); await settle(); }
 const storage = () => {
   const m = new Map();
   return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)),
@@ -57,24 +60,42 @@ const storage = () => {
 // ── a fake dashboard server: path (query stripped) → {status, body} or {status, raw}. status 0 = no answer. ──
 let routes = {};
 const calls = [];
+// A route may be a function of the request returning the response, or a promise of it (to hold a reply back).
 function fakeFetch(path, opts) {
   calls.push({ path: String(path), method: (opts && opts.method) || 'GET' });
-  let res = routes[String(path).split('?')[0]];
-  if (typeof res === 'function') res = res(path, opts);
-  if (!res) res = { status: 404, body: { error: 'not_found' } };
-  if (res.status === 0) return Promise.reject(new TypeError('Failed to fetch'));
-  const text = res.raw !== undefined ? res.raw : JSON.stringify(res.body);
-  return Promise.resolve({
-    ok: res.status >= 200 && res.status < 300, status: res.status, headers: { get: () => null },
-    json: async () => JSON.parse(text), blob: async () => ({}),
+  const route = routes[String(path).split('?')[0]];
+  return Promise.resolve(typeof route === 'function' ? route(path, opts) : route).then(res => {
+    if (!res) res = { status: 404, body: { error: 'not_found' } };
+    if (res.status === 0) throw new TypeError('Failed to fetch');
+    const text = res.raw !== undefined ? res.raw : JSON.stringify(res.body);
+    return {
+      ok: res.status >= 200 && res.status < 300, status: res.status, headers: { get: () => null },
+      json: async () => JSON.parse(text), blob: async () => ({}),
+    };
   });
 }
 
+// Fake timers on a virtual clock: nothing fires unless a scenario calls advance(ms), which runs every timer due
+// by then in time order, letting the page's promises settle after each.
+let clock = 0, timerSeq = 0;
 const timers = [];
+async function advance(ms) {
+  const end = clock + ms;
+  for (;;) {
+    const due = timers.filter(t => t.at <= end).sort((a, b) => a.at - b.at || a.id - b.id)[0];
+    if (!due) break;
+    timers.splice(timers.indexOf(due), 1);
+    clock = due.at;
+    due.fn();
+    await settle();
+  }
+  clock = end;
+}
 const logs = [];
 const sandbox = {
   document, localStorage: storage(), sessionStorage: storage(), fetch: fakeFetch,
-  setTimeout: (fn, ms) => { timers.push({ ms }); return timers.length; }, clearTimeout() {},
+  setTimeout: (fn, ms) => { const id = ++timerSeq; timers.push({ id, at: clock + (ms || 0), ms, fn }); return id; },
+  clearTimeout: id => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1); },
   console: { log() {}, info: (...a) => logs.push(['info', a.join(' ')]),
     warn: (...a) => logs.push(['warn', a.join(' ')]), error: (...a) => logs.push(['error', a.join(' ')]) },
   URLSearchParams, URL, navigator: {}, Blob,
@@ -110,10 +131,12 @@ function healthy() {
 const $ = id => document.getElementById(id);
 const run = code => vm.runInContext(code, sandbox);
 async function settle() { for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r)); }
-// Load the page with the given route overrides; `token` unlocks operator actions (meta says they are enabled).
-async function boot({ routes: over = {}, token = null } = {}) {
+// Load the page with the given route overrides; `token` unlocks operator actions (meta says they are enabled);
+// `tab` is the tab the page opens on (as remembered from an earlier visit).
+async function boot({ routes: over = {}, token = null, tab = null } = {}) {
   routes = Object.assign(healthy(), over);
   if (token) sandbox.sessionStorage.setItem('br0kr_tok', token);
+  if (tab) sandbox.localStorage.setItem('br0kr_tab', tab);
   vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), sandbox, { filename: 'dashboard-page.js' });
   await settle();
 }
@@ -122,6 +145,10 @@ const toasts = () => $('toast').children.map(c => ({
   closable: c.children.length > 1 }));
 const fail = (status, error) => ({ status, body: { error } });
 const ok = body => ({ status: 200, body });
+const pathsSince = n => calls.slice(n).map(c => c.path.split('?')[0]);
+const pollTimer = () => timers.find(t => t.fn === run('poll'));
+const OPERATOR_READS = ['/api/tokens', '/api/operators', '/api/template/grants', '/api/template/sources',
+  '/api/template/builds', '/api/settings', '/api/audit'];
 const strip = () => ({ html: $('attention').innerHTML, hidden: $('attention').hidden === undefined
   ? 'never rendered' : $('attention').hidden, images: $('badge-images').textContent,
   tenancy: $('badge-tenancy').textContent, tab: run('TAB') });
@@ -131,15 +158,15 @@ async function confirmYes() { await run("document.getElementById('cm-ok').onclic
 
 const SCENARIOS = {
   async sources_unauthorized() {
-    await boot({ token: 't', routes: { '/api/template/sources': fail(401, 'unauthorized') } });
+    await boot({ token: 't', tab: 'images', routes: { '/api/template/sources': fail(401, 'unauthorized') } });
     return { downloads: $('downloads').innerHTML };
   },
   async sources_empty() {
-    await boot({ token: 't' });
+    await boot({ token: 't', tab: 'images' });
     return { downloads: $('downloads').innerHTML };
   },
   async operator_reads_fail() {
-    await boot({ token: 't', routes: { '/api/tokens': fail(503, 'ledger_unreachable'),
+    await boot({ token: 't', tab: 'security', routes: { '/api/tokens': fail(503, 'ledger_unreachable'),
       '/api/operators': { status: 0 }, '/api/audit': fail(503, 'query_failed'),
       '/api/template/builds': { status: 200, raw: '<html>a proxy error page</html>' } } });
     return { tokens: $('tokens').innerHTML, operators: $('operators').innerHTML, audit: $('audit').innerHTML,
@@ -156,7 +183,7 @@ const SCENARIOS = {
     return { failed, after, keptEdit: $('settings').innerHTML.includes('an edit in progress') };
   },
   async grants_keep_last() {
-    await boot({ token: 't' });
+    await boot({ token: 't', tab: 'images' });
     routes['/api/template/grants'] = fail(503, 'ledger_unreachable');
     await run('loadGrants()'); await settle();
     return { grants: run('GRANTS.length'), templates: $('templates').innerHTML };
@@ -184,7 +211,7 @@ const SCENARIOS = {
   },
   async read_token_required() {
     await boot({ routes: { '/api/overview': fail(401, 'unauthorized') } });
-    return { status: $('status').textContent };
+    return { status: $('status').textContent, actions: $('actions').innerHTML };
   },
   async render_throws() {
     await boot({ routes: { '/api/overview': { status: 200, body: { clusters: null } } } });
@@ -316,6 +343,117 @@ const SCENARIOS = {
       '/api/template/builds': ok({ builds: [FAILED_BUILD(1, '2026-11-10T10:00:00+00:00')] }) } });
     run("BUILDS = [" + JSON.stringify(FAILED_BUILD(1, '2026-11-10T10:00:00+00:00')) + "]; renderAttention()");
     return strip();
+  },
+  async hidden_tab_is_silent() {
+    await boot({ token: 't' });
+    run('showLeaseStatus(7)'); await settle();      // a lease-status modal polls on its own 2-second timer
+    const n = calls.length;
+    document.hidden = true; await fire('visibilitychange');
+    await advance(60000);
+    const hidden = pathsSince(n);
+    document.hidden = false; await fire('visibilitychange');
+    await advance(2000);                             // the modal's poller resumes
+    run('closeForm()'); await settle();              // closing the modal polls the page at once
+    return { hidden, shown: pathsSince(n) };
+  },
+  async hidden_tab_main_loop() {
+    await boot({});
+    const n = calls.length;
+    document.hidden = true; await fire('visibilitychange');
+    await advance(60000);
+    const hidden = pathsSince(n);
+    document.hidden = false; await fire('visibilitychange');   // no advance: showing the tab polls at once
+    return { hidden, shown: pathsSince(n), timer: !!pollTimer() };
+  },
+  async lock_on_gated_server_then_switch_tabs() {
+    await boot({ token: 't', routes: { '/api/meta': ok({ actions_enabled: true, read_auth_required: true }) } });
+    const unlocked = { canEdit: run('canEdit'), whoami: $('whoami').textContent };
+    run('lock()'); await settle();
+    const n = calls.length;
+    run("setTab('security')"); await settle();
+    run("goTo('images', 'downloads-sec')"); await settle();
+    await advance(30000);
+    return { unlocked, after: pathsSince(n), canEdit: run('canEdit'), whoami: $('whoami').textContent,
+      tokensShown: $('tokens-sec').style.display, status: $('status').textContent };
+  },
+  async stale_401_after_relock() {
+    let release = null, first = true;
+    await boot({ token: 'A', tab: 'security', routes: { '/api/tokens': () => {
+      if (!first) return ok({ tokens: [] });
+      first = false;
+      return new Promise(r => { release = () => r(fail(401, 'unauthorized')); });   // token A's read, held
+    } } });
+    run('lock()'); await settle();
+    $('tok').value = 'B'; run('unlock()'); await settle();
+    release(); await settle();                       // A's 401 lands after B was unlocked
+    return { token: sandbox.sessionStorage.getItem('br0kr_tok'), toasts: toasts(), canEdit: run('canEdit') };
+  },
+  async slow_token_check() {
+    let whoamiCalls = 0;
+    await boot({ token: 't', tab: 'security', routes: { '/api/whoami': () => (++whoamiCalls === 1
+      ? fail(503, 'ledger_unreachable') : ok({ verdict: 'ok', actor: 'tester' })) } });
+    const before = { canEdit: run('canEdit'), actions: $('actions').innerHTML };
+    const n = calls.length;
+    await advance(5000);                             // the second poll gets a verdict
+    return { before, after: pathsSince(n), canEdit: run('canEdit') };
+  },
+  async backoff() {
+    await boot({});
+    const delays = [pollTimer().ms];                 // after the good first load
+    routes['/api/overview'] = fail(503, 'ledger_unreachable');
+    const n = calls.length;
+    for (let i = 0; i < 5; i++) { await advance(pollTimer().ms); delays.push(pollTimer().ms); }
+    const failing = pathsSince(n), status = $('status').textContent;
+    routes['/api/overview'] = healthy()['/api/overview'];
+    await advance(pollTimer().ms);
+    return { delays, failing, status, after: pollTimer().ms, recovered: $('status').textContent };
+  },
+  async read_gated_locked() {
+    await boot({ routes: { '/api/meta': ok({ actions_enabled: true, read_auth_required: true }) } });
+    const atBoot = pathsSince(0).filter(p => p !== '/api/meta');
+    const status = $('status').textContent, n = calls.length;
+    await advance(60000);
+    const idle = pathsSince(n), timerLeft = !!pollTimer();
+    $('tok').value = 'good'; run('unlock()'); await settle();
+    return { atBoot, status, idle, timerLeft, afterUnlock: pathsSince(n), timerAfterUnlock: !!pollTimer() };
+  },
+  async refused_read_token() {
+    await boot({ token: 'bad', routes: { '/api/meta': ok({ actions_enabled: true, read_auth_required: true }),
+      '/api/whoami': ok({ verdict: 'unauthorized', actor: null }), '/api/overview': fail(401, 'unauthorized') } });
+    const atBoot = pathsSince(0).filter(p => p !== '/api/meta'), n = calls.length;
+    await advance(60000);
+    return { atBoot, idle: pathsSince(n), token: sandbox.sessionStorage.getItem('br0kr_tok'),
+      toasts: toasts(), status: $('status').textContent };
+  },
+  async refused_operator_token_open_reads() {
+    await boot({ token: 'bad', routes: { '/api/whoami': ok({ verdict: 'unauthorized', actor: null }) } });
+    await advance(20000);
+    return { paths: pathsSince(0), token: sandbox.sessionStorage.getItem('br0kr_tok'), toasts: toasts(),
+      actions: $('actions').innerHTML };
+  },
+  async read_token_keeps_reads() {
+    await boot({ token: 'viewer', routes: { '/api/meta': ok({ actions_enabled: true, read_auth_required: true }),
+      '/api/whoami': ok({ verdict: 'unauthorized', actor: null }) } });
+    await advance(15000);
+    return { paths: pathsSince(0), token: sandbox.sessionStorage.getItem('br0kr_tok'),
+      actions: $('actions').innerHTML, status: $('status').textContent, canEdit: run('canEdit') };
+  },
+  async operator_cadence() {
+    await boot({ token: 't' });
+    const first = pathsSince(0), n = calls.length;
+    await advance(15000);                            // three polls; the third is due for operator reads
+    const next = pathsSince(n), m = calls.length;
+    run("setTab('security')"); await settle();       // a tab switch loads that tab's panels at once
+    return { first, next, onSwitch: pathsSince(m), whoami: $('whoami').textContent };
+  },
+  async revoked_operator_token() {
+    await boot({ token: 't' });
+    routes['/api/template/builds'] = fail(401, 'unauthorized');   // revoked after the unlock
+    await advance(15000);
+    const n = calls.length;
+    await advance(30000);
+    return { token: sandbox.sessionStorage.getItem('br0kr_tok'), toasts: toasts(),
+      later: pathsSince(n).filter(p => OPERATOR_READS.includes(p)), canEdit: run('canEdit') };
   },
   async reasons() {
     await boot({});

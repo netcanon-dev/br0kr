@@ -339,6 +339,19 @@ lead with *why* (the bug, the gap, the decision); the diff already shows the
 - **The operator build subsystem was un-runnable on any deployment: `BR0KR_BUILD_LIMIT` (and `BR0KR_BUILD_STALE_SECONDS`/`BR0KR_BUILD_CORES`/`BR0KR_BUILD_MEMORY_MB`) were read by `daemon.main()` but never passed through the daemon service in `docker-compose.yml`** — so setting them in `.env` was the silent no-op the `.env.example` header explicitly warns about, and template builds stayed disabled regardless. Wired all four into `docker-compose.yml` (`daemon.environment`, int defaults so an empty inject can't crash `int("")`); behaviour-neutral by default (`BUILD_LIMIT` still `0`). This also unblocks `rebuild_source` replication, which requires a BUILT (source-provenanced) template. `.env.example` build block corrected to match.
 
 ### Changed
+- **The dashboard polls only while it can use the answer (`br0kr/dashboard_page.py`).** Why: every 5 seconds an
+  unlocked page sent nine reads, each a fresh ledger connection, forever, including from background tabs and
+  with no backoff. A locked page on a read-gated server drew three 401s per poll, each a denied audit row, so an
+  idle dashboard filled the trail. Now:
+  - a hidden tab sends nothing, the lease-status modal included;
+  - a failed poll backs off to a minute and the header says when the next try is;
+  - the fleet and ledger strips wait for the overview to answer;
+  - the operator panels refresh every third poll and only for the open tab, with the build list on every tab for
+    the attention line.
+  A new token is checked once with `/api/whoami`, which records no denial, before any operator read. A token the
+  server refuses is dropped with a message instead of being retried every poll, and a locked page on a read-gated
+  server sends nothing until unlock. `tests/integration/test_dashboard_client.py` drives each case on a virtual
+  clock (review UI-03).
 - **The tenant MCP gateway no longer advertises the operator-only tools; a new opt-in `gateway-operator`
   serves them, with the PVE token (`br0kr/mcp_server.py`, `docker-compose.yml`).** Why: a tenant token gets
   nothing but `forbidden_scope` from those tools, yet their descriptions were about 44 % of what every tenant

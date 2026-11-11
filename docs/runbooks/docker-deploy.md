@@ -133,6 +133,14 @@ cordoned nodes, a pending fleet reload, queued requests. Each item jumps to its 
 is well. A failed build or replication stays listed until you dismiss it (×) in that browser; a newer failure
 brings it back. Your own cancels and force-fails are not listed. The Images tab's badge counts those failures, and the Tenancy tab's badge counts queued requests.
 
+**The page polls only while it can use the answer.** Every read opens a ledger connection, so:
+- a hidden browser tab sends nothing until it is shown again;
+- a failed refresh backs off (10 s, 20 s, 40 s, then once a minute) and the header says when the next try is;
+- the operator panels refresh every third poll (15 s), and only on the open tab.
+A new token is checked once with `/api/whoami`, which leaves no audit trace. A token the server refuses is dropped
+with a message, and the page asks for a valid one. A locked page on a read-gated server sends nothing until you
+unlock, so an idle dashboard adds no *denied* rows to the audit log.
+
 **When something fails, the page says so.** A panel whose read fails shows *could not load … — reason* in
 place of its content, never an empty list. If a refresh fails after a good load, the header shows *stale since
 HH:MM:SS — reason* and the panels keep the last good numbers; the fleet and ledger tiles say how old they are.

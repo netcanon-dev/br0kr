@@ -203,7 +203,66 @@ let ACTIONS = false, READ_AUTH = false, DATA = null, paused = false, timer = nul
 let leaseSelectMode = false;   // pause-mode multi-select on the Active-leases table (bulk cancel)
 let SETTINGS = null;   // last-loaded operator settings payload (for the edit form)
 const tok = () => sessionStorage.getItem('br0kr_tok') || '';
-const again = () => { clearTimeout(timer); timer = setTimeout(poll, REFRESH_MS); };
+// ── polling hygiene. Each read costs the server a fresh ledger connection, so the page polls only while it can
+//    use the answer: a hidden browser tab polls nothing (visibilitychange re-polls when it shows again), a failed
+//    poll doubles the delay up to a minute (reset on success), and a page that needs a token stops polling until
+//    unlock instead of collecting a 401, and a denied audit row, every few seconds. ──
+const MAX_DELAY_MS = 60000;
+let delay = REFRESH_MS;    // the next poll's delay
+let needsToken = false;    // the reads need a token this page does not have: stopped until unlock
+const again = () => {
+  clearTimeout(timer);
+  if(document.hidden || needsToken) return;
+  timer = setTimeout(poll, delay);
+};
+document.addEventListener('visibilitychange', () => { if(document.hidden) clearTimeout(timer); else poll(); });
+// The token is checked once per new token with /api/whoami, which always answers 200 with a verdict and records
+// no audit denial. Operator reads start only after an 'ok' verdict, so a wrong token costs one quiet request
+// instead of a 401 per operator read per poll. A token whoami does not accept may still be a valid READ token.
+let WHO = {tok:null, verdict:null, actor:null};
+async function checkToken(){
+  const t = tok();
+  if(!t){ WHO = {tok:null, verdict:null, actor:null}; return; }
+  if(WHO.tok === t) return;
+  const r = await fetchJSON('/api/whoami');
+  if(!r.ok || tok() !== t) return;   // no verdict yet: checked again on the next poll
+  WHO = {tok:t, verdict:r.data.verdict || null, actor:r.data.actor || null};
+  // with open reads, a token that is not an operator token unlocks nothing: drop it and say so
+  if(WHO.verdict !== 'ok' && ACTIONS && !READ_AUTH) refuseToken('The token was refused (' + WHO.verdict + ').');
+}
+const operatorOk = () => !!(ACTIONS && tok() && WHO.tok === tok() && WHO.verdict === 'ok');
+// Forget a token the server refused (a revoked or rotated one): the page locks and asks for a valid one.
+function refuseToken(msg){
+  if(!tok()) return;   // already dropped by a parallel read in the same poll
+  sessionStorage.removeItem('br0kr_tok');
+  WHO = {tok:null, verdict:null, actor:null};
+  leaseSelectMode = false; paused = false;
+  renderActions();
+  lockUi();
+  notify(msg + ' Paste a valid token and unlock.', 'err');
+}
+// Show the locked view now, not on the next render (which a page stopped for a token never reaches): every panel
+// is redrawn without operator controls, the operator sections hide, and the header forgets the actor.
+function lockUi(){
+  canEdit = false;
+  if(DATA && !paused) render(DATA);   // render() re-derives canEdit (false: no accepted token) and hides sections
+  else { $('whoami').textContent = ''; operatorReads(false); renderAttention(); }
+}
+// Operator panels change slowly and each read is another ledger connection: they load on the first poll after an
+// unlock or a tab switch, then every third poll (15 s), and only for the open tab. The build list is the
+// exception: the attention line needs it on every tab.
+let TICK = 0, OP_DUE = true;
+function operatorReads(force){
+  const due = force || OP_DUE || TICK % 3 === 0;
+  if(canEdit) OP_DUE = false;   // still due on the first poll that has an accepted token
+  const on = (...tabs) => due && tabs.includes(TAB);
+  loadTokens(on('security'));     // operator-only sections hide themselves when locked, at no cost
+  loadOperators(on('security'));  // the NAMED dashboard-operator credentials (0026)
+  loadGrants(on('images', 'tenancy'));   // template grant counts + the create-VM template picker
+  loadDownloads(due, on('images'));      // builds every due poll (the attention line), sources on Images only
+  loadSettings();                 // the runtime settings editor (0021): loads once, retried after an error
+  syncAudit();                    // the append-only audit trail (0023): loads once, then on demand
+}
 // ── client-side tabs: 4 section-groups share ONE page + ONE poll loop. render() still writes EVERY section
 //    each tick (cheap at homelab scale); a tab only toggles which .tabpanel is DISPLAYED. Operator sections
 //    keep their OWN display:none gating on the <section> (a different element than the .tabpanel wrapper), so
@@ -217,20 +276,32 @@ function setTab(name){
   TAB = name; try{ localStorage.setItem('br0kr_tab', name); }catch(e){}
   document.querySelectorAll('.tabpanel').forEach(p => { p.style.display = (p.dataset.tab === name) ? '' : 'none'; });
   document.querySelectorAll('#tabnav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  // the newly opened tab's operator panels load now; operatorOk() checks the token itself, since canEdit is only
+  // re-derived on render and a page stopped for a token renders no more
+  if(DATA && canEdit && operatorOk() && !paused) operatorReads(true);
 }
 // ── the token field: shown when writes need a token (operator actions) OR reads do (BR0KR_DASHBOARD_READ_TOKEN).
 //    One field holds one token; the operator token unlocks both writes and reads (operator ⊇ viewer). ──
 function renderActions(){
   const el = $('actions');
   if(!ACTIONS && !READ_AUTH){ el.innerHTML = '<span class="pill">read-only</span>'; return; }
-  if(tok()) el.innerHTML = '<span class="ok">'+(ACTIONS ? 'actions unlocked' : 'reads unlocked')+'</span>'+
+  const state = operatorOk() ? 'actions unlocked'
+    : (WHO.tok === tok() && WHO.verdict) ? 'reads unlocked' : 'checking the token…';
+  if(tok()) el.innerHTML = '<span class="ok">'+state+'</span>'+
     '<button class="act ghost" onclick="lock()">lock</button>';
   else el.innerHTML = '<input id="tok" type="password" placeholder="'+(ACTIONS ? 'operator token' : 'read token')+
     '" size="12"><button class="act" onclick="unlock()">unlock</button>';
 }
-// unlock/lock re-poll immediately so a gated read loads (or clears) without waiting a full refresh cycle.
-function unlock(){ const v = $('tok').value; if(v){ sessionStorage.setItem('br0kr_tok', v); renderActions(); poll(); } }
-function lock(){ sessionStorage.removeItem('br0kr_tok'); leaseSelectMode=false; paused=false; renderActions(); poll(); }
+// unlock/lock re-poll immediately so a gated read loads (or clears) without waiting a full refresh cycle; a page
+// stopped for a token (needsToken) starts polling again here.
+function unlock(){
+  const v = $('tok').value;
+  if(v){ sessionStorage.setItem('br0kr_tok', v); needsToken = false; OP_DUE = true; renderActions(); poll(); }
+}
+function lock(){
+  sessionStorage.removeItem('br0kr_tok'); WHO = {tok:null, verdict:null, actor:null};
+  leaseSelectMode=false; paused=false; renderActions(); lockUi(); poll();
+}
 const authHeaders = () => { const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok(); return h; };
 // ── one error vocabulary for every failed read and write. A failure shows the server's code AND what it means,
 //    never a bare code and never an empty state that reads as healthy. Exact codes first, then the code families
@@ -326,6 +397,16 @@ async function fetchJSON(path){
   catch(e){ return {ok:false, status:0, data:null}; }
   let data = null; try{ data = await r.json(); }catch(e){}
   return asResult(r, data);
+}
+// An operator-gated GET. A 401 means the server no longer accepts this token (revoked, expired or rotated): the
+// page drops it instead of asking again, which would cost a 401 and a denied audit row on every poll.
+async function opFetch(path){
+  const t = tok();
+  const r = await fetchJSON(path);
+  // only if the token is still the one this read carried: a late 401 for a token the user has since replaced
+  // must not drop the new one
+  if(r.status === 401 && t && tok() === t) refuseToken('The operator token was refused (unauthorized).');
+  return r;
 }
 // What a failed read renders INTO its own panel, in place of an empty state that would read as healthy.
 const loadErr = (what, r, extra) =>
@@ -542,11 +623,13 @@ async function clearPdm(i){
   }, true);
 }
 // ── agent tokens (operator-only; /api/tokens metadata is gated, fetched with the operator token) ──
-async function loadTokens(){
+// `go === false`: not due this poll (operatorReads) — keep the panel as rendered. Called bare after an action.
+async function loadTokens(go){
   const sec = $('tokens-sec');
   if(!canEdit){ sec.style.display='none'; return; }   // shown only when actions are unlocked
   sec.style.display='';
-  const r = await fetchJSON('/api/tokens');
+  if(go === false) return;
+  const r = await opFetch('/api/tokens');
   if(r.ok) renderTokens(r.data.tokens || []);
   else $('tokens').innerHTML = loadErr('agent tokens', r);   // never 'no tokens issued' on a failed read
 }
@@ -638,11 +721,12 @@ async function submitTokenExpiry(id){
   else $('form-err').textContent = why(r);
 }
 // ── named dashboard operators (0026; operator-only): per-human dashboard credentials → the audit records WHO ──
-async function loadOperators(){
+async function loadOperators(go){
   const sec = $('operators-sec');
   if(!canEdit){ sec.style.display='none'; return; }   // shown only when actions are unlocked
   sec.style.display='';
-  const r = await fetchJSON('/api/operators');
+  if(go === false) return;   // not due this poll
+  const r = await opFetch('/api/operators');
   if(r.ok) renderOperators(r.data.operators || []);
   else $('operators').innerHTML = loadErr('dashboard operators', r);
 }
@@ -703,13 +787,6 @@ function revokeOperator(id){
     else notify('Revoke failed: ' + why(r), 'err');
   }, true);
 }
-// header "acting as <name>" indicator — the operator's OWN identity resolved from their token (0026).
-async function syncWhoami(){
-  const el = $('whoami'); if(!el) return;
-  if(!canEdit){ el.textContent=''; return; }
-  const r = await fetchJSON('/api/whoami');   // a cosmetic indicator: a failed read just blanks it
-  el.textContent = (r.ok && r.data.verdict==='ok' && r.data.actor) ? ('acting as ' + r.data.actor) : '';
-}
 
 // ── operator settings (migration 0021; operator-gated like the token panel; edits the shared ledger row) ──
 async function loadSettings(){
@@ -719,7 +796,7 @@ async function loadSettings(){
   // already rendered: don't clobber an in-progress edit on poll. A failed load is NOT "rendered": retry it.
   const el = $('settings');
   if(el.innerHTML.trim() !== '' && !el.querySelector('.load-err')) return;
-  const r = await fetchJSON('/api/settings');
+  const r = await opFetch('/api/settings');
   if(r.ok && Array.isArray(r.data.knobs)){ renderSettings(r.data); renderAttention(); }   // reload_pending
   else el.innerHTML = loadErr('settings', r.ok ? {status:r.status, data:{error:'bad_response'}} : r);
 }
@@ -825,7 +902,7 @@ async function fetchAuditPage(){
   // the stale page — the race the review caught.
   const gen = ++auditGen;
   const p = auditFilterQS(); if(auditCursor!=null) p.set('before_id', auditCursor);
-  const r = await fetchJSON('/api/audit?'+p.toString());
+  const r = await opFetch('/api/audit?'+p.toString());
   if(gen !== auditGen) return;     // superseded by a newer request — discard this stale page
   if(!r.ok){                       // never 'no audit entries' on a failed read; the trail loads once, so offer a retry
     $('audit').innerHTML = loadErr('the audit log', r);
@@ -1144,9 +1221,10 @@ async function submitReplicatePrune(){
   if(r.ok && r.data && typeof r.data.pruned === 'number') closeForm();
   else $('form-err').textContent = why(r);
 }
-async function loadGrants(){
+async function loadGrants(go){
   if(!canEdit){ GRANTS = []; GRANTS_ERR = null; return; }   // grants (the who) are operator-gated
-  const r = await fetchJSON('/api/template/grants');
+  if(go === false) return;   // not due this poll
+  const r = await opFetch('/api/template/grants');
   // A failed read keeps the last list and says so: zeroing it would read as "no project has access" and would
   // drop granted private templates from the create-VM picker.
   if(r.ok){ GRANTS = r.data.grants || []; GRANTS_ERR = null; } else GRANTS_ERR = r;
@@ -1202,12 +1280,16 @@ async function revokeGrant(i, gi){
 // the agent-token panel. The section hides itself unless actions are unlocked.
 let SOURCES = [], BUILDS = [];
 const DL_ERR = {sources:null, builds:null};   // the failed result of each read, else null
-async function loadDownloads(){
+// `withSources === false`: the build list only (the attention line needs it on every tab; the sources table is
+// on the Images tab). Both default to a full load, as after an action.
+async function loadDownloads(go, withSources){
   const sec = $('downloads-sec');
   if(!canEdit){ sec.style.display='none'; return; }
   sec.style.display='';
-  const [rs, rb] = await Promise.all([fetchJSON('/api/template/sources'), fetchJSON('/api/template/builds')]);
-  if(rs.ok){ SOURCES = rs.data.sources || []; DL_ERR.sources = null; } else DL_ERR.sources = rs;
+  if(go === false) return;   // not due this poll
+  const [rs, rb] = await Promise.all([withSources === false ? null : opFetch('/api/template/sources'),
+    opFetch('/api/template/builds')]);
+  if(rs && rs.ok){ SOURCES = rs.data.sources || []; DL_ERR.sources = null; } else if(rs) DL_ERR.sources = rs;
   if(rb.ok){ BUILDS = rb.data.builds || []; DL_ERR.builds = null; } else DL_ERR.builds = rb;
   if(!paused) renderDownloads();
   renderAttention();   // a failed build shows on the strip whichever tab is open
@@ -1750,7 +1832,7 @@ function goTo(tab, sec){
 }
 function render(d){
   DATA = d;
-  canEdit = ACTIONS && tok();   // per-item add/edit/delete + queue-cancel controls shown only when unlocked
+  canEdit = operatorOk();   // operator controls show only once /api/whoami has accepted this token
   // the Security & Ops tab is empty until unlocked (its sections self-hide) — show a one-line hint instead.
   if($('sec-hint')) $('sec-hint').style.display = canEdit ? 'none' : '';
   // Clusters
@@ -1845,13 +1927,10 @@ function render(d){
   }
   $('queue').innerHTML = qh;
   renderMigrations();   // cross-cluster migration panel (+ the operator migrate form when unlocked)
-  loadTokens();   // operator-only section; hides itself unless actions are unlocked
-  loadOperators();// operator-only: the NAMED dashboard-operator credentials (0026)
-  syncWhoami();   // header "acting as <name>" indicator (0026) — resolved from the operator's own token
-  loadGrants();   // operator-only: refresh per-template grant counts, then re-render the templates table
-  loadDownloads();// operator-only: the download source allowlist + build-job status (phase A4.1)
-  loadSettings(); // operator-only: the runtime settings editor (migration 0021)
-  syncAudit();    // operator-only: the append-only audit trail (migration 0023); loads once, then on-demand
+  operatorReads(false);   // the operator panels: due every third poll, for the open tab (see operatorReads)
+  TICK++;
+  // header "acting as <name>" (0026): the operator's own identity, from the token check (no read per poll)
+  $('whoami').textContent = (canEdit && WHO.actor) ? 'acting as ' + WHO.actor : '';
   renderAttention();   // the strip + tab badges; the async loaders above re-render it when they land
 }
 // ── act-as-project provisioning + lease lifecycle: create a VM as a CHOSEN project (debiting ITS quota via
@@ -1974,6 +2053,7 @@ function pollLeaseStatus(id){
   const gen = ++psGen;
   const tick = async () => {
     if(gen !== psGen || !$('ps-body')) return;            // superseded, or the modal was closed
+    if(document.hidden){ setTimeout(tick, 2000); return; }   // a hidden tab sends nothing; resumes when shown
     const r = await fetchJSON('/api/lease/status?lease_id=' + id);
     if(gen !== psGen || !$('ps-body')) return;
     const note = $('ps-note');
@@ -2049,16 +2129,35 @@ function showStale(reason){
   if(!STALE) console.warn('br0kr dashboard: overview refresh failed — ' + reason);   // once per outage
   STALE = true;
 }
+const READ_TOKEN_MSG = 'read token required: paste it above and unlock';
 async function poll(){
   if(paused){ again(); return; }              // an edit form is open — don't fetch/clobber it
-  loadFleet();                                // fleet SLO strip — best-effort, independent of the overview fetch
-  loadLedger();                               // ledger DR-posture strip — same best-effort, its own element
+  if(document.hidden || needsToken) return;   // hidden: visibilitychange re-polls; needsToken: unlock() does
+  if(READ_AUTH && !tok()){                    // reads need a token this page lacks: ask, and send nothing
+    needsToken = true; clearTimeout(timer); showStale(READ_TOKEN_MSG); return;
+  }
   try{
+    await checkToken();                       // a new token: one quiet /api/whoami before any operator read
+    renderActions();
+    const sent = tok();
     const r = await fetchJSON('/api/overview');
-    if(!r.ok){                                // reads may require a token (BR0KR_DASHBOARD_READ_TOKEN): prompt
-      showStale(r.status===401 ? 'read token required: paste it above and unlock' : why(r));
-      return;                                 // the finally still reschedules; unlock() re-polls at once
+    if(tok() !== sent) return;                // the token changed mid-flight: the newer poll owns the page
+    if(r.status === 401){                     // the reads refused this page's token: stop until unlock
+      needsToken = true;
+      READ_AUTH = true;                       // the server gates reads even if /api/meta said otherwise: the
+      refuseToken('The token was refused for reads (unauthorized).');   // header must offer a token field,
+      renderActions();                        // or a stopped page would have no way to unlock
+      showStale(READ_TOKEN_MSG);
+      return;
     }
+    if(!r.ok){                                // back off: 10 s, 20 s, 40 s, then once a minute
+      delay = Math.min(delay * 2, MAX_DELAY_MS);
+      showStale(why(r) + ' · next try in ' + Math.round(delay / 1000) + ' s');
+      return;
+    }
+    delay = REFRESH_MS;
+    loadFleet();                              // the tile strips, best-effort and independent, but only once the
+    loadLedger();                             // overview answers: a down or refusing server costs one request
     if(!paused){                              // an edit may have opened during the fetch
       render(r.data);
       LAST_OK = new Date();
