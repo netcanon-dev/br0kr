@@ -52,7 +52,7 @@ read it repeats at most every 10 s, so they can be that much behind the ledger.
 | metric | from | means |
 |---|---|---|
 | `br0kr_admit_total{tool,outcome}` | gateway | `request_lease` / `schedule_lease` answers; `outcome` is `admitted`, `queued`, `replay`, `error`, `invalid_input`, or the refusal reason or error code |
-| `br0kr_pve_request_seconds_{sum,count}{op,outcome}` | daemon, operator gateway | PVE API calls by HTTP method; `outcome` is `ok`, `denied`, `http_error`, `bad_reply`, `timeout` or `unreachable` |
+| `br0kr_pve_request_seconds_{sum,count}{op,outcome}` | daemon, operator gateway | PVE API calls by HTTP method; `outcome` is `ok`, `denied`, `http_error`, `bad_reply`, `timeout` or `unreachable`; a GET retried after a 502/503/504 counts once, by its final answer |
 | `br0kr_release_failed_total` | daemon | leases the reaper gave up on (terminal `RELEASE_FAILED`) |
 | `br0kr_placement_released_total` | daemon | held leases released after running out of placement re-checks |
 | `br0kr_last_progress_age_seconds` | daemon | seconds since the loop last stamped progress, on every role |
@@ -114,7 +114,8 @@ gate and rollback contract").
 ### Br0krDaemonStalled
 
 **Means.** A daemon's loop has stamped no progress for more than 5 minutes: it is deadlocked or stuck in a call that never
-returns. Every task wait beats once a second, so a long but healthy tick never trips this. It fires for a standby
+returns. Every task wait beats on each poll (1 to 3 s apart, plus the request), so a long but healthy tick never
+trips this. It fires for a standby
 too, because a wedged standby cannot take over. `/healthz` answers 503, but Compose never restarts an unhealthy
 container.
 

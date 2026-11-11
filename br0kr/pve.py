@@ -38,6 +38,8 @@ from collections.abc import Callable
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # imgbuild: the driver refuses to reap-DELETE anything but a broker-owned import artifact (below)
 from br0kr import imgbuild, metrics
@@ -484,27 +486,69 @@ def clone_orphan_decision(exists: bool, tags: str | None) -> str:
 ACL_FORBIDDEN: Any = object()
 
 
+# How a driver's session retries (review PERF-04): a GET that pveproxy answers 502/503/504 (pvedaemon restarting
+# or overloaded) is tried up to twice more, after 0 s and 1 s. Nothing else is retried. A POST, PUT or DELETE starts
+# or changes something on PVE (a clone, a config, a destroy), so it is never sent twice; a connect failure or a read
+# timeout is not retried either, so a hung or unreachable PVE fails a call after one `timeout` (only a 502/503/504
+# that is itself slow to arrive can take up to three; the task wait and the caller already retry). A retried GET is
+# counted once in PVE_REQUEST_SECONDS, by its final answer. raise_on_status=False hands back the last 5xx so the
+# caller still gets the requests.HTTPError it handles, not urllib3's RetryError.
+PVE_RETRY = Retry(total=2, connect=0, read=0, other=0, status=2, backoff_factor=0.5,
+                  status_forcelist=(502, 503, 504), allowed_methods=frozenset({"GET"}),
+                  raise_on_status=False, respect_retry_after_header=False)
+
+# The task poll's pace (review PERF-04). Each poll is a PVE request, and a clone or an image download runs for
+# minutes: poll every POLL_FAST_S while a task is young (a stop, start or config task usually ends inside
+# POLL_FAST_FOR_S), then every POLL_SLOW_S, so a 60 s clone costs 28 polls rather than 60. Each poll still calls
+# the daemon's progress hook, so its liveness heartbeat beats every POLL_SLOW_S plus the request.
+POLL_FAST_S, POLL_FAST_FOR_S, POLL_SLOW_S = 1, 10, 3
+
+# When a driver may reuse a kept-alive connection (review PERF-04). Only a GET does, and only one that comes within
+# PVE_IDLE_REUSE_S of the last reply; anything else is sent on a fresh connection, as every call was before. A
+# POST, PUT or DELETE creates, changes or destroys something, so it never risks a socket the server may have just
+# dropped: that would fail it where a fresh connection would not, and it is not retried. The idle limit is because
+# pveproxy closes an idle connection after about 5 s (measured on the fleet's nodes: reused after 4 s idle, closed
+# by 5 s), which is also the daemon's tick, so a call one tick after the last could go out on a socket being
+# closed at that moment. It must stay below the shortest idle timeout of anything in front of a node.
+PVE_IDLE_REUSE_S = 3.5
+
+
 # ── The REST driver ────────────────────────────────────────────────────────────
 class Pve:
     """A thin PVE REST client scoped to one node. Auth is a PVE API token
     (`PVEAPIToken=<id>=<secret>`); `verify=False` tolerates the cluster's self-signed
-    cert on the LAN. The HTTP verbs are split out so tests can stub them."""
+    cert on the LAN. The HTTP verbs are split out so tests can stub them.
+
+    Every call goes through one `requests.Session` per driver (review PERF-04). A GET reuses a connection where
+    pveproxy keeps one open: pveproxy closes the connection after every call it hands to pvedaemon (the guest list,
+    task status, create, destroy), and keeps it only after the calls it answers itself (a guest's config), so on the
+    fence harness's sequence 36 requests took 31 TLS handshakes. A POST, PUT or DELETE, and any call more than
+    PVE_IDLE_REUSE_S after the last reply, gets a fresh connection; a GET that PVE answers 502/503/504 is retried
+    per PVE_RETRY. A driver is used by one thread at a time: the daemon's tick, or one operator tool call that
+    builds its own registry."""
 
     def __init__(self, host: str, node: str, token_id: str, token_secret: str, timeout: int = 30) -> None:
         self.base = f"https://{host}:8006/api2/json"
         self.node = node
         self.timeout = timeout
-        self._h = {"Authorization": f"PVEAPIToken={token_id}={token_secret}"}
+        self._session = requests.Session()
+        self._session.headers["Authorization"] = f"PVEAPIToken={token_id}={token_secret}"
+        self._session.verify = False
+        self._session.mount("https://", HTTPAdapter(pool_maxsize=4, max_retries=PVE_RETRY))
+        self._last_reply: float | None = None   # monotonic end of the last call (PVE_IDLE_REUSE_S)
 
     def _request(self, method: str, path: str, data: dict[str, Any] | None = None) -> Any:
         """The one PVE API seam: send `method path` (form `data` for POST/PUT), raise for an HTTP error, return the
         reply's `data`. Times the call and counts its outcome in PVE_REQUEST_SECONDS whatever happens, so a slow or
         refusing PVE shows on /metrics, not only in the caller's log line."""
         started = time.monotonic()
+        if method != "GET" or (self._last_reply is not None and started - self._last_reply > PVE_IDLE_REUSE_S):
+            self._session.close()   # a fresh connection (PVE_IDLE_REUSE_S): never a socket pveproxy may have dropped
         outcome = "unreachable"
         try:
-            r = requests.request(method, self.base + path, headers=self._h, data=data, verify=False,
-                                 timeout=self.timeout)
+            # verify=False on the call, not only on the session: a REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE in the
+            # environment overrides the session's setting and would refuse the cluster's self-signed cert.
+            r = self._session.request(method, self.base + path, data=data, verify=False, timeout=self.timeout)
             outcome = _http_outcome(r.status_code)
             r.raise_for_status()
             try:
@@ -516,7 +560,8 @@ class Pve:
             outcome = "timeout"
             raise
         finally:
-            PVE_REQUEST_SECONDS.observe(method.lower(), outcome, seconds=time.monotonic() - started)
+            self._last_reply = time.monotonic()
+            PVE_REQUEST_SECONDS.observe(method.lower(), outcome, seconds=self._last_reply - started)
 
     def _get(self, path: str) -> Any:
         return self._request("GET", path)
@@ -538,12 +583,15 @@ class Pve:
         'TIMEOUT' if it has not reached 'stopped' within the budget (distinct from a
         non-OK exitstatus — the caller must NOT treat a still-running task as failed).
         A transient status-GET error is retried, not fatal, so one network blip during
-        a long create doesn't abort the flow. `on_progress` (if given) is called once per
-        poll iteration — the daemon threads its liveness heartbeat through here so a LONG
-        task (e.g. a multi-minute image download) keeps the worker's health probe fresh
-        instead of looking wedged."""
+        a long create doesn't abort the flow. The budget `secs` is the time spent waiting between polls, paced
+        per POLL_FAST_S / POLL_FAST_FOR_S / POLL_SLOW_S (every second at first, then every 3 s; review PERF-04), and
+        the last poll is made AT the budget, so a task that ends in the final step is seen, not called TIMEOUT.
+        `on_progress` (if given) is called once per poll — the daemon threads its liveness heartbeat through here
+        so a LONG task (e.g. a multi-minute image download) keeps the worker's health probe fresh instead of
+        looking wedged."""
         warned_acl = False
-        for _ in range(secs):
+        waited = 0
+        while True:
             if on_progress is not None:
                 on_progress()
             try:
@@ -558,17 +606,24 @@ class Pve:
                     log.warning("polling PVE task %s was refused (HTTP %s): the br0kr token needs Sys.Audit on "
                                 "/nodes/%s (the PVEAuditor role, docker-deploy.md §7); retrying until the wait "
                                 "budget", upid, code, self.node, extra={"http_status": code})
-                time.sleep(1)
-                continue
+                status = {}
             except requests.RequestException:
-                time.sleep(1)
-                continue
+                status = {}
             if status.get("status") == "stopped":
                 return str(status.get("exitstatus"))
-            time.sleep(1)
-        return "TIMEOUT"
+            if waited >= secs:
+                return "TIMEOUT"
+            step = min(POLL_FAST_S if waited < POLL_FAST_FOR_S else POLL_SLOW_S, secs - waited)
+            time.sleep(step)
+            waited += step
 
     def exists(self, vmid: int) -> bool:
+        """Whether a guest with this vmid lives on this node, from the node's guest list: an authoritative
+        inventory, so a vmid missing from a successful answer is absent and any failure raises. Kept on purpose
+        over the cheaper per-guest status read (review PERF-04): PVE answers that read for a missing guest with a
+        bare HTTP 500 whose only tell is its message text, so it would have to read 'absent' out of an error string,
+        and a misread either way breaks a teardown (a live guest read as 'gone', or a gone one retried until
+        RELEASE_FAILED). The list is one small request."""
         return any(int(v["vmid"]) == vmid for v in self._get(f"/nodes/{self.node}/qemu"))
 
     def read_tags(self, vmid: int) -> str | None:

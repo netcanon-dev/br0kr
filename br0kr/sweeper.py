@@ -177,10 +177,13 @@ def orphan_sweep(
         # anything is destroyed. `absent` carries, per guest, whether its id is at/above the watermark.
         terminal_orphans: list[tuple[int, int, str | None]] = []
         absent: list[tuple[int, int, bool]] = []   # (vmid, lease_id, id_at_or_above_watermark)
+        # Every fenced guest's lease state in ONE query (review PERF-04: one query per guest before), read from one
+        # snapshot so the whole node is classified consistently. A lease id missing from the answer is absent.
+        states = lease.states_of(conn, [lease_id for _, lease_id in fenced])
+        if on_progress is not None:
+            on_progress()
         for vmid, lease_id in fenced:
-            if on_progress is not None:
-                on_progress()   # heartbeat per classify lookup (a big fleet is many state_of queries)
-            state = lease.state_of(conn, lease_id)
+            state = states.get(lease_id)
             if state is None:
                 absent.append((vmid, lease_id, lease_id >= watermark))
             elif is_orphan(state):   # a TERMINAL lease row exists — positive evidence the guest should die

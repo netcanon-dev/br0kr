@@ -38,6 +38,9 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **The PVE driver polls a task every 3 s after its first 10 s; the orphan sweep reads a node's leases in one
+  query.** One session per node reuses a connection where pveproxy keeps it open and retries only a GET
+  answered 502/503/504 (PERF-04).
 - **The daemon's /metrics reads the ledger at most once per 10 s, and the dashboard polls with one request.**
   fleet_stats reads only its window via new partial indexes (migration 0050); /readyz probes with SELECT 1;
   /api/overview carries the fleet and ledger strips (PERF-03).

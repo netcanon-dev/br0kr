@@ -1149,3 +1149,35 @@ def test_task_poll_refused_by_acl_is_named_once_then_times_out(monkeypatch, capl
         assert p.wait("UPID:x", secs=4) == "TIMEOUT"
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1 and "Sys.Audit" in warnings[0]
+
+
+def test_a_task_poll_slows_down_after_ten_seconds(monkeypatch):
+    """wait() polls at once, then every second until POLL_FAST_FOR_S, then every POLL_SLOW_S, spends exactly `secs`
+    waiting, and makes its last poll AT the budget before TIMEOUT: a 60 s budget is 28 polls (at 0..10 s, 16 more
+    3 s apart, and one at 60 s), each calling the progress hook; a task that stops at the 12th poll returns its
+    exitstatus there. Guards the poll costing one PVE request per second for a whole clone (review PERF-04: a 300 s
+    clone was 300 requests), a budget that drifts from `secs`, a task ending in the last step read as TIMEOUT, and a
+    poll that stops beating the daemon's heartbeat."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(pve.time, "sleep", sleeps.append)
+    beats: list[int] = []
+
+    class _Running(pve.Pve):
+        polls = 0
+        finish_at: int | None = None
+
+        def _get(self, path: str) -> Any:
+            self.polls += 1
+            if self.finish_at is not None and self.polls >= self.finish_at:
+                return {"status": "stopped", "exitstatus": "OK"}
+            return {"status": "running"}
+
+    p = _Running("h", "n", "id", "sec")
+    assert p.wait("UPID:x", secs=60, on_progress=lambda: beats.append(1)) == "TIMEOUT"
+    assert p.polls == 28 and len(beats) == 28 and sum(sleeps) == 60
+    assert sleeps[:10] == [1] * 10 and sleeps[10:] == [3] * 16 + [2]   # the last step lands on the budget
+
+    sleeps.clear()
+    q = _Running("h", "n", "id", "sec")
+    q.finish_at = 12
+    assert q.wait("UPID:y", secs=300) == "OK" and q.polls == 12

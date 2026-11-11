@@ -2,7 +2,7 @@
 
 The sweep's job — destroy a fenced guest IFF its lease is terminal/absent, and never
 touch one whose lease is still live — is pure control flow over two seams: the ledger
-read (lease.state_of) and the fenced driver. So it is tested by patching state_of in
+read (lease.states_of, one query per node) and the fenced driver. So it is tested by patching it in
 its home module and injecting a fake driver. The live REST behaviour (a real orphan on
 pvenas) is proven in scripts/harness_daemon.py.
 """
@@ -76,7 +76,8 @@ class _StateTable(dict):
 
 @pytest.fixture
 def states(monkeypatch):
-    """Patch lease.state_of to a dict {lease_id: state} (a missing id reads None = absent), AND
+    """Patch lease.states_of to a dict {lease_id: state} (a missing id is absent), recording each batch on
+    `.batches`, AND
     lease.clone_orphan_reclaimable to a {vmid: bool} map on `.reclaimable` (default True = positive
     terminal-lease evidence), AND lease.max_lease_id to `.watermark` — DEFAULT a huge value so the rollback
     watermark is out of the way (every absent id is below it → destroyed as before) for the tests that aren't
@@ -91,7 +92,13 @@ def states(monkeypatch):
         table.reclaim_node_ids.append(node_id)
         return table.reclaimable.get(vmid, True)
 
-    monkeypatch.setattr(lease, "state_of", lambda conn, lid: table.get(lid))
+    def _states_of(conn, ids):
+        ids = list(ids)
+        table.batches.append(ids)
+        return {lid: table[lid] for lid in ids if table.get(lid) is not None}
+
+    table.batches = []
+    monkeypatch.setattr(lease, "states_of", _states_of)
     monkeypatch.setattr(lease, "clone_orphan_reclaimable", _reclaimable)
     monkeypatch.setattr(lease, "max_lease_id", lambda conn: table.watermark)
     return table
@@ -425,7 +432,8 @@ def test_orphan_sweep_all_isolates_a_failing_node(states):
 
 def test_on_progress_heartbeats_through_scan_classify_and_destroy(states):
     """orphan_sweep fires the optional on_progress callback after list_fenced (bounding the scan gap),
-    once per classify lookup, and once per orphan destroy — the liveness heartbeats that keep a big/slow
+    once after the one classify query (lease.states_of, PERF-04), and once per orphan destroy — the liveness
+    heartbeats that keep a big/slow
     sweep from reading as a wedge. Guards the false-restart the review caught: an un-beaten sweep (in the
     SCAN/classify phase or the destroy loop) that exceeds the daemon's stall window would 503 a healthy
     daemon mid-reclamation."""
@@ -433,8 +441,8 @@ def test_on_progress_heartbeats_through_scan_classify_and_destroy(states):
     d = _FakeDriver([(100, 5), (101, 6), (102, 7), (103, 8)])
     beats: list[int] = []
     sweeper.orphan_sweep(object(), d, on_progress=lambda: beats.append(1))
-    # 1 (after list_fenced) + 4 (per classify lookup) + 3 (per orphan destroy: 6/7/8; 5 is ACTIVE) = 8
-    assert len(beats) == 8
+    # 1 (after list_fenced) + 1 (after the classify query) + 3 (per orphan destroy: 6/7/8; 5 is ACTIVE) = 5
+    assert len(beats) == 5
 
 
 def test_on_progress_forwards_to_every_node_in_orphan_sweep_all(states):
@@ -462,3 +470,15 @@ def test_sweep_threads_its_heartbeat_into_both_destroy_verbs(states):
     d = _FakeDriver([(101, 6)], clone_orphans=[9901])
     sweeper.orphan_sweep(object(), d, on_progress=beat)
     assert d.hooks["fenced_destroy"] is beat and d.hooks["destroy_clone_orphan"] is beat
+
+
+def test_the_sweep_classifies_a_node_with_one_ledger_query(states):
+    """Every fenced guest on a node is classified from ONE lease.states_of call carrying all their lease ids: a
+    terminal lease is destroyed, a live one spared, an absent one (no row) destroyed as before. Guards the sweep
+    issuing one ledger query per guest (review PERF-04), which a large fleet turns into hundreds of round trips per
+    sweep."""
+    states.update({11: "RELEASED", 12: "ACTIVE"})
+    drv = _FakeDriver([(9011, 11), (9012, 12), (9013, 13)])
+    summary = sweeper.orphan_sweep(object(), drv)
+    assert states.batches == [[11, 12, 13]]
+    assert sorted(drv.destroyed) == [(9011, 11), (9013, 13)] and summary.destroyed == 2

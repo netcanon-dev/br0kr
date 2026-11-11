@@ -694,6 +694,20 @@ def check_pinned_lease_migration() -> bool:
     return ok
 
 
+def check_states_of_batch() -> bool:
+    """lease.states_of answers {id: state} for a batch in one query; an id with no row is absent from the answer."""
+    reset()
+    a = insert_lease("ACTIVE", expires_offset_s=600)
+    b = insert_lease("RELEASED", expires_offset_s=-1)
+    missing = b + 1000
+    with connect() as c:
+        got = lease.states_of(c, [a, b, missing, a])
+        empty = lease.states_of(c, [])
+    ok = got == {a: "ACTIVE", b: "RELEASED"} and empty == {}
+    print(f"[states_of_batch]      {got} (missing id {missing} absent)  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main() -> int:
     load_schema()
     print("=== lease-lifecycle concurrency gate (migrations) ===\n")
@@ -720,6 +734,7 @@ def main() -> int:
         check_pin_race_for_the_last_slot,
         check_pinned_request_end_to_end,
         check_pinned_lease_migration,
+        check_states_of_batch,
     ]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))

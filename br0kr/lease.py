@@ -52,6 +52,7 @@ committing op would also commit it).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -782,6 +783,19 @@ def state_of(conn: psycopg.Connection[Any], lease_id: int) -> str | None:
     row = conn.execute("SELECT state FROM lease WHERE id = %s", (lease_id,)).fetchone()
     conn.commit()
     return row[0] if row else None
+
+
+def states_of(conn: psycopg.Connection[Any], lease_ids: Iterable[int]) -> dict[int, str]:
+    """The current state of each of `lease_ids` in ONE query, as {id: state}; an id with no lease row is simply
+    absent from the answer (the orphan sweep's 'absent' evidence). One read for the whole batch (review PERF-04:
+    the sweep made one query per fenced guest), and one snapshot, so the batch is classified consistently. Like
+    `state_of`, never a basis for a transition decision on its own; commits to end the read transaction."""
+    ids = sorted({int(i) for i in lease_ids})
+    if not ids:
+        return {}
+    rows = conn.execute("SELECT id, state::text FROM lease WHERE id = ANY(%s)", (ids,)).fetchall()
+    conn.commit()
+    return {int(i): str(s) for i, s in rows}
 
 
 def max_lease_id(conn: psycopg.Connection[Any]) -> int:

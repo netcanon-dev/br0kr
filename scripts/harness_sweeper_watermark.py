@@ -6,7 +6,7 @@ partially-stale ledger (restored older backup / promoted lagging standby) — wh
 rows — sweeps every guest created AFTER the restore point. The fix reads `lease.max_lease_id` (the watermark)
 and SPARES any absent guest whose id is at/above it (a lease newer than the ledger knows). This harness proves
 the watermark SQL + the sparing compose correctly on real rows. The Proxmox driver is a fake (this finding is a
-LEDGER guard, not an actuation change); the ledger reads (`max_lease_id`, `state_of`) are real.
+LEDGER guard, not an actuation change); the ledger reads (`max_lease_id`, `states_of`) are real.
 
   watermark_empty   a fresh ledger reads max_lease_id == 0 (so every absent guest is at/above it → all spared).
   watermark_value   after inserting N leases, max_lease_id == the highest real id.

@@ -7,6 +7,10 @@ OS, never started — instant and harmless). ABORTS up front if that vmid alread
 exists, so it can never touch a pre-existing guest, and a `finally` force-removes the
 test VM even if a check fails.
 
+It also reports the driver's session reuse (review PERF-04): how many requests went out over how many real TCP
+connects (urllib3's HTTPSConnection.connect, counted). That is information, not a check: it depends on pveproxy's
+keep-alive behaviour, not on the fence.
+
 The money shot (zombie_destroy_refused): after the throwaway vmid is freed and REUSED
 by a NEW lease, a stale teardown still holding the OLD lease calls fenced_destroy and
 gets 'fence_mismatch' — the new guest survives. That is the vmid-reuse zombie-destroy
@@ -33,8 +37,32 @@ VMID = int(os.environ.get("FENCE_VMID", "9901"))
 OLD_LEASE, NEW_LEASE = 1001, 1002
 
 
+def _count_connects() -> list[int]:
+    """Count real TCP connects (each one a TLS handshake) the driver's connection pool makes from here on."""
+    import urllib3.connection
+
+    count = [0]
+    real = urllib3.connection.HTTPSConnection.connect
+
+    def connect(self):  # type: ignore[no-untyped-def]
+        count[0] += 1
+        return real(self)
+
+    urllib3.connection.HTTPSConnection.connect = connect   # type: ignore[method-assign]
+    return count
+
+
 def main() -> int:
+    connects = _count_connects()
     p = pve.Pve(HOST, NODE, os.environ["PVE_TOKEN_ID"], os.environ["PVE_TOKEN_SECRET"])
+    calls = [0]
+    _request = p._request
+
+    def counted(*a, **k):  # type: ignore[no-untyped-def]
+        calls[0] += 1
+        return _request(*a, **k)
+
+    p._request = counted   # type: ignore[method-assign]
     results: list[bool] = []
 
     def check(name: str, cond: bool, extra: str = "") -> None:
@@ -78,6 +106,8 @@ def main() -> int:
         if p.exists(VMID):
             print(f"[cleanup] force-removing leftover test vmid {VMID}")
             p.wait(p._delete(f"/nodes/{NODE}/qemu/{VMID}"))
+
+    print(f"[session_reuse] info: {calls[0]} requests over {connects[0]} TCP connects")
 
     ok = all(results) and len(results) == 8
     print("\n" + ("GO" if ok else "NO-GO"))
