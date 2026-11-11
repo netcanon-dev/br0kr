@@ -126,6 +126,13 @@ and sign in with its token instead of the shared `BR0KR_DASHBOARD_TOKEN`. It is 
 drives only the dashboard (never the MCP gateway) — while the env token stays the enable-switch and a shared
 bootstrap identity. The header shows *acting as &lt;name&gt;* and each write records that name.
 
+**When something fails, the page says so.** A panel whose read fails shows *could not load … — reason* in
+place of its content, never an empty list. If a refresh fails after a good load, the header shows *stale since
+HH:MM:SS — reason* and the panels keep the last good numbers; the fleet and ledger tiles say how old they are.
+Action results (a refusal, a no-op, a guest left to clean up) appear in the status area at the bottom right;
+errors stay until you close them. Each reason is the server's code followed by what it means, for example
+*unauthorized — this needs a valid token*.
+
 Smoke-test the whole stack end-to-end (no Proxmox needed) with
 [`scripts/run_compose_smoke.sh`](../../scripts/run_compose_smoke.sh): it brings the stack up under a
 throwaway project + `.env`, asserts migrations applied, the standby is streaming, the daemon is

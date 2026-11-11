@@ -69,5 +69,7 @@ tests/
   requirements-dev.txt         # the (tiny) dev/test deps
   unit/                        # pure functions, no I/O
   integration/                 # the app driven as a black box, boundaries mocked
+                               #   dashboard_client_harness.js: the dashboard client script as served, run
+                               #   in node on a fake DOM + fake server (test_dashboard_client.py; self-skips w/o node)
   e2e/                         # the real booted app (opt-in: e2e marker)
 ```

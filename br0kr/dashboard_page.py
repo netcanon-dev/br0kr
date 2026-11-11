@@ -7,7 +7,9 @@ Imported back as `dashboard.PAGE` (a re-export), so every `dashboard.PAGE` refer
 test keeps resolving. The client JS lives inside this Python string, so it is syntax-checked out of
 band: `node --check` on the extracted <script> (tests/check_dashboard_js.py, wired into
 tests/validate.sh) plus the hermetic backtick-parity test in tests/unit/test_dashboard.py —
-ruff/py_compile cannot see a JS error in here. No build step; the page's only assets are the
+ruff/py_compile cannot see a JS error in here. What the page DOES when a read or an action fails (the per-panel
+'could not load', the 'stale since' header, the one status region) is proven by running the served script in
+node against a fake DOM: tests/integration/test_dashboard_client.py. No build step; the page's only assets are the
 vendored SAME-ORIGIN spec files served from br0kr/ui_assets.py (netcanon-ui.css + the br0kr
 compat shim + theme-picker.js — nothing external, no CDN).
 """
@@ -86,6 +88,15 @@ PAGE = """<!doctype html>
   .ff input{width:190px;background:#0b0f14;border:1px solid var(--line);color:var(--ink);
             border-radius:4px;padding:3px 6px} .ff input[readonly]{opacity:.55}
   .ferr{color:var(--bad);font-size:12px}
+  /* the one status region for action results: bottom-right and ABOVE the #form-slot modal (z-index 1000), so a
+     result reported from inside a modal is still seen. */
+  #toast{position:fixed;right:16px;bottom:16px;z-index:1100;display:flex;flex-direction:column;gap:8px;
+    max-width:min(440px,calc(100vw - 32px))}
+  .toast-item{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;background:var(--card);
+    border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:8px 10px;
+    font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+  .toast-item.ok{border-left-color:var(--ok)} .toast-item.warn{border-left-color:var(--warn)}
+  .toast-item.err{border-left-color:var(--bad)} .toast-item .act{margin-top:0;flex:none}
 </style>
 <link rel="stylesheet" href="/assets/v0.2.1/netcanon-ui.css">
 <link rel="stylesheet" href="/assets/v0.2.1/br0kr.css">
@@ -105,8 +116,8 @@ PAGE = """<!doctype html>
 <main>
   <div id="form-slot"></div>
   <div class="tabpanel" data-tab="capacity">
-  <section id="fleet-sec"><h2>Fleet — admission SLOs</h2><div class="cards" id="fleet"></div>
-    <h2>Ledger — DR posture</h2><div class="cards" id="ledger"></div></section>
+  <section id="fleet-sec"><h2>Fleet — admission SLOs</h2><div id="fleet-err"></div><div class="cards" id="fleet"></div>
+    <h2>Ledger — DR posture</h2><div id="ledger-err"></div><div class="cards" id="ledger"></div></section>
   <section id="clusters-sec"><h2>Clusters</h2><div class="cards" id="clusters"></div></section>
   <section id="nodes-sec"><h2>Nodes</h2><div id="nodes"></div></section>
   <section id="storage-sec"><h2>Storage pools</h2><div class="cards" id="storage"></div></section>
@@ -158,6 +169,7 @@ PAGE = """<!doctype html>
     <div id="audit"></div><div id="audit-more"></div></section>
   </div>
 </main>
+<div id="toast" role="status" aria-live="polite"></div>
 <script>
 const REFRESH_MS = 5000;
 const $ = id => document.getElementById(id);
@@ -206,15 +218,129 @@ function renderActions(){
 // unlock/lock re-poll immediately so a gated read loads (or clears) without waiting a full refresh cycle.
 function unlock(){ const v = $('tok').value; if(v){ sessionStorage.setItem('br0kr_tok', v); renderActions(); poll(); } }
 function lock(){ sessionStorage.removeItem('br0kr_tok'); leaseSelectMode=false; paused=false; renderActions(); poll(); }
+const authHeaders = () => { const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok(); return h; };
+// ── one error vocabulary for every failed read and write. A failure shows the server's code AND what it means,
+//    never a bare code and never an empty state that reads as healthy. Exact codes first, then the code families
+//    by naming pattern. The hints avoid apostrophes: this script lives in a Python string, which rewrites an
+//    escaped quote (tests/unit/test_dashboard.py guards that). ──
+const REASON_HINT = {
+  unauthorized: 'this needs a valid token: paste it in the token field (top right) and unlock',
+  disabled: 'operator actions are turned off on this server (no operator token is configured)',
+  ledger_unreachable: 'the dashboard cannot reach the ledger database',
+  query_failed: 'the ledger query failed; the dashboard log has the detail',
+  action_failed: 'the server could not apply the change; the dashboard log has the detail',
+  bad_json: 'the request body was not valid JSON',
+  bad_request: 'a field is missing or has the wrong type',
+  bad_format: 'unknown export format',
+  bad_response: 'the server answered with something other than JSON',
+  not_found: 'this server has no such endpoint (is the page newer than the server?)',
+  lease_id_required: 'a lease id is required',
+  already_terminal: 'it has already ended',
+  already_revoked: 'it was already revoked',
+  already_granted: 'that project already has access',
+  already_present: 'it is already there',
+  not_granted: 'that project has no grant to revoke',
+  not_cancellable: 'it is past the point where it can be cancelled',
+  not_quarantined: 'that pair is not quarantined',
+  copy_in_flight: 'a copy is running; the daemon settles it on its own',
+  build_in_progress: 'a build for this target is still running',
+  replication_in_progress: 'a replication of this template is still running',
+  replication_cooldown: 'this template was replicated recently; try again shortly',
+  cluster_has_unbound_instances: 'bind the template instances on this cluster to a node and pool first',
+  source_not_allowed: 'the URL does not start with an allowlisted source prefix',
+  project_required: 'pick a project; only an operator token is project-less',
+  template_downloads_disabled: 'this project has no template-disk quota; set one on its project card',
+  template_disk_quota_exceeded: 'the template-disk quota of this project is full',
+  storage_unreachable: 'that node does not reach that storage pool; declare the reachability first',
+  storage_wrong_cluster: 'that storage pool belongs to a different cluster',
+  node_wrong_cluster: 'that node belongs to a different cluster',
+  pair_quarantined: 'a failed post-clone check fenced this node and storage pair off',
+  reserved_idem_key: 'that idempotency key is reserved; pick another',
+  node_and_cluster: 'pick a node or a cluster, not both',
+  storage_unbound: 'that storage pool is not bound to a cluster and PVE pool yet',
+};
+// The settings editor's codes are kind:setting (br0kr/settings.py validate_patch).
+const SETTING_PROBLEM = {below_min:'is below its minimum', too_large:'is above its maximum',
+  too_long:'is too long', not_an_int:'must be a whole number', not_a_bool:'must be true or false',
+  not_a_str:'must be text', invalid_choice:'is not one of the offered choices',
+  unknown_setting:'is not a setting this server knows (is the page newer than the server?)'};
+const words = s => s.split('_').join(' ');
+const HINT_RULES = [
+  [/^([a-z_]+):([a-z0-9_]+)$/, m => SETTING_PROBLEM[m[1]] ? m[2] + ' ' + SETTING_PROBLEM[m[1]] : ''],
+  [/^unknown_(.+)$/, m => 'no such ' + words(m[1]) + ' (it may have just been removed; the page refreshes shortly)'],
+  [/^(.+)_exists$/, m => 'a ' + words(m[1]) + ' with that id already exists'],
+  [/^(.+)_in_use$/, m => 'a lease still references this ' + words(m[1])],
+  [/^(.+)_has_(.+)$/, m => 'this ' + words(m[1]) + ' still has ' + words(m[2]) + '; remove those first'],
+  [/^(.+)_required$/, m => 'the ' + words(m[1]) + ' field is required'],
+  [/^missing_(.+)$/, m => 'the ' + words(m[1]) + ' field is required'],
+  [/^non_positive_(.+)$/, m => 'the ' + words(m[1]) + ' value must be greater than zero'],
+  [/^non_finite_(.+)$/, m => 'the ' + words(m[1]) + ' value must be a finite number'],
+  [/^(.+)_too_long$/, m => 'the ' + words(m[1]) + ' value is too long'],
+  [/^(.+)_too_large$/, m => 'the ' + words(m[1]) + ' value is too large'],
+  [/^too_many_(.+)$/, m => 'too many ' + words(m[1])],
+  [/^invalid_(.+)$/, m => 'the ' + words(m[1]) + ' value is not valid'],
+  [/^(.+)_invalid$/, m => 'the ' + words(m[1]) + ' value is not valid'],
+  [/^(.+)_disabled$/, m => words(m[1]) + ' is turned off on this server'],
+];
+function hint(code){
+  if(!code) return '';
+  code = String(code);
+  if(Object.prototype.hasOwnProperty.call(REASON_HINT, code)) return REASON_HINT[code];
+  for(const [re, say] of HINT_RULES){
+    const m = re.exec(code);
+    const h = m ? say(m) : '';
+    if(h) return h;
+  }
+  return '';
+}
+// The one-line reason for a failed {ok,status,data} result. `fallback` covers a 200 that names no reason (cancel
+// and renew answer cancelled:false / renewed:false for a no-op).
+function why(r, fallback){
+  if(!r || !r.status) return 'no answer from the dashboard server (network error)';
+  const code = r.data && (r.data.error || r.data.reason);
+  if(!code) return fallback || (r.ok ? 'the server did not apply it (no reason given)' : 'HTTP ' + r.status);
+  const h = hint(code);
+  return h ? code + ' — ' + h : String(code);
+}
+// {ok, status, data} for a response. A 2xx whose body is not a JSON object (a proxy error page, say) is a
+// failure, bad_response: it must never read as an empty list or as an applied write.
+const asResult = (r, data) => (r.ok && (data === null || typeof data !== 'object' || Array.isArray(data)))
+  ? {ok:false, status:r.status, data:{error:'bad_response'}} : {ok:r.ok, status:r.status, data};
+// GET a JSON endpoint with the token. Never throws; status 0 means no answer.
+async function fetchJSON(path){
+  let r;
+  try{ r = await fetch(path, {headers:authHeaders(), cache:'no-store'}); }
+  catch(e){ return {ok:false, status:0, data:null}; }
+  let data = null; try{ data = await r.json(); }catch(e){}
+  return asResult(r, data);
+}
+// What a failed read renders INTO its own panel, in place of an empty state that would read as healthy.
+const loadErr = (what, r, extra) =>
+  '<div class="err load-err">could not load ' + esc(what) + ' — ' + esc(why(r)) + esc(extra || '') + '</div>';
+// The one status region for action results (no native alert boxes): role=status + aria-live=polite, so a screen
+// reader announces it. textContent only, so a server reason is never parsed as markup. ok fades after 4 s and
+// info after 10 s; warn and err stay until closed. At most 4 are kept; the oldest goes first.
+function notify(msg, kind){
+  kind = kind || 'info';
+  const box = $('toast'); if(!box) return;
+  const item = document.createElement('div');
+  item.className = 'toast-item ' + kind;
+  const text = document.createElement('span'); text.textContent = msg; item.appendChild(text);
+  if(kind === 'err' || kind === 'warn'){
+    const x = document.createElement('button');
+    x.className = 'act ghost'; x.textContent = 'close'; x.onclick = () => item.remove();
+    item.appendChild(x);
+  } else setTimeout(() => item.remove(), kind === 'ok' ? 4000 : 10000);
+  box.appendChild(item);
+  while(box.children.length > 4) box.children[0].remove();
+  if(kind === 'err') console.warn('br0kr dashboard: ' + msg);
+}
 async function postJSON(path, body){
-  const h = {'Content-Type':'application/json'};
-  if(tok()) h['Authorization'] = 'Bearer ' + tok();
+  const h = authHeaders(); h['Content-Type'] = 'application/json';
   try{
     const r = await fetch(path, {method:'POST', headers:h, body:JSON.stringify(body)});
     let data = null; try{ data = await r.json(); }catch(e){}
-    if(r.status===401) alert('Enter the operator token (unlock) first.');
-    if(r.status===403) alert('Operator actions are disabled on the server (no token configured).');
-    return {ok:r.ok, status:r.status, data};
+    return asResult(r, data);   // callers report why(r), which names a 401/403 token problem
   }catch(e){ return {ok:false, status:0, data:null}; }
 }
 function cancelLease(id){
@@ -227,7 +353,9 @@ function cancelLease(id){
     : (l.state==='PENDING' ? 'Remove queued request ' + id + '?' : 'Cancel / release lease ' + id + '?');
   confirmModal(msg, async () => {
     const r = await postJSON('/api/cancel', {lease_id:id});
-    if(r.ok) poll(); else alert('Cancel failed: ' + ((r.data && r.data.error) || r.status));
+    if(!r.ok){ notify('Cancel failed: ' + why(r), 'err'); return; }
+    if(r.data && r.data.cancelled === false) notify('Lease ' + id + ' had already ended; nothing to cancel.', 'info');
+    poll();
   }, true);
 }
 // Cordon toggle: closes a node to NEW provisioning (existing leases keep running) or re-opens it.
@@ -238,7 +366,7 @@ function toggleCordon(i){
   confirmModal(msg, async () => {   // reversible toggle — not a `danger` (no red button)
     const r = await postJSON('/api/node/cordon', {node_id:n.node_id, cordoned:to});
     if(r.ok && r.data && r.data.updated) poll();
-    else alert('Cordon failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+    else notify('Cordon failed: ' + why(r), 'err');
   });
 }
 function setTemplateDisk(i){
@@ -266,7 +394,7 @@ async function submitTemplateDisk(i){
   }
   const r = await postJSON('/api/project/template-disk', body);
   if(r.ok && r.data && r.data.updated) closeForm();       // closeForm() re-polls → the project card refreshes
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 // ── inventory CRUD: ONE generic add/edit/delete form for projects / nodes / clusters / storage ──
 // Exactly one form is open at a time (paused suppresses the poll re-render so the form isn't clobbered),
@@ -364,10 +492,10 @@ async function submitForm(ename, mode){
   if(r.ok && r.data && (r.data.created||r.data.updated)){
     closeForm();
     // A template on a multi-node cluster starts with an unbound instance the placement gate refuses.
-    if(r.data.needs_binding) alert('Created. This cluster has more than one node, so bind the new template '
-      + 'instance to a node and pool (Template instances) before leasing it.');
+    if(r.data.needs_binding) notify('Created. This cluster has more than one node, so bind the new template '
+      + 'instance to a node and pool (Template instances) before leasing it.', 'warn');
   }
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function delItem(ename, i){
   const e = ENT[ename], item = DATA[ARR[ename]][i], id = item[e.key];
@@ -383,11 +511,11 @@ function delItem(ename, i){
                   +'or queued lease references it.', async () => {
         const r2 = await postJSON(e.del, {[e.key]: id, force:true});
         if(r2.ok && r2.data && r2.data.deleted) poll();
-        else alert('Delete failed: ' + ((r2.data && (r2.data.error||r2.data.reason)) || r2.status));
+        else notify('Delete failed: ' + why(r2), 'err');
       }, true);
       return;
     }
-    alert('Delete failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+    notify('Delete failed: ' + why(r), 'err');
   }, true);
 }
 async function clearPdm(i){
@@ -397,7 +525,7 @@ async function clearPdm(i){
   confirmModal('Clear the PDM endpoint for cluster '+c.cluster_id+'? (No effect if none is set.)', async () => {
     const r = await postJSON('/api/cluster/edit', {cluster_id:c.cluster_id, clear_pdm_endpoint:true});
     if(r.ok && r.data && r.data.updated) poll();
-    else alert('Clear failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+    else notify('Clear failed: ' + why(r), 'err');
   }, true);
 }
 // ── agent tokens (operator-only; /api/tokens metadata is gated, fetched with the operator token) ──
@@ -405,12 +533,9 @@ async function loadTokens(){
   const sec = $('tokens-sec');
   if(!canEdit){ sec.style.display='none'; return; }   // shown only when actions are unlocked
   sec.style.display='';
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-  try{
-    const r = await fetch('/api/tokens', {headers:h, cache:'no-store'});
-    const d = await r.json();
-    renderTokens((d && d.tokens) || []);
-  }catch(e){ $('tokens').innerHTML = '<div class="err">could not load tokens</div>'; }
+  const r = await fetchJSON('/api/tokens');
+  if(r.ok) renderTokens(r.data.tokens || []);
+  else $('tokens').innerHTML = loadErr('agent tokens', r);   // never 'no tokens issued' on a failed read
 }
 const tdate = s => s ? esc(String(s).slice(0,16).replace('T',' ')) : '';
 function renderTokens(toks){
@@ -450,7 +575,7 @@ async function submitToken(){
   const exp = $('tf-exp').value; if(exp !== '') body.expires_in_days = parseInt(exp, 10);
   const r = await postJSON('/api/token/create', body);
   if(r.ok && r.data && r.data.created) showSecret(r.data);
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function showSecret(d){
   // one-time reveal — the secret is never stored in the clear and cannot be retrieved again
@@ -471,7 +596,7 @@ function revokeToken(id){
   confirmModal('Revoke token '+id+'? Agents using it stop working immediately.', async () => {
     const r = await postJSON('/api/token/revoke', {token_id:id});
     if(r.ok && r.data && r.data.revoked) loadTokens();
-    else alert('Revoke failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+    else notify('Revoke failed: ' + why(r), 'err');
   }, true);
 }
 // Re-date (or clear) an existing token's expiry — lifecycle beyond mint (a typo must NOT silently clear it).
@@ -497,19 +622,16 @@ async function submitTokenExpiry(id){
   }
   const r = await postJSON('/api/token/expiry', body);
   if(r.ok && r.data && r.data.updated) closeForm();   // closeForm() re-polls → render() → loadTokens() refreshes
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 // ── named dashboard operators (0026; operator-only): per-human dashboard credentials → the audit records WHO ──
 async function loadOperators(){
   const sec = $('operators-sec');
   if(!canEdit){ sec.style.display='none'; return; }   // shown only when actions are unlocked
   sec.style.display='';
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-  try{
-    const r = await fetch('/api/operators', {headers:h, cache:'no-store'});
-    const d = await r.json();
-    renderOperators((d && d.operators) || []);
-  }catch(e){ $('operators').innerHTML = '<div class="err">could not load operators</div>'; }
+  const r = await fetchJSON('/api/operators');
+  if(r.ok) renderOperators(r.data.operators || []);
+  else $('operators').innerHTML = loadErr('dashboard operators', r);
 }
 function renderOperators(ops){
   const hint = `A NAMED bearer token per human; the audit records this name (vs the shared 'dashboard-operator').`
@@ -544,7 +666,7 @@ async function submitOperator(){
   const exp = $('of-exp').value; if(exp !== '') body.expires_in_days = parseInt(exp, 10);
   const r = await postJSON('/api/operator/create', body);
   if(r.ok && r.data && r.data.created) showOperatorSecret(r.data);
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function showOperatorSecret(d){
   // one-time reveal — the secret is never stored in the clear and cannot be retrieved again
@@ -565,19 +687,15 @@ function revokeOperator(id){
   confirmModal('Revoke operator '+id+'? They can no longer sign in with that token.', async () => {
     const r = await postJSON('/api/operator/revoke', {operator_id:id});
     if(r.ok && r.data && r.data.revoked) loadOperators();
-    else alert('Revoke failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+    else notify('Revoke failed: ' + why(r), 'err');
   }, true);
 }
 // header "acting as <name>" indicator — the operator's OWN identity resolved from their token (0026).
 async function syncWhoami(){
   const el = $('whoami'); if(!el) return;
   if(!canEdit){ el.textContent=''; return; }
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-  try{
-    const r = await fetch('/api/whoami', {headers:h, cache:'no-store'});
-    const d = await r.json();
-    el.textContent = (d && d.verdict==='ok' && d.actor) ? ('acting as ' + d.actor) : '';
-  }catch(e){ el.textContent=''; }
+  const r = await fetchJSON('/api/whoami');   // a cosmetic indicator: a failed read just blanks it
+  el.textContent = (r.ok && r.data.verdict==='ok' && r.data.actor) ? ('acting as ' + r.data.actor) : '';
 }
 
 // ── operator settings (migration 0021; operator-gated like the token panel; edits the shared ledger row) ──
@@ -585,14 +703,12 @@ async function loadSettings(){
   const sec = $('settings-sec');
   if(!canEdit){ sec.style.display='none'; $('settings').innerHTML=''; return; }  // clear on lock → reload on unlock
   sec.style.display='';
-  if($('settings').innerHTML.trim() !== '') return;   // already rendered — don't clobber an in-progress edit on poll
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-  try{
-    const r = await fetch('/api/settings', {headers:h, cache:'no-store'});
-    const d = await r.json();
-    if(d && d.knobs) renderSettings(d);
-    else $('settings').innerHTML = '<div class="err">could not load settings</div>';
-  }catch(e){ $('settings').innerHTML = '<div class="err">could not load settings</div>'; }
+  // already rendered: don't clobber an in-progress edit on poll. A failed load is NOT "rendered": retry it.
+  const el = $('settings');
+  if(el.innerHTML.trim() !== '' && !el.querySelector('.load-err')) return;
+  const r = await fetchJSON('/api/settings');
+  if(r.ok && Array.isArray(r.data.knobs)) renderSettings(r.data);
+  else el.innerHTML = loadErr('settings', r.ok ? {status:r.status, data:{error:'bad_response'}} : r);
 }
 function renderSettings(s){
   SETTINGS = s;
@@ -655,13 +771,13 @@ async function submitSettings(){
   if(err){ msg.textContent = err; return; }
   const r = await postJSON('/api/settings/edit', patch);
   if(r.ok && r.data && r.data.updated) msg.textContent = 'saved — applies within a tick';
-  else msg.textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else msg.textContent = 'not saved: ' + why(r);
 }
 async function reloadFleet(){
   const r = await postJSON('/api/reload', {});
   const msg = $('set-msg');
   if(r.ok && r.data && r.data.reload_requested) msg.textContent = 'fleet reload requested';
-  else msg.textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else msg.textContent = 'reload not requested: ' + why(r);
 }
 // ── audit trail (migration 0023; operator-gated, append-only). Loads ONCE on unlock (syncAudit), then only on
 //    apply/clear/load-more/export — so the operator's filters + accumulated keyset pages aren't clobbered by
@@ -695,19 +811,17 @@ async function fetchAuditPage(){
   // reset+refiltered view. A plain in-flight lock would instead no-op the new filter's fetch and then render
   // the stale page — the race the review caught.
   const gen = ++auditGen;
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
   const p = auditFilterQS(); if(auditCursor!=null) p.set('before_id', auditCursor);
-  try{
-    const r = await fetch('/api/audit?'+p.toString(), {headers:h, cache:'no-store'});
-    const d = await r.json();
-    if(gen !== auditGen) return;   // superseded by a newer request — discard this stale page
-    auditRows = auditRows.concat((d && d.audit) || []);
-    auditCursor = (d && d.next_before_id!=null) ? d.next_before_id : null;
-    renderAudit(auditRows, auditCursor!=null);
-  }catch(e){
-    if(gen !== auditGen) return;   // a newer request is in flight — let it own the render
-    $('audit').innerHTML='<div class="err">could not load the audit log</div>'; $('audit-more').innerHTML='';
+  const r = await fetchJSON('/api/audit?'+p.toString());
+  if(gen !== auditGen) return;     // superseded by a newer request — discard this stale page
+  if(!r.ok){                       // never 'no audit entries' on a failed read; the trail loads once, so offer a retry
+    $('audit').innerHTML = loadErr('the audit log', r);
+    $('audit-more').innerHTML = '<button class="act ghost" onclick="loadAudit()">retry</button>';
+    return;
   }
+  auditRows = auditRows.concat(r.data.audit || []);
+  auditCursor = (r.data.next_before_id!=null) ? r.data.next_before_id : null;
+  renderAudit(auditRows, auditCursor!=null);
 }
 function applyAuditFilters(){ loadAudit(); }
 // Debounce a fn so a rapid sequence of events collapses to one call after `ms` of quiet (the audit text filters
@@ -734,18 +848,21 @@ function clearAuditFilters(){
   loadAudit();
 }
 async function exportAudit(fmt){   // fetch (with the operator token) → Blob → download; a plain link can't send auth
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
   const p = auditFilterQS(); p.set('format', fmt);
   try{
-    const r = await fetch('/api/audit/export?'+p.toString(), {headers:h, cache:'no-store'});
-    if(!r.ok){ alert('export failed (HTTP '+r.status+')'); return; }
+    const r = await fetch('/api/audit/export?'+p.toString(), {headers:authHeaders(), cache:'no-store'});
+    if(!r.ok){
+      let data = null; try{ data = await r.json(); }catch(e){}
+      notify('Export failed: ' + why({ok:false, status:r.status, data}), 'err'); return;
+    }
     const truncated = r.headers.get('X-Br0kr-Truncated')==='true';
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href=url; a.download='br0kr-audit.'+fmt;
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    if(truncated) alert('Export was capped — narrow the filters (or use a shorter date range) for the full set.');
-  }catch(e){ alert('export failed'); }
+    if(truncated) notify('Export was capped — narrow the filters (or use a shorter date range) for the full set.',
+                         'warn');
+  }catch(e){ notify('Export failed: ' + why({ok:false, status:0, data:null}), 'err'); }
 }
 function renderAudit(rows, hasMore){
   $('audit-more').innerHTML = hasMore ? '<button class="act ghost" onclick="loadMoreAudit()">load more</button>' : '';
@@ -774,8 +891,10 @@ function renderAudit(rows, hasMore){
 // The templates table renders from DATA.templates (an unauthenticated read, so it carries `public` but NOT
 // who a private image is shared with). GRANTS — the who — is OPERATOR-GATED (/api/template/grants, fetched
 // with the operator token), loaded only when actions are unlocked, exactly like the agent-token panel.
-let GRANTS = [];
+let GRANTS = [], GRANTS_ERR = null;   // GRANTS_ERR: why the last grants read failed (the last good list is kept)
 const grantsFor = tid => GRANTS.filter(g => g.template_id === tid);
+const grantsErrLine = () => (canEdit && GRANTS_ERR) ? loadErr('template grants', GRANTS_ERR,
+  '; the grant counts shown may be out of date') : '';
 function renderTemplates(){
   const tpl = (DATA && DATA.templates) || [];
   const gcount = t => canEdit ? ` · ${grantsFor(t.template_id).length} grant(s)` : '';
@@ -785,7 +904,7 @@ function renderTemplates(){
     `<button class="act ghost" onclick="openGrantForm(${i})">grants</button>`+
     `<button class="act ghost" onclick="editItem('template',${i})">edit</button>`+
     `<button class="act ghost" onclick="delItem('template',${i})">delete</button></div>` : '';
-  $('templates').innerHTML = addBtn('template','template') + (tpl.length ? `<table><thead><tr>
+  $('templates').innerHTML = addBtn('template','template') + grantsErrLine() + (tpl.length ? `<table><thead><tr>
     <th>Template</th><th>Cluster</th><th class="num">vmid</th><th>Name</th><th>Visibility</th>${canEdit?'<th></th>':''}
     </tr></thead><tbody>` + tpl.map((t,i) => `<tr>
       <td>${esc(t.template_id)}</td><td class="pill">${esc(t.cluster_id)}</td>
@@ -858,7 +977,7 @@ async function submitBind(id){
   if(!body.node_id || !body.storage_id){ $('form-err').textContent = 'Pick a node and a storage pool.'; return; }
   const r = await postJSON('/api/instance/bind', body);
   if(r.ok && r.data && r.data.updated) closeForm();   // closeForm() re-polls → the instances table refreshes
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function retireInstance(i){
   const inst = ((DATA && DATA.template_instances) || [])[i]; if(!inst) return;
@@ -867,7 +986,7 @@ function retireInstance(i){
     async () => {
       const r = await postJSON('/api/instance/retire', {instance_id:inst.instance_id});
       if(r.ok && r.data && r.data.retired) poll();
-      else alert('Retire failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+      else notify('Retire failed: ' + why(r), 'err');
     });
 }
 function deleteInstance(i){
@@ -885,11 +1004,11 @@ function deleteInstance(i){
           +'a LIVE or queued lease references it.', async () => {
             const r2 = await postJSON('/api/instance/delete', {instance_id:inst.instance_id, force:true});
             if(r2.ok && r2.data && r2.data.deleted) poll();
-            else alert('Delete failed: ' + ((r2.data && (r2.data.error||r2.data.reason)) || r2.status));
+            else notify('Delete failed: ' + why(r2), 'err');
           }, true);
         return;
       }
-      alert('Delete failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+      notify('Delete failed: ' + why(r), 'err');
     }, true);
 }
 // ── template replications (0034 control plane): the async copy of a template onto another (cluster, storage).
@@ -964,7 +1083,7 @@ async function submitReplicate(){
   const pid = $('rf-project').value; if(pid) body.project_id = pid;
   const r = await postJSON('/api/replication/create', body);
   if(r.ok && r.data && r.data.requested) closeForm();   // closeForm() re-polls → the replications table refreshes
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function cancelReplication(i){
   const r = ((DATA && DATA.replications) || [])[i]; if(!r) return;
@@ -972,7 +1091,7 @@ function cancelReplication(i){
     +r.target_storage_id+')? It has not started copying, so nothing is torn down.', async () => {
       const res = await postJSON('/api/replication/cancel', {replication_id:r.replication_id});
       if(res.ok && res.data && res.data.cancelled) poll();
-      else alert('Cancel failed: ' + ((res.data && (res.data.error||res.data.reason)) || res.status));
+      else notify('Cancel failed: ' + why(res), 'err');
     }, true);
 }
 function forceFailReplication(i){
@@ -983,10 +1102,10 @@ function forceFailReplication(i){
     +'is freed.', async () => {
       const res = await postJSON('/api/replication/force-fail', {replication_id:r.replication_id});
       if(res.ok && res.data && res.data.forced){
-        if(res.data.vmid) alert('Forced. A copy guest may remain at vmid '+res.data.vmid+' (fence br0kr-repl-'
-          +res.data.replication_id+') — clean it up in PVE.');
+        if(res.data.vmid) notify('Forced. A copy guest may remain at vmid '+res.data.vmid+' (fence br0kr-repl-'
+          +res.data.replication_id+') — clean it up in PVE.', 'warn');
         poll();
-      } else alert('Force-fail failed: ' + ((res.data && (res.data.error||res.data.reason)) || res.status));
+      } else notify('Force-fail failed: ' + why(res), 'err');
     }, true);
 }
 function openReplicatePrune(){
@@ -1010,16 +1129,14 @@ async function submitReplicatePrune(){
   const body = {older_than_days:num}; const cid = $('rp-cluster').value; if(cid) body.cluster_id = cid;
   const r = await postJSON('/api/replication/prune', body);
   if(r.ok && r.data && typeof r.data.pruned === 'number') closeForm();
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 async function loadGrants(){
-  if(!canEdit){ GRANTS = []; return; }   // grants (the who) are operator-gated; nothing to load when locked
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-  try{
-    const r = await fetch('/api/template/grants', {headers:h, cache:'no-store'});
-    const d = await r.json();
-    GRANTS = (d && d.grants) || [];
-  }catch(e){ GRANTS = []; }
+  if(!canEdit){ GRANTS = []; GRANTS_ERR = null; return; }   // grants (the who) are operator-gated
+  const r = await fetchJSON('/api/template/grants');
+  // A failed read keeps the last list and says so: zeroing it would read as "no project has access" and would
+  // drop granted private templates from the create-VM picker.
+  if(r.ok){ GRANTS = r.data.grants || []; GRANTS_ERR = null; } else GRANTS_ERR = r;
   if(!paused) renderTemplates();   // re-render counts (skip while a form is open so it isn't clobbered)
 }
 // Grant manager: one private image's allowlist. Index-based (openGrantForm(i) / revokeGrant(i,gi)) so a
@@ -1041,6 +1158,7 @@ function renderGrantForm(i){
     .map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('')
     || '<option value="">(no projects — create one first)</option>';
   $('form-slot').innerHTML = `<div class="form"><h3>Grants · ${esc(tid)} ${t.public?'(public)':'(private)'}</h3>`+
+    grantsErrLine() +
     (t.public?'<p class="pill">Public — grants take effect only once this template is made private.</p>':'')+
     rows +
     `<label class="ff"><span>Grant to project</span><select id="gf-project">${projOpts}</select></label>`+
@@ -1053,7 +1171,7 @@ async function submitGrant(i){
   if(!pid){ $('form-err').textContent = 'no project selected'; return; }
   const r = await postJSON('/api/template/grant', {template_id:tid, project_id:pid});
   if(r.ok && r.data && r.data.granted){ await loadGrants(); renderGrantForm(i); }
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 async function revokeGrant(i, gi){
   const tid = DATA.templates[i].template_id, g = grantsFor(tid)[gi];
@@ -1063,34 +1181,35 @@ async function revokeGrant(i, gi){
   if(!confirm('Revoke access to '+tid+' for project '+g.project_id+'?')) return;
   const r = await postJSON('/api/template/revoke', {template_id:tid, project_id:g.project_id});
   if(r.ok && r.data && r.data.revoked){ await loadGrants(); renderGrantForm(i); }
-  else alert('Revoke failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+  else if($('form-err')) $('form-err').textContent = 'Revoke failed: ' + why(r);   // inside the grant modal
+  else notify('Revoke failed: ' + why(r), 'err');
 }
 // ── template downloads (phase A4.1, operator-only): the trusted-source allowlist + the build-job status ──
 // All operator-gated (the source url / a build's source are config), fetched with the operator token like
 // the agent-token panel. The section hides itself unless actions are unlocked.
 let SOURCES = [], BUILDS = [];
+const DL_ERR = {sources:null, builds:null};   // the failed result of each read, else null
 async function loadDownloads(){
   const sec = $('downloads-sec');
   if(!canEdit){ sec.style.display='none'; return; }
   sec.style.display='';
-  const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-  try{
-    const [rs, rb] = await Promise.all([
-      fetch('/api/template/sources', {headers:h, cache:'no-store'}),
-      fetch('/api/template/builds', {headers:h, cache:'no-store'})]);
-    SOURCES = ((await rs.json()) || {}).sources || [];
-    BUILDS = ((await rb.json()) || {}).builds || [];
-  }catch(e){ SOURCES = []; BUILDS = []; }
+  const [rs, rb] = await Promise.all([fetchJSON('/api/template/sources'), fetchJSON('/api/template/builds')]);
+  if(rs.ok){ SOURCES = rs.data.sources || []; DL_ERR.sources = null; } else DL_ERR.sources = rs;
+  if(rb.ok){ BUILDS = rb.data.builds || []; DL_ERR.builds = null; } else DL_ERR.builds = rb;
   if(!paused) renderDownloads();
 }
 const bstate = s => ({REQUESTED:'var(--mut)', DOWNLOADING:'var(--accent)', IMPORTING:'var(--accent)',
   RECLAIMING:'var(--warn)', READY:'var(--ok)', FAILED:'var(--bad)'}[s] || 'var(--mut)');
 function renderDownloads(){
-  const srcRows = SOURCES.length ? SOURCES.map((s,i) => `<tr><td>${esc(s.url_prefix)}</td>
+  // A failed read renders an error row: "no sources allowlisted — add one" must mean the list IS empty.
+  const errRow = (n, what, r) => `<tr><td colspan="${n}">${loadErr(what, r)}</td></tr>`;
+  const srcRows = DL_ERR.sources ? errRow(3, 'the trusted sources', DL_ERR.sources)
+    : SOURCES.length ? SOURCES.map((s,i) => `<tr><td>${esc(s.url_prefix)}</td>
     <td class="pill">${s.description?esc(s.description):'—'}</td>
     <td><button class="act ghost" onclick="delSource(${i})">remove</button></td></tr>`).join('')
     : '<tr><td colspan="3" class="empty">no sources allowlisted — add one before requesting a download</td></tr>';
-  const buildRows = BUILDS.length ? BUILDS.map((b,i) => `<tr>
+  const buildRows = DL_ERR.builds ? errRow(7, 'the build jobs', DL_ERR.builds)
+    : BUILDS.length ? BUILDS.map((b,i) => `<tr>
     <td>${esc(b.target_template_id)}</td>
     <td><span style="color:${bstate(b.state)}">${esc(b.state)}</span></td>
     <td class="pill">${esc(b.cluster_id)}</td><td class="num">${b.vmid==null?'—':b.vmid}</td>
@@ -1120,7 +1239,7 @@ function forceFailBuild(i){
     async () => {
       const r = await postJSON('/api/template/build/force-fail', {build_id:b.build_id});
       if(r.ok && r.data && r.data.forced) loadDownloads();
-      else alert('Force-fail failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+      else notify('Force-fail failed: ' + why(r), 'err');
     }, true);
 }
 function delSource(i){
@@ -1128,7 +1247,7 @@ function delSource(i){
   confirmModal('Remove trusted source '+s.url_prefix+'? Future downloads from it are refused.', async () => {
     const r = await postJSON('/api/template/source/delete', {url_prefix:s.url_prefix});
     if(r.ok && r.data && r.data.deleted) loadDownloads();
-    else alert('Remove failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+    else notify('Remove failed: ' + why(r), 'err');
   }, true);
 }
 function openSourceForm(){
@@ -1147,7 +1266,7 @@ async function submitSource(){
   const d = $('sf-desc').value; if(d) body.description = d;
   const r = await postJSON('/api/template/source/create', body);
   if(r.ok && r.data && r.data.created){ closeForm(); loadDownloads(); }
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function openDownloadForm(){
   if(paused) return; paused = true;
@@ -1177,7 +1296,7 @@ async function submitDownload(){
   const nm = $('df-name').value; if(nm) body.name = nm;
   const r = await postJSON('/api/template/build/request', body);
   if(r.ok && r.data && r.data.requested){ closeForm(); loadDownloads(); }
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 // ── act-as TENANT template-download (PR-2): an operator downloads a PRIVATE image on behalf of a CHOSEN
 //    project, debiting ITS template-disk quota (gateway.request_template_download → actas.tenant_download).
@@ -1192,8 +1311,8 @@ function tdProjectOptions(){
 function openTenantDownload(){
   if(paused) return;
   const projOpts = tdProjectOptions();
-  if(!projOpts){ alert('No project has a template-disk quota set — set one on the Tenancy tab '
-    + '(a project card → its tmpl-disk control) first.'); return; }
+  if(!projOpts){ notify('No project has a template-disk quota set — set one on the Tenancy tab '
+    + '(a project card → its tmpl-disk control) first.', 'info'); return; }
   paused = true;
   const clusterOpts = ((DATA && DATA.clusters) || [])
     .map(c => `<option value="${esc(c.cluster_id)}">${esc(c.cluster_id)}</option>`).join('')
@@ -1231,7 +1350,7 @@ async function submitTenantDownload(){
   const nm = $('tdf-name').value.trim(); if(nm) body.name = nm;
   const r = await postJSON('/api/template/download', body);
   if(r.ok && r.data && r.data.requested){ closeForm(); loadDownloads(); }
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 // ── cross-cluster migrations (PDM pre-wire): a recent-migrations list + an operator migrate form ──
 const mstate = s => s==='DONE'?'var(--ok)':(s==='ABORTED'?'var(--bad)':'var(--warn)');
@@ -1281,8 +1400,9 @@ function cancelMigration(i){
       const r = await postJSON('/api/migration/cancel', {migration_id:m.migration_id});
       if(r.ok && r.data && r.data.cancelled) poll();
       else if(r.ok && r.data && r.data.reason==='copy_in_flight')
-        alert('Copy in flight — not cancelled. The daemon settles it safely (landed→committed, failed→aborted).');
-      else alert('Cancel failed: ' + ((r.data && (r.data.error||r.data.reason)) || r.status));
+        notify('Copy in flight — not cancelled. The daemon settles it safely (landed→committed, failed→aborted).',
+               'info');
+      else notify('Cancel failed: ' + why(r), 'err');
     }, true);
 }
 function openMigrateForm(preLeaseId){
@@ -1310,7 +1430,7 @@ async function submitMigrate(){
     target_node_id:$('mf-target').value};
   const r = await postJSON('/api/migrate', body);
   if(r.ok && r.data && r.data.accepted){ closeForm(); }
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function bar(used, total, pct, unit){
   const w = Math.min(100, pct);
@@ -1392,15 +1512,19 @@ function cancelSelected(){
   // ids are captured from the ticked boxes BEFORE the modal opens (held in the closure), so dismissing the
   // confirm — which restores the bulk-select pause via closeForm — leaves the selection intact on cancel.
   const ids = Array.from(document.querySelectorAll('.lsel:checked')).map(el => parseInt(el.value, 10));
-  if(!ids.length){ alert('Tick at least one lease to cancel.'); return; }
+  if(!ids.length){ notify('Tick at least one lease to cancel.', 'info'); return; }
   confirmModal('Cancel / release '+ids.length+' selected lease(s)?', async () => {
-    let ok = 0, fail = 0;
+    let ok = 0, noop = 0, fail = 0, last = null;
     for(const id of ids){                       // sequential over the PROVEN single verb; each is atomic
       const r = await postJSON('/api/cancel', {lease_id:id});
-      if(r.ok) ok++; else fail++;
+      if(r.ok && r.data && r.data.cancelled === false) noop++;
+      else if(r.ok) ok++;
+      else { fail++; last = r; }
     }
     exitLeaseSelect();
-    if(fail) alert('Cancelled '+ok+' of '+ids.length+' ('+fail+' failed).');
+    const ended = noop ? ' (' + noop + ' had already ended)' : '';
+    if(fail) notify('Cancelled ' + ok + ' of ' + ids.length + ended + '; ' + fail + ' failed: ' + why(last), 'err');
+    else notify('Cancelled ' + ok + ' of ' + ids.length + ended + '.', 'ok');
   }, true);
 }
 // ── Fleet admission-SLO tile strip (Capacity tab): surfaces the MCP `fleet_stats` read — the current queue
@@ -1426,8 +1550,8 @@ function renderFleet(f){
   // assertion fenced a (storage,node) pair off, so nothing may clone onto it); the rest are backlog/health counts
   // where 0 is healthy and is EMITTED not hidden (unlike a null latency percentile). From the same /api/fleet read.
   // The ||0 is defensive only: a pre-0031 ledger doesn't return partial keys — fleet_stats' SQL references
-  // storage_node/template_instance, so it 503s the WHOLE read and loadFleet leaves the last strip (never a
-  // partial payload). Warn-coloured when >0 for the operator-actionable rows.
+  // storage_node/template_instance, so it 503s the WHOLE read and loadFleet keeps the last strip under an error
+  // line (never a partial payload). Warn-coloured when >0 for the operator-actionable rows.
   const qpairs = f.quarantined_reachability_pairs||0;
   const prow = (label, n, warn) => {
     const c = (warn && (n||0)>0) ? ' style="color:var(--warn)"' : '';   // reddened only for actionable counts
@@ -1442,14 +1566,19 @@ function renderFleet(f){
     + prow('no-storage nodes', f.nodes_with_zero_reachable_storage, true)
     + `</div>`;
 }
+// The two tile strips keep their last good tiles on a failed read (a blip must not blank them), but say so in the
+// strip's own error line, with the time of the last good read: stale numbers are never shown as current.
+const STRIP_AT = {};
+function stripResult(id, what, r, render){
+  const note = $(id + '-err');
+  if(r.ok){ render(r.data); STRIP_AT[id] = new Date(); if(note) note.innerHTML = ''; return; }
+  if(!note) return;
+  const since = STRIP_AT[id] ? '; the tiles below are from ' + STRIP_AT[id].toLocaleTimeString() : '';
+  note.innerHTML = loadErr(what, r, since);
+}
 async function loadFleet(){
-  try{
-    const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();   // sent when reads are token-gated
-    const r = await fetch('/api/fleet', {headers:h, cache:'no-store'});
-    if(!r.ok) return;                        // 401 (read token) / 503 — leave the last strip, don't clobber
-    const f = await r.json();
-    if(!paused) renderFleet(f);
-  }catch(e){}                                // best-effort: a blip leaves the last-rendered strip in place
+  const r = await fetchJSON('/api/fleet');   // best-effort, independent of the /api/overview poll
+  if(!paused) stripResult('fleet', 'fleet stats', r, renderFleet);
 }
 // ── Ledger DR-posture tile strip (Capacity tab): surfaces GET /api/ledger — br0kr/ledgerhealth.py's read of the
 //    ledger's OWN Postgres replication state (slots + connected standbys). NOTE this is not the same subject as
@@ -1513,13 +1642,8 @@ function renderLedger(d){
         + `</div>`).join('');
 }
 async function loadLedger(){
-  try{
-    const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();   // sent when reads are token-gated
-    const r = await fetch('/api/ledger', {headers:h, cache:'no-store'});
-    if(!r.ok) return;                        // 401 (read token) / 503 — leave the last strip, don't clobber
-    const d = await r.json();
-    if(!paused) renderLedger(d);
-  }catch(e){}                                // best-effort, exactly like loadFleet
+  const r = await fetchJSON('/api/ledger');  // best-effort, exactly like loadFleet
+  if(!paused) stripResult('ledger', 'the ledger DR posture', r, renderLedger);
 }
 function render(d){
   DATA = d;
@@ -1674,7 +1798,7 @@ function cvRefreshTemplates(){
 function openCreateVM(){
   if(paused) return;
   const projOpts = cvProjectOptions();
-  if(!projOpts){ alert('No projects defined — create one on the Tenancy tab first.'); return; }
+  if(!projOpts){ notify('No projects defined — create one on the Tenancy tab first.', 'info'); return; }
   paused = true;
   const idem = 'dash-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8);
   const firstPid = (DATA.projects[0]||{}).project_id;
@@ -1732,12 +1856,12 @@ async function submitCreateVM(idem){
   const ip = $('cv-ip').value.trim(); if(ip) body.ip_config = ip;
   const r = await postJSON('/api/lease/create', body);
   if(r.ok && r.data && (r.data.admitted || r.data.queued)) showLeaseStatus(r.data.lease_id);
-  else $('form-err').textContent = (r.data && (r.data.error||r.data.reason)) || ('HTTP '+r.status);
+  else $('form-err').textContent = why(r);
 }
 function showLeaseStatus(id){
   paused = true;
   $('form-slot').innerHTML = `<div class="form" style="max-width:560px"><h3>Lease ${id}</h3>`
-    + `<div id="ps-body"><div class="empty">loading…</div></div>`
+    + `<div id="ps-body"><div class="empty">loading…</div></div><div id="ps-note" class="ferr"></div>`
     + `<div class="erow" id="ps-actions"></div></div>`;
   pollLeaseStatus(id);
 }
@@ -1746,16 +1870,15 @@ function pollLeaseStatus(id){
   const gen = ++psGen;
   const tick = async () => {
     if(gen !== psGen || !$('ps-body')) return;            // superseded, or the modal was closed
-    let data = null, ok = false;
-    try{
-      const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();
-      const r = await fetch('/api/lease/status?lease_id=' + id, {headers:h, cache:'no-store'});
-      ok = r.ok; data = await r.json();
-    }catch(e){}
+    const r = await fetchJSON('/api/lease/status?lease_id=' + id);
     if(gen !== psGen || !$('ps-body')) return;
-    if(!ok || !data || data.error){                       // a 503/401/blip is NOT a terminal state — keep the
-      setTimeout(tick, 2000); return;                     // last render (no false 'reclaimed'), just retry
+    const note = $('ps-note');
+    if(!r.ok || r.data.error){                            // a 503/401/blip is NOT a terminal state — keep the
+      if(note) note.textContent = 'could not refresh: ' + why(r) + ' · retrying';   // last render (no false
+      setTimeout(tick, 2000); return;                     // 'reclaimed'), say why, and retry
     }
+    if(note) note.textContent = '';
+    const data = r.data;
     renderLeaseStatus(id, data);
     const st = data.state;
     // a keyless lease never gets an IP, so plain ACTIVE is settled — don't 'discover' forever
@@ -1803,37 +1926,53 @@ function setPsActions(id, data){
 async function renewLease(id){
   const r = await postJSON('/api/lease/renew', {lease_id:id});
   if(r.ok && r.data && r.data.renewed){ if($('ps-body')) pollLeaseStatus(id); else poll(); return; }
-  const why = (r.data && (r.data.error||r.data.reason)) || 'not renewable (already releasing/expired)';
-  alert('Renew failed: ' + why);
+  notify('Renew failed: ' + why(r, 'not renewable (already releasing or expired)'), 'err');
+}
+// The panels the overview fills. Before the first good overview, a failed poll renders "could not load" into
+// each of them; after one, the panels keep the last good numbers and the header says how old they are.
+const PANELS = {clusters:'clusters', nodes:'nodes', storage:'storage pools', projects:'projects',
+  leases:'active leases', queue:'the admission queue', templates:'templates', instances:'template instances',
+  replications:'template replications', migrations:'migrations'};
+let LAST_OK = null, STALE = false;   // LAST_OK: when the overview last loaded
+function showStale(reason){
+  const st = $('status');
+  st.textContent = (LAST_OK ? 'stale since ' + LAST_OK.toLocaleTimeString() : 'could not load') + ' — ' + reason;
+  st.className = 'err';
+  if(!LAST_OK) Object.keys(PANELS).forEach(id => {
+    const el = $(id); if(el) el.innerHTML = '<div class="err load-err">could not load ' + esc(PANELS[id])
+      + ' — ' + esc(reason) + '</div>';
+  });
+  if(!STALE) console.warn('br0kr dashboard: overview refresh failed — ' + reason);   // once per outage
+  STALE = true;
 }
 async function poll(){
   if(paused){ again(); return; }              // an edit form is open — don't fetch/clobber it
   loadFleet();                                // fleet SLO strip — best-effort, independent of the overview fetch
   loadLedger();                               // ledger DR-posture strip — same best-effort, its own element
   try{
-    const h = {}; if(tok()) h['Authorization'] = 'Bearer ' + tok();   // sent when reads are token-gated
-    const r = await fetch('/api/overview', {headers:h, cache:'no-store'});
-    if(r.status===401){                       // reads require a token (BR0KR_DASHBOARD_READ_TOKEN) — prompt
-      $('status').textContent = 'read token required — paste it above and unlock';
-      $('status').className = 'err';
+    const r = await fetchJSON('/api/overview');
+    if(!r.ok){                                // reads may require a token (BR0KR_DASHBOARD_READ_TOKEN): prompt
+      showStale(r.status===401 ? 'read token required: paste it above and unlock' : why(r));
       return;                                 // the finally still reschedules; unlock() re-polls at once
     }
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const data = await r.json();
     if(!paused){                              // an edit may have opened during the fetch
-      render(data);
-      $('status').textContent = 'updated ' + new Date().toLocaleTimeString();
+      render(r.data);
+      LAST_OK = new Date();
+      if(STALE) console.info('br0kr dashboard: overview refresh recovered');
+      STALE = false;
+      $('status').textContent = 'updated ' + LAST_OK.toLocaleTimeString();
       $('status').className = '';
     }
-  }catch(e){
-    $('status').textContent = 'ledger unreachable — retrying…';
-    $('status').className = 'err';
+  }catch(e){                                  // render() threw: the page script, not the server, failed
+    showStale('page script error: ' + ((e && e.message) || e));
   }finally{
     again();
   }
 }
-fetch('/api/meta').then(r => r.json()).then(m => { ACTIONS = !!m.actions_enabled; READ_AUTH = !!m.read_auth_required; })
-  .catch(() => {}).finally(() => { setTab(TAB); renderActions(); poll(); });
+fetchJSON('/api/meta').then(r => {
+  if(r.ok){ ACTIONS = !!r.data.actions_enabled; READ_AUTH = !!r.data.read_auth_required; }
+  else notify('Could not read the server settings (' + why(r) + '); showing the read-only view.', 'err');
+}).finally(() => { setTab(TAB); renderActions(); poll(); });
 </script>
 </body></html>
 """

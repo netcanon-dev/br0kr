@@ -12,6 +12,7 @@ import importlib.util
 import inspect
 import re
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -137,6 +138,93 @@ def test_js_syntax_gate_checks_the_script_as_served(tmp_path, monkeypatch):
     served = _script_block(dashboard.PAGE)
     monkeypatch.undo()
     assert served is not None and gate.page_script() == served   # the real page, as served
+
+
+def _enclosing_functions(js: str, needle: re.Pattern[str]) -> set[str]:
+    """The name of the JS function declaration each match of `needle` sits in (the nearest `function NAME(`
+    before it; the page declares its helpers as plain or async function statements)."""
+    decls = [(m.start(), m.group(1)) for m in re.finditer(r"\bfunction\s+(\w+)\s*\(", js)]
+    names = set()
+    for m in needle.finditer(js):
+        before = [name for pos, name in decls if pos < m.start()]
+        names.add(before[-1] if before else "<top level>")
+    return names
+
+
+def test_page_reads_go_through_fetch_json_and_results_through_notify():
+    """Every GET goes through fetchJSON, which never throws and turns a failure into {ok:false,status,data},
+    and every action result goes to notify()'s one status region, never a native alert(). Raw fetch( stays
+    only in fetchJSON, postJSON and exportAudit (which needs the response body as a Blob). The region is
+    role=status + aria-live=polite, and notify sets textContent only. Guards a new loader reaching for fetch
+    and coercing its error body to an empty list, which is how a 401 rendered 'add one' (review UI-01), and an
+    alert() creeping back. Hermetic: the behaviour itself is proven in tests/integration/test_dashboard_client.py
+    where node exists."""
+    page = dashboard.PAGE
+    js = _script_block(page)
+    assert js is not None
+    raw_fetch = re.compile(r"(?<![\w.])fetch\(")
+    assert _enclosing_functions(js, raw_fetch) == {"fetchJSON", "postJSON", "exportAudit"}
+    assert len(raw_fetch.findall(js)) == 3   # one each: a 4th inside an arrow function would hide behind a name
+    assert "alert(" not in js, "a native alert() is back; report the result with notify()"
+    assert '<div id="toast" role="status" aria-live="polite"></div>' in page
+    notify = js.partition("function notify(")[2].partition("\nasync function postJSON(")[0]
+    assert "textContent = msg" in notify and "innerHTML" not in notify
+
+
+def test_reason_hint_explains_every_error_code_the_dashboard_request_handling_sends():
+    """Every error code the dashboard's own request handling can answer with gets a hint: an exact REASON_HINT
+    entry or a code-family rule (HINT_RULES, read from the page and applied here). The codes are collected
+    from source:
+    - the literal `{"error": …}` codes and `_Reject("…")` codes in br0kr/dashboard.py;
+    - the `_Reject(f"{key}_…")` families, such as node_id_required;
+    - the validators behind `_Reject(reason)`: br0kr/admin.py's reasons and the settings editor's kind:setting
+      codes;
+    - the two auth verdicts _deny sends.
+    Each source must still match, so a refactor that hides a code fails loudly instead of shrinking the check.
+    Guards a new code shipping with no hint, which shows an operator a bare `non_positive_cpu_total` (review
+    UX-06). Refusals from the admission and inventory verbs reach the page as 200 `reason`s and use the same
+    rules; the node behaviour test proves the wording."""
+    from br0kr import admin, settings
+    js = _script_block(dashboard.PAGE)
+    assert js is not None
+    table = js.partition("const REASON_HINT = {")[2].partition("\n};")[0]
+    exact = set(re.findall(r"^\s*(\w+):", table, re.MULTILINE))
+    rules_src = js.partition("const HINT_RULES = [")[2].partition("\n];")[0]
+    rules = [re.compile(p) for p in re.findall(r"^\s*\[/(.+?)/,", rules_src, re.MULTILINE)]
+    problems = js.partition("const SETTING_PROBLEM = {")[2].partition("};")[0]
+    setting_kinds = set(re.findall(r"(\w+):'", problems))
+    assert exact and rules and setting_kinds, "could not read the hint tables from the page"
+
+    def source(mod: ModuleType) -> str:
+        return Path(inspect.getfile(mod)).read_text(encoding="utf-8")
+
+    def found(pattern: str, text: str) -> set[str]:
+        hits = set(re.findall(pattern, text))
+        assert hits, f"no match for {pattern}; the source changed shape, update this collector"
+        return hits
+
+    dash, adm, sett = source(dashboard), source(admin), source(settings)
+    codes = (found(r'"error":\s*"([a-z_]+)"', dash) | found(r'_Reject\("([a-z_]+)"\)', dash)
+             | {f"some_field_{s}" for s in found(r'_Reject\(f"\{key\}_([a-z_]+)"\)', dash)}
+             | found(r'return "([a-z_]+)"', adm) | {"unauthorized", "disabled"})
+    kinds = found(r'return f"([a-z_]+):\{key\}"', sett)
+    assert kinds <= setting_kinds, f"settings codes with no SETTING_PROBLEM entry: {sorted(kinds - setting_kinds)}"
+    bare = sorted(c for c in codes if c not in exact and not any(r.match(c) for r in rules))
+    assert not bare, f"error codes the page would show with no hint: {bare}"
+
+
+def test_every_overview_panel_named_for_first_load_errors_exists_in_the_page():
+    """PANELS lists the mounts a failed first load writes 'could not load …' into. Each must be a real element
+    id in the page, or a renamed panel silently drops out of the first-load error (the fake DOM in the
+    behaviour test creates any id it is asked for, so only this check sees the drift)."""
+    page = dashboard.PAGE
+    js = _script_block(page)
+    assert js is not None
+    panels = js.partition("const PANELS = {")[2].partition("};")[0]
+    ids = re.findall(r"(\w+):'", panels)
+    assert len(ids) >= 10
+    for pid in ids:
+        assert f'id="{pid}"' in page, pid
 
 
 def test_read_settings_reports_the_schema_version():
@@ -684,7 +772,7 @@ def test_fleet_route_and_reader_and_page_strip(monkeypatch):
     assert dashboard._API["fleet"](object()) == {"queue_depth": 3, "window_minutes": 60}
     page = dashboard.PAGE
     for needle in ('id="fleet-sec"', 'id="fleet"', "function renderFleet(", "async function loadFleet(",
-                   "fetch('/api/fleet'", "loadFleet();"):
+                   "fetchJSON('/api/fleet')", "loadFleet();"):
         assert needle in page, needle
 
 
