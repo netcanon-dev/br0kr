@@ -10,7 +10,7 @@
 #   docker compose logs -f daemon     # watch the reconciler
 #
 # The pg-primary/pg-standby pair is a HOMELAB STARTER topology — it demonstrates the multi-host
-# PGCONN re-homing (br0kr/db.py) that the failover harness proves, with trust replication on the
+# PGCONN re-homing (br0kr/db.py) that the failover harness proves, with scram replication on the
 # `ledger` compose network, which no container that dials or terminates the internet is on (see `networks:` at
 # the end).
 # It is NOT a production HA setup: for that, point PGCONN at an
@@ -85,6 +85,9 @@ services:
   pg-primary:
     <<: *pg-hardening
     networks: [ledger]
+    # Retires an existing volume's legacy trust replication rule on every start, then runs the official
+    # entrypoint with the `command:` below unchanged (docker/pg-primary-entrypoint.sh, review SEC-05).
+    entrypoint: ["/bin/bash", "/pg-primary-entrypoint.sh"]
     # Pinned by digest (review SEC-02; 16.14 when pinned): a re-pushed tag cannot swap the ledger's binary under
     # `restart: unless-stopped`. Dependabot (docker-compose) proposes the bumps.
     image: postgres:16@sha256:fe03a7605299a34ddf5e4f285dff78c3d7190a576b3c6b46f2fcff69f4bffd54
@@ -126,6 +129,8 @@ services:
     volumes:
       - pg-primary-data:/var/lib/postgresql/data
       - ./docker/pg-primary-init.sh:/docker-entrypoint-initdb.d/20-replication.sh:ro
+      - ./docker/pg-primary-entrypoint.sh:/pg-primary-entrypoint.sh:ro
+      - ./docker/retire-trust-replication.sh:/retire-trust-replication.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-broker} -d ${POSTGRES_DB:-broker}"]
       interval: 5s
@@ -144,9 +149,16 @@ services:
       # The entrypoint clones AS the cluster superuser, which the official image makes POSTGRES_USER
       # (there is no "postgres" role when POSTGRES_USER is set). Must match pg-primary's.
       POSTGRES_USER: ${POSTGRES_USER:-broker}
+      # Replication is scram (review SEC-05): the clone and the WAL stream authenticate as that superuser with this
+      # password, which libpq reads from the environment (primary_conninfo holds none), so a standby cloned under
+      # the old trust rule keeps streaming too, and a rotated password takes effect when this container is
+      # recreated. It is the password every broker process already holds in PGCONN.
+      PGPASSWORD: ${PGPASSWORD:?set PGPASSWORD in .env}
     volumes:
       - pg-standby-data:/var/lib/postgresql/data
       - ./docker/pg-standby-entrypoint.sh:/pg-standby-entrypoint.sh:ro
+      # The standby's own pg_hba.conf, cloned from an older primary, can hold the same trust rule (review SEC-05).
+      - ./docker/retire-trust-replication.sh:/retire-trust-replication.sh:ro
     depends_on:
       pg-primary:
         condition: service_healthy
@@ -373,7 +385,8 @@ volumes:
 # Two networks (review SEC-05). `ledger` carries the ledger and every process that talks to it. `edge` carries
 # what the outside reaches: the gateway and the dashboard, plus Caddy, cloudflared and the OAuth shim from
 # docker-compose.tls.yml. Caddy and cloudflared (the one container that dials the internet) are on `edge` only, so
-# they have no route to pg-primary/pg-standby, whose replication trusts any client on its network. Both are
+# they have no route to pg-primary/pg-standby at all (whose replication trusted any client on the network until
+# it moved to scram, also SEC-05). Both are
 # ordinary bridge networks with outbound access (the daemon reaches Proxmox over the LAN). A Prometheus scraping
 # daemon:9090 / gateway:9091 joins `ledger` (named <project>_ledger, e.g. br0kr_ledger). A service added without
 # `networks:` (an override file of your own) lands on a separate <project>_default and reaches neither.

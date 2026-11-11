@@ -154,8 +154,8 @@ def test_the_internet_facing_containers_have_no_route_to_the_ledger():
     the gateway and the dashboard are on `ledger` and `edge`; Caddy and cloudflared are on `edge` alone, and the
     OAuth shim on both; the TLS overlay's port overrides and the DR overlays add no network. The base file declares
     both networks. Guards review SEC-05: with one shared default network, a compromised cloudflared (which dials
-    the internet) or Caddy could take an unauthenticated pg_basebackup of the whole ledger over the bundled
-    standby's trust replication line. scripts/run_compose_smoke.sh and run_tls_smoke.sh prove the isolation on a
+    the internet) or Caddy could take an unauthenticated pg_basebackup of the whole ledger over the trust
+    replication line the bundled ledger had until part 2 of the same review. scripts/run_compose_smoke.sh and run_tls_smoke.sh prove the isolation on a
     running stack."""
     base_text = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     base = _services(base_text)
@@ -174,3 +174,33 @@ def test_the_internet_facing_containers_have_no_route_to_the_ledger():
         for block in _services((_ROOT / name).read_text(encoding="utf-8")).values():
             assert not _has(block, "networks:") and not _has(block, "network_mode:"), name
     assert re.search(r"^networks:\n  ledger: \{\}\n  edge: \{\}$", base_text, re.M)
+
+
+def test_the_bundled_standby_replicates_with_a_password():
+    """The bundled pg-primary starts through docker/pg-primary-entrypoint.sh, and both it and the bundled standby's
+    entrypoint run docker/retire-trust-replication.sh (mounted on both: a standby cloned from an older primary has
+    the same trust rule, and a standby accepts replication too); the standby gets PGPASSWORD, and after a clone its
+    entrypoint writes a primary_conninfo with no password (one there would win over the environment and outlive a
+    password rotation); pg-primary-init.sh writes no trust rule. Guards review SEC-05 part 2: the starter ledger let
+    anything on its network take an unauthenticated pg_basebackup, and an upgrade that drops an entrypoint step or
+    the standby's password either leaves that open on an existing volume or stops replication."""
+    base = _services((_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    primary, standby = base["pg-primary"], base["pg-standby"]
+    assert 'entrypoint: ["/bin/bash", "/pg-primary-entrypoint.sh"]' in primary
+    assert "./docker/pg-primary-entrypoint.sh:/pg-primary-entrypoint.sh:ro" in primary
+    for svc in (primary, standby):
+        assert "./docker/retire-trust-replication.sh:/retire-trust-replication.sh:ro" in svc
+    assert re.search(r"^\s+PGPASSWORD: \$\{PGPASSWORD:\?", standby, re.M)
+    for name in ("pg-primary-entrypoint.sh", "pg-standby-entrypoint.sh"):
+        script = (_ROOT / "docker" / name).read_text(encoding="utf-8")
+        retire = script.find('bash "$(dirname "$0")/retire-trust-replication.sh"')
+        handoff = script.find("exec docker-entrypoint.sh")
+        assert 0 <= retire < handoff, name          # retired before Postgres starts, on every start
+    standby_entry = (_ROOT / "docker" / "pg-standby-entrypoint.sh").read_text(encoding="utf-8")
+    clone = standby_entry.find("gosu postgres pg_basebackup")
+    sentinel = standby_entry.find('touch "$PGDATA/.br0kr-clone-complete"')
+    rewrite = standby_entry.find("primary_conninfo = 'host=pg-primary port=5432 user=%s'")
+    assert 0 <= clone < rewrite < sentinel           # the conninfo is rewritten before the clone counts as done
+    init = (_ROOT / "docker" / "pg-primary-init.sh").read_text(encoding="utf-8")
+    rules = [line for line in init.splitlines() if re.match(r"^(host|hostssl|local)\s", line)]
+    assert rules and not any(line.split()[-1] == "trust" for line in rules), rules

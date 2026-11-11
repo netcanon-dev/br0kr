@@ -163,7 +163,7 @@ def test_refuses_a_dr_primary_topology(tmp_path):
     """COMPOSE_FILE naming docker-compose.primary-remote.yml (a stretched-DR primary) is refused.
 
     deploy.sh's `up -d` starts every service in the set, and a DR primary must not also start the bundled
-    pg-standby (trust replication, same-host only); docker-deploy.md §9 keeps the targeted command."""
+    pg-standby (same-host only); docker-deploy.md §9 keeps the targeted command."""
     proc, calls = _run(tmp_path, env_file="COMPOSE_FILE=docker-compose.yml:docker-compose.primary-remote.yml\n")
     assert proc.returncode == 1
     assert "DR primary" in proc.stderr

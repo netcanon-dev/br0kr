@@ -168,7 +168,7 @@ done
 check daemon_ready_and_metrics "$dr"
 
 # The edge network has no route to the ledger (review SEC-05): Caddy, cloudflared and the OAuth shim (TLS overlay)
-# share it with the gateway and the dashboard, and the ledger's replication trusts any client on its own network.
+# share it with the gateway and the dashboard, and anything on the ledger's own network can try its replication.
 # From a container on `edge`, neither ledger node resolves by name or answers on its ledger address; from `ledger`
 # both do, by name and by address (the controls, which also catch a probe that could not run at all). pg_isready
 # exits 0 (accepting) or 1 (rejecting) when it reached the server, 2 or 3 when it did not.
@@ -268,6 +268,70 @@ for _ in $(seq 1 60); do
   sleep 3
 done
 check runbook_restore_stack_comes_back "$bh"
+
+# Replication needs the password (review SEC-05), on both ledger nodes (a standby accepts replication connections
+# too): neither has a `replication` trust rule a TCP client off loopback can match, and a physical replication
+# connection from the ledger network (`replication=true`, what pg_basebackup opens; a `replication=database` one is
+# logical, and pg_hba matches it as an ordinary connection to that database) is refused without the password and
+# accepted with it. The standby's primary_conninfo holds no password, so its WAL stream authenticates with the
+# PGPASSWORD in its environment and a rotated password takes effect when the container is recreated.
+trust_q="SELECT count(*) FROM pg_hba_file_rules WHERE 'replication' = ANY(database) AND auth_method = 'trust' AND type <> 'local' AND coalesce(address, '') NOT IN ('127.0.0.1', '::1')"
+scram_q="SELECT count(*) FROM pg_hba_file_rules WHERE 'replication' = ANY(database) AND auth_method = 'scram-sha-256' AND address = 'samenet'"
+psql_n() { "${DC[@]}" exec -T "$1" psql -U broker -d broker -tAc "$2" 2>/dev/null | tr -d '[:space:]'; }
+repl_ok() {   # <node> <password>: 0 when a physical replication connection from the ledger network gets in
+  docker run --rm --network "${PROJECT}_ledger" -e PGPASSWORD="$2" "$pgimg" psql -w \
+    "host=$1 port=5432 user=broker replication=true" -c "IDENTIFY_SYSTEM" >/dev/null 2>&1
+}
+rn=0; detail=""
+for node in pg-primary pg-standby; do
+  t="$(psql_n "$node" "$trust_q")"
+  repl_ok "$node" "" && nopw=ACCEPTED || nopw=refused
+  repl_ok "$node" "$PW" && withpw=accepted || withpw=REFUSED
+  { [ "$t" = 0 ] && [ "$nopw" = refused ] && [ "$withpw" = accepted ]; } || rn=1
+  detail="${detail}${node}: trust rules=${t:-?}, without password ${nopw}, with ${withpw}; "
+done
+conninfo="$(psql_n pg-standby "SHOW primary_conninfo")"
+case "$conninfo" in *host=pg-primary*) case "$conninfo" in *password*) cpw=yes; rn=1 ;; *) cpw=no ;; esac ;;
+  *) cpw=unread; rn=1 ;; esac
+check replication_needs_the_password "$rn" "${detail}password in the standby's primary_conninfo: ${cpw}"
+
+# A volume from before that change carries `host replication all all trust`: the primary's from initdb, and the
+# standby's cloned from it. Put it back on both nodes in place of the scram rule and reload, and the passwordless
+# probe must now get in (so the probe sees the rule). Restart both: each node's entrypoint must retire the rule (and
+# log it, keeping a copy), the passwordless probe must be refused again, and the standby, whose primary_conninfo
+# holds no password, must stream again on PGPASSWORD alone.
+plant='f="$PGDATA/pg_hba.conf"; grep -v "samenet    scram-sha-256" "$f" > /tmp/hba &&
+  printf "host    replication    all    all    trust\n" >> /tmp/hba && cat /tmp/hba > "$f" && rm -f /tmp/hba &&
+  psql -U broker -d broker -tAc "SELECT pg_reload_conf()" >/dev/null && grep -cx "host    replication    all    all    trust" "$f"'
+left_q='grep -cx "host    replication    all    all    trust" "$PGDATA/pg_hba.conf"; [ -f "$PGDATA/pg_hba.conf.pre-sec05" ] && echo kept'
+planted=0; plant_detail=""
+for node in pg-primary pg-standby; do
+  n="$("${DC[@]}" exec -T "$node" bash -c "$plant" 2>/dev/null | tr -d '[:space:]')"
+  seen=refused   # the reload is asynchronous: give the postmaster a few seconds to re-read the file
+  for _ in $(seq 1 10); do repl_ok "$node" "" && { seen=ACCEPTED; break; }; sleep 1; done
+  { [ "$n" = 1 ] && [ "$seen" = ACCEPTED ]; } || planted=1
+  plant_detail="${plant_detail}${node} planted=${n:-?} probe ${seen}; "
+done
+"${DC[@]}" restart pg-primary pg-standby >/dev/null 2>&1
+retired=1; streaming=1
+for _ in $(seq 1 40); do
+  [ "$(psql_n pg-primary "$scram_q")$(psql_n pg-standby "$scram_q")" = 11 ] && retired=0
+  [ "$(psql_n pg-primary "SELECT state FROM pg_stat_replication")" = "streaming" ] && streaming=0
+  [ "$retired$streaming" = "00" ] && break
+  sleep 3
+done
+after=0; after_detail=""
+for node in pg-primary pg-standby; do
+  left="$("${DC[@]}" exec -T "$node" bash -c "$left_q" 2>/dev/null | tr -d '[:space:]')"
+  # grep -c reads to the end: under pipefail, grep -q's early exit fails a long `logs` with SIGPIPE.
+  [ "$("${DC[@]}" logs "$node" 2>&1 | grep -c "retire-trust-replication: replaced")" -ge 1 ] && logged=yes || logged=NO
+  repl_ok "$node" "" && nopw=ACCEPTED || nopw=refused
+  { [ "$left" = 0kept ] && [ "$logged" = yes ] && [ "$nopw" = refused ]; } || after=1
+  after_detail="${after_detail}${node} legacy left/copy=${left:-?} logged=${logged} without password ${nopw}; "
+done
+check legacy_trust_rule_retired_on_restart \
+  "$({ [ "$planted" = 0 ] && [ "$retired$streaming" = "00" ] && [ "$after" = 0 ]; } && echo 0 || echo 1)" \
+  "${plant_detail}after restart: ${after_detail}scram rules loaded $([ "$retired" = 0 ] && echo yes || echo NO), standby streaming $([ "$streaming" = 0 ] && echo yes || echo NO)"
 
 echo "--------------------------------------------------------"
 fail=0; for r in "${results[@]}"; do [ "$r" -ne 0 ] && fail=1; done

@@ -10,7 +10,7 @@
 # operator believes replication is scram+TLS-gated per the runbook. This guard FAILS CLOSED on that state.
 #
 # Exit 0 = safe to serve in DR mode. Exit 1 = refuse (a REMOTE-REACHABLE trust replication rule is present,
-# or the file could not be scanned). A non-fatal WARNING is printed if no scram replication rule is present.
+# or the file could not be scanned). A non-fatal WARNING is printed if no hostssl scram replication rule is present.
 #
 # What is (and is NOT) refused — the address matters, review S09/F1:
 #   * REFUSED: a `host*` replication rule with method `trust` whose address is NOT loopback — the init-written
@@ -84,15 +84,17 @@ fi
 if ! awk '
   { sub(/#.*/, "") }
   NF == 0 { next }
-  ($2 == "replication" || $2 ~ /(^|,)replication($|,)/) {
+  $1 == "hostssl" && ($2 == "replication" || $2 ~ /(^|,)replication($|,)/) {
     for (i = 1; i <= NF; i++) if ($i == "scram-sha-256") { found = 1 }
   }
   END { exit !found }
 ' "$HBA"; then
   {
-    echo "assert-dr-hba-safe: WARNING — no active 'replication … scram-sha-256' rule found in pg_hba.conf."
+    echo "assert-dr-hba-safe: WARNING — no active 'hostssl replication … scram-sha-256' rule found in pg_hba.conf."
     echo "  A stretched-DR primary expects pg-primary-init.sh's DR branch to have added one; the remote"
-    echo "  standby will not be able to authenticate. Proceeding (this is not a credential-bypass)."
+    echo "  standby will not be able to authenticate. A same-host volume's \`host replication … samenet\`"
+    echo "  rule does not count: it has no replicator role, no TLS and no DR slot behind it (docker-deploy.md §9)."
+    echo "  Proceeding (this is not a credential-bypass)."
   } >&2
 fi
 

@@ -9,9 +9,14 @@ trust replication rule — while EXEMPTING the stock loopback lines every offici
 restart (review S09/F1). Here we drive it directly over crafted pg_hba.conf fixtures — no Postgres, no
 Docker — so the exact address-aware matcher is pinned. Requires bash + awk (both present in the gate image
 and the postgres:16 runtime the entrypoint actually runs in).
+
+The second half covers docker/retire-trust-replication.sh (review SEC-05), which both bundled ledger entrypoints
+run on every start: it turns that same legacy trust rule into scram on an existing same-host volume, and warns
+about any other remote-reachable replication trust rule, with the same address-aware test as the guard.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import textwrap
@@ -150,3 +155,123 @@ def test_a_missing_pg_hba_is_safe(tmp_path):
     """A not-yet-written pg_hba (first boot, before initdb finishes) is treated as safe (exit 0) — the DR
     init branch is about to write a scram-only file. Guards a spurious refusal on a fresh volume."""
     assert _run(None, tmp_path).returncode == 0
+
+
+# ── docker/retire-trust-replication.sh: the bundled primary's legacy trust rule becomes scram (review SEC-05) ──
+_RETIRE = Path(__file__).resolve().parents[2] / "docker" / "retire-trust-replication.sh"
+# The legacy rule's comment as the two older releases wrote it (before and after the compose network split).
+_OLD_COMMENTS = ("# br0kr: allow the hot standby to stream WAL (trust, isolated compose network only).\n",
+                 "# br0kr: allow the hot standby to stream WAL (trust, the `ledger` compose network only).\n")
+_LEGACY_RULE = "host    replication    all    all    trust\n"
+_NEW_COMMENT = "# br0kr: the hot standby streams WAL with scram, from the ledger's own network (review SEC-05).\n"
+_SCRAM = 'host    replication    "broker"    samenet    scram-sha-256'
+
+
+def _retire(target: Path, role: str = "broker", env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", str(_RETIRE), str(target), role], capture_output=True, text=True, timeout=30,
+                          env=env)
+
+
+@pytest.mark.parametrize("comment", _OLD_COMMENTS)
+def test_retire_turns_the_legacy_trust_rule_into_scram_and_leaves_the_rest(comment, tmp_path):
+    """The legacy `host replication all all trust` rule (and its comment, as either older release wrote it) is
+    replaced by the scram rule a new volume gets, in place (same inode and mode, so Postgres still owns the file); the
+    original is kept as pg_hba.conf.pre-sec05 with its mode, and a later conversion keeps that first copy; initdb's
+    stock loopback lines and every other line are untouched, and no warning is printed; the result passes the S09
+    DR guard. Guards the upgrade path that keeps an existing bundled ledger's unauthenticated pg_basebackup open, a
+    rewrite that drops or reorders other rules, and one that leaves no way back for a rollback."""
+    target = tmp_path / "pg_hba.conf"
+    original = _STOCK_LOOPBACK + "\n" + comment + _LEGACY_RULE
+    target.write_text(original)
+    target.chmod(0o600)
+    before = target.stat()
+    r = _retire(target)
+    text = target.read_text()
+    assert r.returncode == 0 and "replaced the trust replication rule" in r.stdout and r.stderr == "", r.stderr
+    assert text == _STOCK_LOOPBACK + "\n" + _NEW_COMMENT + _SCRAM + "\n"
+    after = target.stat()
+    assert (after.st_ino, after.st_mode) == (before.st_ino, before.st_mode)
+    kept = tmp_path / "pg_hba.conf.pre-sec05"
+    assert kept.read_text() == original and kept.stat().st_mode == before.st_mode
+    target.write_text(text + _LEGACY_RULE)        # the legacy line comes back (by hand): converted again ...
+    assert _retire(target).returncode == 0 and _LEGACY_RULE not in target.read_text()
+    assert kept.read_text() == original           # ... and the first copy, the true original, is kept
+    guard = subprocess.run(["bash", str(_GUARD), str(target)], capture_output=True, text=True, timeout=30)
+    assert guard.returncode == 0, guard.stderr
+
+
+def test_retire_converts_every_legacy_line_whatever_the_spacing(tmp_path):
+    """A file with two legacy lines (one tab-separated, one with leading whitespace) gets both converted, and the
+    role is written exactly as given, a backslash included (it is not read as an escape). Guards a matcher that
+    keys off the exact spacing initdb's heredoc used, and an `awk -v` that would mangle the role."""
+    target = tmp_path / "pg_hba.conf"
+    target.write_text("host\treplication\tall\tall\ttrust\n" + "host all all all scram-sha-256\n"
+                      + "   host    replication    all    all    trust\n")
+    r = _retire(target, role="ops\\ledger")
+    rule = 'host    replication    "ops\\ledger"    samenet    scram-sha-256\n'
+    assert r.returncode == 0 and target.read_text() == rule + "host all all all scram-sha-256\n" + rule
+
+
+def test_retire_is_idempotent_and_writes_nothing_without_the_legacy_rule(tmp_path):
+    """A file with no legacy rule and no other remote trust rule is not written at all and nothing is printed: an
+    already-retired file, a commented-out legacy line. A missing file (a first boot, before initdb) is not an error.
+    Guards a rewrite that reformats a healthy file on every start."""
+    for body in (_STOCK_LOOPBACK + _NEW_COMMENT + _SCRAM + "\n", "# host    replication    all    all    trust\n"):
+        target = tmp_path / "pg_hba.conf"
+        target.write_text(body)
+        r = _retire(target)
+        assert (r.returncode, r.stdout, r.stderr, target.read_text()) == (0, "", "", body), body
+        assert not (tmp_path / "pg_hba.conf.pre-sec05").exists()
+    r = _retire(tmp_path / "missing.conf")
+    assert r.returncode == 0 and not (tmp_path / "missing.conf").exists()
+
+
+@pytest.mark.parametrize("line", [
+    "host    replication    all    10.0.0.0/8    trust",
+    "host    replication    all    all    trust    # pinned by hand",
+    "host    replication    broker    all    trust",
+    pytest.param("host    replication    all    all    trust\r",   # CRLF: `trust\r` is not the exact legacy rule
+                 marks=pytest.mark.skipif(os.name == "nt", reason="MSYS awk strips the CR")),
+])
+def test_retire_leaves_any_other_trust_rule_alone_but_warns(line, tmp_path):
+    """A replication trust rule that is not the exact legacy one (an operator wrote or edited it) is left byte for
+    byte, but a WARNING on stderr names it, and the start goes on. Guards both a rewrite that quietly widens or
+    narrows an operator's rule and the silence that would leave unauthenticated replication open while the docs
+    say it needs the password (review SEC-05)."""
+    target = tmp_path / "pg_hba.conf"
+    body = _STOCK_LOOPBACK + line + "\n"
+    target.write_text(body, newline="")
+    r = _retire(target)
+    assert r.returncode == 0 and r.stdout == "" and target.read_bytes() == body.encode()
+    assert "WARNING" in r.stderr and line.rstrip("\r") in r.stderr, r.stderr
+    assert "127.0.0.1/32" not in r.stderr        # initdb's loopback lines are not remote-reachable
+
+
+@pytest.mark.parametrize("failing_call", [1, 2])
+def test_retire_refuses_to_start_when_the_file_cannot_be_scanned(failing_call, tmp_path):
+    """If awk cannot scan the file (exit 2: unreadable, or a broken program), the script fails (exit 1, FATAL)
+    instead of reading that as "no legacy rule" and letting the server start with whatever rules the file holds:
+    on the first scan (for the legacy rule) and on the second (for any other trust rule), simulated with an awk on
+    PATH that exits 2 on that call (and 1, "no legacy rule", before it). Guards the `|| exit 0` shape that hid
+    every scan error."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "awk").write_text('#!/bin/sh\nf="$(dirname "$0")/calls"; n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))\n'
+                              f'echo "$n" > "$f"; [ "$n" -lt {failing_call} ] && exit 1; exit 2\n')
+    (fake / "awk").chmod(0o755)
+    target = tmp_path / "pg_hba.conf"
+    target.write_text(_LEGACY_RULE)
+    env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")   # bash is found further on
+    r = _retire(target, env=env)
+    assert r.returncode == 1 and "FATAL" in r.stderr and target.read_text() == _LEGACY_RULE
+
+
+def test_guard_warns_on_a_same_host_volume_served_in_dr_mode(tmp_path):
+    """A same-host volume (new, or one the retire script converted) has a `host replication "<user>" samenet
+    scram-sha-256` rule but no replicator role, TLS or DR slot behind it. Served with the DR overlay, the S09 guard
+    lets it boot (no trust rule) but WARNS, because only a `hostssl` scram replication rule is the DR posture.
+    Guards the warning going silent once every bundled volume carries some scram replication rule (review SEC-05)."""
+    r = _run(_STOCK_LOOPBACK + "host all all all scram-sha-256\n" + _NEW_COMMENT + _SCRAM + "\n", tmp_path)
+    assert r.returncode == 0 and "WARNING" in r.stderr and "hostssl" in r.stderr
+    quiet = _run(_STOCK_LOOPBACK + "hostssl replication replicator 10.0.0.0/8 scram-sha-256\n", tmp_path)
+    assert quiet.returncode == 0 and quiet.stderr == ""

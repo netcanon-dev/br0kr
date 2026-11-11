@@ -4,7 +4,7 @@
 #   bash docker/gen-replication-certs.sh <this-host's-mesh-IP-or-name>     # once, into ./certs
 #   # in .env: set REPLICATION_PASSWORD, narrow REPLICATION_CIDR, set PRIMARY_BIND=<mesh IP>
 #   docker compose -f docker-compose.yml -f docker-compose.primary-remote.yml up -d \
-#     pg-primary migrate gateway daemon          # NOT pg-standby (that one is trust/same-host only)
+#     pg-primary migrate gateway daemon          # NOT pg-standby (that one is same-host only)
 #
 # Setting REPLICATION_PASSWORD switches pg-primary-init.sh into DR mode: a scram `replicator` role +
 # a `hostssl … scram-sha-256` rule (NO trust line) + slot br0kr_standby_dr. The cert wrapper turns on

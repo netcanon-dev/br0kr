@@ -10,7 +10,7 @@ live in [`docker-compose.yml`](../../docker-compose.yml) + [`.env.example`](../.
 
 > **Scope.** The bundled `pg-primary`/`pg-standby` pair is a **homelab STARTER** ledger: it
 > demonstrates the multi-host `PGCONN` re-homing that [ledger-ha.md](ledger-ha.md) describes and the
-> failover harness proves, using **trust replication on the ledger's own compose network** (`ledger`; the
+> failover harness proves, using **scram replication on the ledger's own compose network** (`ledger`; the
 > internet-facing Caddy and cloudflared sit on a separate `edge` network with no route to it). It is not a
 > production HA manager. For production, point `PGCONN` at an operator-run cluster (Patroni / managed
 > Postgres) and don't start the `pg-*` services — see [Production hardening](#8-production-hardening).
@@ -469,8 +469,8 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
   `daemon:9090/metrics` and `gateway:9091/metrics` — neither is a host port (`expose`, to avoid a fixed-port
   clash under `--scale daemon=2`); the daemon is on the `ledger` compose network only and the gateway on `ledger`
   and `edge`, so scrape them from a Prometheus container attached to `ledger` (`<project>_ledger`, e.g.
-  `br0kr_ledger`). That network carries the bundled ledger's trust replication, so attach only a scraper you
-  trust; from the host, spot-check with `docker compose exec daemon python -c "import urllib.request
+  `br0kr_ledger`). That network reaches the ledger itself, so attach only a scraper you trust. From the host,
+  spot-check with `docker compose exec daemon python -c "import urllib.request
   as u; print(u.urlopen('http://localhost:9090/readyz').status)"`. The endpoints are unauthenticated plain HTTP
   exposing only counts/states (never a secret) — keep them on a trusted network ([/SECURITY.md](../../SECURITY.md) C3 (c2)).
 - **Upgrade, roll back, back up on a schedule, rotate a secret, decommission a node:**
@@ -505,10 +505,11 @@ This starter stack trades rigour for one-command bring-up. Before relying on it:
 
 - **Replace the bundled ledger** with an operator-run HA Postgres (Patroni / repmgr / a managed
   service) that guarantees a single primary and does proper failover; point `PGCONN` at it.
-- **Authenticated replication.** The bundled same-host pair uses *trust* replication on the `ledger`
-  compose network (`docker/pg-primary-init.sh`). For a replica on another host/segment, use the
-  **stretched DR standby (§9)** — it does authenticated, TLS-encrypted replication (scram + `hostssl`)
-  and adds no trust line.
+- **Authenticated replication.** The bundled same-host pair replicates with scram as the ledger's superuser
+  (`PGPASSWORD`, which the standby reads from its environment and keeps no copy of), from the `ledger` compose
+  network only (`docker/pg-primary-init.sh`), unencrypted. For a
+  replica on another host/segment, use the **stretched DR standby (§9)** — it adds TLS (`hostssl`) and a
+  dedicated `replicator` role.
 - **Secrets.** `.env` is plaintext on the host. Use Docker/Swarm secrets, a secrets manager, or
   file-based secrets for `PGPASSWORD` and the PVE token secrets in a real deployment.
 - **TLS on the gateway.** The MCP gateway checks a bearer token on every tool call but is published as plain
@@ -524,7 +525,7 @@ This starter stack trades rigour for one-command bring-up. Before relying on it:
 
 ## 9. Stretched / DR standby (remote host over the mesh)
 
-The bundled `pg-standby` lives on the **same host** as the primary (trust replication on the `ledger`
+The bundled `pg-standby` lives on the **same host** as the primary (scram replication on the `ledger`
 network) — fine for local HA, useless for disaster recovery. For a replica on **another host /
 cluster / network segment** (e.g. a second Proxmox node reachable over your Tailscale/Headscale
 mesh), use the stretched DR standby: it replicates over an **authenticated, TLS-encrypted** link
@@ -557,7 +558,7 @@ bash docker/gen-replication-certs.sh 100.64.0.10        # → ./certs/{ca.crt,se
 # 3. Record the override in .env, so every later compose command on this host keeps it (a command that
 #    dropped it would recreate pg-primary without its TLS entrypoint and mesh port):
 #    COMPOSE_FILE=docker-compose.yml:docker-compose.primary-remote.yml
-# 4. Build the image, then bring up the primary in DR mode — NOT the bundled pg-standby (it's trust/same-host only):
+# 4. Build the image, then bring up the primary in DR mode — NOT the bundled pg-standby (it's same-host only):
 docker compose build daemon
 docker compose up -d pg-primary migrate gateway daemon
 ```
@@ -580,16 +581,19 @@ mesh-reachable port can't be replicated from without both credentials and TLS.
 
 > **⚠ Convert on a FRESH volume — you cannot flip an existing same-host primary to DR in place.**
 > `pg-primary-init.sh` runs only ONCE (at `initdb`). A primary first brought up in the default same-host
-> mode carries a **broad** `host replication all all trust` rule in its `pg_hba.conf`; that rule is harmless
-> while the port is unpublished, but the moment you serve that **existing volume** with `…primary-remote.yml`
-> (TLS on, port published on the mesh) it would allow **unauthenticated `pg_basebackup` of the whole
-> ledger**. So the DR entrypoint refuses to start on such a volume (`docker/assert-dr-hba-safe.sh` —
-> "FATAL … REMOTE-REACHABLE trust replication rule"; the stock loopback lines initdb always writes —
-> `local` and `host … 127.0.0.1/32|::1/128` — are exempt, so a *correctly*-provisioned DR volume boots
-> normally on every restart). To convert: start the DR primary on a **new data volume**
-> (`REPLICATION_PASSWORD` set from first boot) and let the standby re-clone, or on the existing volume strip
-> the broad (non-loopback) trust rule **and** provision the scram `replicator` role + `hostssl` rule + slot
-> before retrying.
+> mode has no scram `replicator` role, no `hostssl` rule and no DR slot. One first brought up by a release
+> before review SEC-05 also carries a **broad** `host replication all all trust` rule in its `pg_hba.conf`,
+> until the bundled entrypoint converts it on the volume's next same-host start (the DR overlay's entrypoint
+> does not). Serve such an **existing volume** with `…primary-remote.yml` (TLS on, port published on the
+> mesh) and that rule would allow **unauthenticated `pg_basebackup` of the whole ledger**, so the DR
+> entrypoint refuses to start on it (`docker/assert-dr-hba-safe.sh` — "FATAL … REMOTE-REACHABLE trust
+> replication rule"; the stock loopback lines initdb always writes — `local` and `host …
+> 127.0.0.1/32|::1/128` — are exempt, so a *correctly*-provisioned DR volume boots normally on every
+> restart). A same-host volume without that rule boots, and the guard warns that it has no `hostssl …
+> scram-sha-256` replication rule: the remote standby cannot authenticate. To convert: start the DR primary
+> on a **new data volume** (`REPLICATION_PASSWORD` set from first boot) and let the standby re-clone, or on
+> the existing volume strip any broad (non-loopback) trust rule **and** provision the scram `replicator`
+> role + `hostssl` rule + slot before retrying.
 
 ### On the standby host (B)
 

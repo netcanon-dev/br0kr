@@ -31,7 +31,7 @@ Assertion 3 deliberately does NOT simply trust git's text/binary classification:
     is classified BINARY by git (convert.c treats any lone CR as binary), which would exempt it
     from assertions 1 and 2 *and* leave `* text=auto eol=lf` unable to normalise it — yet a CR-only
     bash script fails exactly like the incident did. `.sh` is the fatal set: those files are
-    executed by bash on the deploy host (six are bind-mounted container entrypoints).
+    executed by bash on the deploy host (several are bind-mounted container entrypoints).
   * The CR test is any `b"\r"`, not just `b"\r\n"`, so lone CR cannot slip through. No tracked file
     in this repo contains a CR byte today; a test that genuinely needs one should spell it as a
     source escape (`b"a\r\nb"`), which is backslash-r in the file, not a CR byte.

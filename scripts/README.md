@@ -150,7 +150,7 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 
 | Script | Proves | Port |
 |--------|--------|------|
-| `run_compose_smoke.sh` | The whole Compose stack: migrations, a streaming standby, a leader, both gateways and their tool split, the gateway's unpublished metrics port, a scheduled ledger dump, the `edge` network's lack of a route to the ledger, and the day-2 runbook's standby re-clone and ledger restore, run as written. | 18080, 18082 |
+| `run_compose_smoke.sh` | The whole Compose stack: migrations, a streaming standby, a leader, both gateways and their tool split, the gateway's unpublished metrics port, a scheduled ledger dump, the `edge` network's lack of a route to the ledger, replication needing the password on both ledger nodes (and an old volume's trust rule converted on both on restart), and the day-2 runbook's standby re-clone and ledger restore, run as written. | 18080, 18082 |
 | `run_tls_smoke.sh` | The TLS override: Caddy terminates TLS, the plain ports are unpublished, and Caddy has no route to the ledger. | 18443, 18444 |
 | `run_standby_dr_smoke.sh` | The stretched-DR standby: TLS and scram replication. | 55432 |
 

@@ -43,9 +43,31 @@ bash scripts/deploy.sh --check && bash scripts/deploy.sh                   # bui
   tens of seconds without the gateway; open MCP sessions and the tunnel reconnect. Take the pre-deploy dump BEFORE
   extracting the new release, as above: run after extraction, the one-off backup runs against the new compose
   files, outside `deploy.sh`, so it either cannot reach the ledger or recreates the ledger ahead of the deploy. A
-  Prometheus attached to `<project>_default` must move to `<project>_ledger`, or it silently loses both targets. Afterwards remove the old network with
-  `docker network rm <project>_default` (it refuses while anything is still attached). Rolling back to the
-  previous release recreates everything onto `<project>_default` again.
+  Prometheus attached to `<project>_default` must move to `<project>_ledger`, or it silently loses both targets.
+  Afterwards remove the old network with `docker network rm <project>_default` (it refuses while anything is still
+  attached). Rolling back to the previous release recreates everything onto `<project>_default` again.
+- **The release that retires trust replication** (review SEC-05): on their first start, pg-primary's and
+  pg-standby's entrypoints each rewrite the old `host replication all all trust` rule in their own `pg_hba.conf`
+  to scram, keeping the original as `pg_hba.conf.pre-sec05`; the standby authenticates with `PGPASSWORD` from then
+  on. Both services must be recreated, which `deploy.sh` does: recreate only `pg-primary` and the old standby, which
+  has no password, stays disconnected until it is recreated too (its slot keeps the WAL, up to 2 GB). A few `no
+  password supplied` lines in the standby's log while `deploy.sh` recreates pg-primary first are expected.
+  `docker compose logs pg-primary pg-standby | grep retire-trust-replication` shows one `replaced` line per node,
+  and a `WARNING` there names any other replication trust rule, one you wrote yourself, which is left as it is:
+  change it to `scram-sha-256`.
+  - Rolling back past this release leaves the scram rule while the older standby has no password, so its
+    replication stops. Once the older release is running (before that, any start of pg-primary converts the file
+    again), put the primary's pre-upgrade file back and reload it; this also undoes any `pg_hba.conf` edit made
+    since the upgrade. Appending a trust line is not enough: pg_hba uses the first line that matches, and the scram
+    line comes first.
+
+    ```bash
+    docker compose exec pg-primary sh -c 'cp -p "$PGDATA/pg_hba.conf.pre-sec05" "$PGDATA/pg_hba.conf" &&
+      psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT pg_reload_conf()"'
+    ```
+
+    A volume created by this release has no such copy: edit its `host replication "<user>" samenet scram-sha-256`
+    line itself into `host replication all all trust`, then reload the same way.
 - **The rollback tag** keeps the image you are leaving: building the new one moves `br0kr:local`.
 - **A release adds a migration** when its CHANGELOG says so, or its newest `db/migrations` file is above the schema
   version. Take the dump first.
@@ -188,7 +210,7 @@ exactly the containers whose environment changed.
 | the PVE API token | create a new token in PVE with the same role, set its secret in `PVE_TOKEN_SECRET` (and its id on the cluster, dashboard `POST /api/cluster/edit`, if it changed) | `deploy.sh --no-build` (the daemon and `gateway-operator`), then delete the old token in PVE |
 | `BR0KR_DASHBOARD_TOKEN` | set a new value in `.env` | `deploy.sh --no-build` (the dashboard) |
 | `TUNNEL_TOKEN` | refresh the connector token in the Cloudflare dashboard and set it in `.env` | `deploy.sh --no-build` (cloudflared) |
-| the ledger password | in `docker compose exec pg-primary sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`, run `\password <user>`; put the new password in `PGCONN` and `PGPASSWORD` in `.env` | `deploy.sh --no-build` straight away. It recreates every service that reads `PGCONN`, and `pg-primary` too (its `POSTGRES_PASSWORD` comes from `PGPASSWORD`): a few seconds without a ledger and a new leader, which the services ride through. Until then, new connections fail |
+| the ledger password | in `docker compose exec pg-primary sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`, run `\password <user>`; put the new password in `PGCONN` and `PGPASSWORD` in `.env` | `deploy.sh --no-build` straight away. It recreates every service that reads `PGCONN`, and `pg-primary` and `pg-standby` too (the primary's `POSTGRES_PASSWORD` comes from `PGPASSWORD`, and the standby replicates with it, holding no copy of its own): a few seconds without a ledger and a new leader, which the services ride through. Until then, new connections fail; the standby's WAL stream keeps its old login until it reconnects |
 
 ## Add, drain and remove a node
 
