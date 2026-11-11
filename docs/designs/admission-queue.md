@@ -30,7 +30,7 @@ quota frees, race-free, with **no possibility of over-admitting** a node/pool/pr
 Today `admit()` is the single race-critical seam: ordered `pg_advisory_xact_lock` over every debited
 scope (node, project, storage) in canonical order under `READ COMMITTED`, then a derived-capacity re-read,
 then `INSERT ... ADMITTED`. The queue adds exactly **one** new capacity-touching operation — *promote* —
-which is `admit()`'s twin: the **identical** lock-then-re-read discipline, differing only in that it
+which shares `admit()`'s locked core (`_lock_scopes` + `_locked_fit` since ARCH-01): the **identical** lock-then-re-read discipline, differing only in that it
 `UPDATE`s an existing `PENDING` row to `ADMITTED` instead of `INSERT`ing. Enqueue itself is **lock-free**
 (a `PENDING` lease holds no capacity, so parking one races nothing).
 

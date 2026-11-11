@@ -17,6 +17,11 @@ resolve in this repository.
 
 ## [Unreleased]
 
+### Changed
+- **Admission's race-critical core is written once (`br0kr/admission.py`).** `admit()` and `promote_pinned()` carried
+  copies that had to change in lockstep; both now run `_lock_scopes` + `_locked_fit`, and `admit()` logs every
+  refusal. Harnesses unchanged and GO; a unit test pins the shared path (review ARCH-01).
+
 ## [0.1.0] — 2026-11-11
 
 The first tagged release. br0kr is a Postgres-backed capacity broker that gives AI agents race-free,

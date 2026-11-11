@@ -81,9 +81,10 @@ rejected as "node full" by the very lease it already created.
   in `br0kr/daemon.py`)** — with `queue=true`, a request that doesn't fit RIGHT NOW is PARKED as a
   `PENDING` lease (holds NO capacity — absent from `CAPACITY_STATES` and every capacity index) instead of
   rejected, and a leader-gated promoter admits it automatically (strict per-scope FIFO) when room frees.
-  Enqueue is lock-free; the ONE new capacity-touching op is `admission.promote_pinned` — **admit()'s
-  twin** (same ordered scope locks + derived re-read, a guarded CAS `PENDING → ADMITTED`), so a queued
-  request cannot double-allocate on promotion. Heartbeat-to-hold (`renew_lease` keeps a spot; a crashed
+  Enqueue is lock-free; the ONE new capacity-touching op is `admission.promote_pinned`, which runs the
+  SAME locked core as `admit()` (`_lock_scopes` + `_locked_fit`: ordered scope locks, derived re-read,
+  shortfall), then a guarded CAS `PENDING → ADMITTED`, so a queued request cannot double-allocate on
+  promotion. Heartbeat-to-hold (`renew_lease` keeps a spot; a crashed
   agent's frees) with a non-renewable `queue_deadline` ceiling; the reaper expires a stale `PENDING` to
   `REJECTED(queue_timeout)`. Global + per-project depth caps bound it. Both pinned and scheduled requests
   queue. Surface: `cancel_lease`/`queue_status` + the `queue` flag; `br0kr_leases{state="PENDING"}` is the
@@ -97,7 +98,7 @@ rejected as "node full" by the very lease it already created.
   (0039, re-keying 0038's raw `node_bridge`/`required_bridge` onto the identity so a cross-node clone rewrites
   `net0` to THIS node's own bridge for the template's net); a logical `template` fans out to physical
   `template_instance` rows (which `(cluster, node, storage, vmid)` actually holds a cloneable copy). For a
-  templated ask, `admit()` (and its `promote_pinned` twin) resolves — under the node lock — the usable instance
+  templated ask, `admit()` (and `promote_pinned`, through the same `_locked_fit`) resolves — under the node lock — the usable instance
   (node-local, or a shared-storage instance on another node in the SAME cluster when the `cross_node_clone` knob
   is ON, 0037) + the clone-storage (the DEBITED row's `pve_name`, never redirected off it), fail-closed on
   `no_reachable_instance` / `storage_unreachable_from_node` / `linked_clone_storage_pinned` / `storage_unbound`

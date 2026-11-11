@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # admission-queue gate: a throwaway Postgres + concurrent promoters draining a queue, driven against the
 # real admission/scheduler/lease modules. No Proxmox, no VMs — pure ledger correctness + the promote race
-# (PENDING -> ADMITTED is admit()'s twin), safe to run unattended.
+# (PENDING -> ADMITTED shares admit()'s locked core), safe to run unattended.
 set -euo pipefail
 PGPORT=5452
 HERE="$(cd "$(dirname "$0")" && pwd)"

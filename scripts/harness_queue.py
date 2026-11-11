@@ -4,7 +4,7 @@ Admission-queue gate — proves the queue (db/migrations/0006_queue.sql + admiss
 + scheduler.promote_scheduled + lease.claim_pending_expired) against a REAL Postgres, the "proven, not
 assumed" discipline (cf. harness_admission.py / harness_project_quota.py). Exercised through the MODULES.
 
-The headline is the PROMOTE race: promotion is admit()'s twin (ordered scope locks + derived-capacity
+The headline is the PROMOTE race: promotion shares admit()'s locked core (ordered scope locks + derived-capacity
 re-read + guarded CAS PENDING->ADMITTED), so concurrent promoters draining a queue must grant EXACTLY the
 free capacity — never over-admit a node, the very fear the broker exists to close.
 

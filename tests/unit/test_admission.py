@@ -614,3 +614,167 @@ def test_child_row_sql_wiring():
     assert "FROM lease_data_disk" in admission._LEASE_DATA_DISKS
     assert "ORDER BY disk_index" in admission._LEASE_DATA_DISKS
     assert admission._FK_REASON["lease_data_disk_storage_id_fkey"] == "unknown_storage"
+
+
+class _ScopeConn:
+    """A fake NON-autocommit connection answering the admission transaction's reads by statement, so admit() and
+    promote_pinned() run their real code down to the shared locked core without a database. It records each
+    statement, so two runs can be compared read for read. `pending_ask` is the queued lease's stored ask (the
+    _PENDING_ASK row) for promote_pinned; there are no data disks and no project or template."""
+
+    autocommit = False
+
+    def __init__(self, *, node_row, storage_avail, pending_ask=None, project_row=None, governed_row=None):
+        self.node_row, self.storage_avail, self.pending_ask = node_row, storage_avail, pending_ask
+        self.project_row, self.governed_row = project_row, governed_row
+        self.executed: list[str] = []
+        self.commits = 0
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+        self._sql = sql
+        return self
+
+    def fetchone(self):
+        sql = self._sql
+        if "pg_advisory_xact_lock" in sql:
+            return (None,)
+        if sql == admission._LOOKUP:
+            return None                       # a fresh idem_key: no prior lease
+        if sql == admission._PENDING_ASK:
+            return self.pending_ask
+        if sql == admission._NODE_AVAIL:
+            return self.node_row
+        if sql == admission._STORAGE_AVAIL:
+            return (self.storage_avail,)
+        if sql == admission._PROJECT_AVAIL and self.project_row is not None:
+            return self.project_row
+        if sql == admission._TEMPLATE_GOVERNED and self.governed_row is not None:
+            return self.governed_row
+        raise AssertionError(f"unexpected statement: {sql.strip()[:70]}")
+
+    def fetchall(self):
+        return []                             # the lease's data disks: none
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        raise AssertionError("no statement should fail here")
+
+    def core_reads(self) -> list[str]:
+        """The scope locks and capacity reads, in order: the part admit() and promote_pinned() must share."""
+        named = {admission._NODE_AVAIL: "node", admission._STORAGE_AVAIL: "storage",
+                 admission._PROJECT_AVAIL: "project"}
+        return ["lock" if "pg_advisory_xact_lock" in s else named[s] for s in self.executed
+                if "pg_advisory_xact_lock" in s or s in named]
+
+
+@pytest.mark.parametrize("node_row,storage_avail,reason", [
+    ((8.0, 8192, True, "c1"), 500, "node_cordoned"),         # the operator cordoned the node
+    ((8.0, 8192, False, "c1"), 10, "insufficient_storage"),  # 50 GB asked of a pool with 10 free
+])
+def test_admit_and_promote_reject_the_same_ask_for_the_same_reason(node_row, storage_avail, reason):
+    """admit() and promote_pinned() reject the same ask (1 CPU, 512 MB, 50 GB on `pool`, node n1) with the same
+    reason, for a cordoned node and for a full pool, after the same scope locks and capacity reads in the same
+    order, and each commits once (no transaction left open). Guards the two drifting apart again: they used to
+    carry separate copies of this race-critical sequence, which had to be edited in lockstep, and a fix landing
+    in only one was a silent double-allocation path (review ARCH-01). The real-Postgres races are proven in
+    scripts/harness_admission.py and harness_queue.py."""
+    admit_conn = _ScopeConn(node_row=node_row, storage_avail=storage_avail)
+    res = admission.admit(admit_conn, _req(req_cpu=1.0, req_mem_mb=512, storage_id="pool", req_disk_gb=50))
+    promote_conn = _ScopeConn(node_row=node_row, storage_avail=storage_avail,
+                              pending_ask=("n1", 1.0, 512, "pool", 50, None, None))
+    prom = admission.promote_pinned(promote_conn, 7)
+    assert (res.admitted, res.reason) == (False, reason)
+    assert (prom.promoted, prom.reason) == (False, reason)
+    assert admit_conn.core_reads() == promote_conn.core_reads()
+    assert admit_conn.commits == 1 and promote_conn.commits == 1
+
+
+def test_admit_and_promote_agree_on_a_project_budget_and_differ_only_by_the_governance_read(monkeypatch):
+    """Two more paths through the shared core. (1) A project ask over its CPU budget: both refuse
+    insufficient_project_cpu after the same locks and reads, the project lock and budget read included. (2) A
+    templated project ask that placement refuses: both refuse no_reachable_instance, and promote_pinned's ONLY
+    extra statement is the governance read (_TEMPLATE_GOVERNED), the one intended difference between the two.
+    Placement and the settings read are stubbed; their own behaviour is proven elsewhere (test_placement.py,
+    harness_placement.py). Guards the twins diverging on the paths where they used to differ (review ARCH-01)."""
+    from br0kr.placement import PlacementDecision
+    project_row = (0.5, 8192, 3, None, None, None)   # 0.5 CPU left in the project's budget; 1 CPU asked
+    ask = {"req_cpu": 1.0, "req_mem_mb": 512, "storage_id": "pool", "req_disk_gb": 50, "project_id": "team-a"}
+    admit_conn = _ScopeConn(node_row=(8.0, 8192, False, "c1"), storage_avail=500, project_row=project_row)
+    promote_conn = _ScopeConn(node_row=(8.0, 8192, False, "c1"), storage_avail=500, project_row=project_row,
+                              pending_ask=("n1", 1.0, 512, "pool", 50, "team-a", None))
+    assert admission.admit(admit_conn, _req(**ask)).reason == "insufficient_project_cpu"
+    assert admission.promote_pinned(promote_conn, 7).reason == "insufficient_project_cpu"
+    assert admit_conn.core_reads() == promote_conn.core_reads()
+    assert admit_conn.core_reads().count("project") == 1
+
+    monkeypatch.setattr(admission.settings, "effective", lambda _conn: {})
+    monkeypatch.setattr(admission.placement, "resolve_placement",
+                        lambda *_a, **_k: PlacementDecision(False, "no_reachable_instance"))
+    admit_conn = _ScopeConn(node_row=(8.0, 8192, False, "c1"), storage_avail=500)
+    promote_conn = _ScopeConn(node_row=(8.0, 8192, False, "c1"), storage_avail=500, governed_row=(True, False),
+                              pending_ask=("n1", 1.0, 512, "pool", 50, "team-a", "debian12"))
+    res = admission.admit(admit_conn, _req(template_id="debian12", **ask))
+    prom = admission.promote_pinned(promote_conn, 7)
+    assert res.reason == prom.reason == "no_reachable_instance"
+
+    def after_locks(conn):   # from the first scope lock on: the shared core (admit adds its idempotency lookup)
+        first = next(i for i, s in enumerate(conn.executed) if "pg_advisory_xact_lock" in s)
+        return conn.executed[first:]
+    admit_core = [s for s in after_locks(admit_conn) if s != admission._LOOKUP]
+    promote_core = after_locks(promote_conn)
+    assert promote_core.count(admission._TEMPLATE_GOVERNED) == 1
+    assert [s for s in promote_core if s != admission._TEMPLATE_GOVERNED] == admit_core
+
+
+def test_promote_refuses_an_unknown_template_from_the_governance_read():
+    """When promote_pinned's governance read finds no template row (the template was deleted), the shared core
+    refuses unknown_template there, fail-closed, without reaching placement. It is the same reason placement's
+    own template read would give, so the outcome matches the old separate existence check this read replaced.
+    Guards a missing row being treated as 'governance passes' and the refusal depending on a later layer."""
+    conn = _ScopeConn(node_row=(8.0, 8192, False, "c1"), storage_avail=500,
+                      pending_ask=("n1", 1.0, 512, "pool", 50, "team-a", "gone-template"))
+    orig = conn.fetchone
+
+    def fetchone():   # the governance read finds no row; any later read (placement's) would raise in the fake
+        if conn._sql == admission._TEMPLATE_GOVERNED:
+            return None
+        return orig()
+    conn.fetchone = fetchone
+    assert admission.promote_pinned(conn, 7).reason == "unknown_template"
+    assert conn.commits == 1
+
+
+def test_the_lock_and_capacity_reads_live_only_in_the_shared_core():
+    """Within the admission transaction, scope_keys() is called from one function (_lock_scopes), and the
+    node, storage and project capacity reads, the governance read, placement and shortfall() each run from one
+    function (_locked_fit); the raw advisory-lock statement appears only in _lock_scopes. admit() and
+    promote_pinned() reference none of them directly. The only other capacity reads are the read-only headroom
+    APIs the gateway answers "what can I ask for?" with. Guards a future edit inlining a lock, a capacity read or
+    a fit step back into one twin, which is how the two copies drifted before (review ARCH-01)."""
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(admission))
+    watched = {"scope_keys", "_NODE_AVAIL", "_STORAGE_AVAIL", "_PROJECT_AVAIL", "_TEMPLATE_GOVERNED", "shortfall",
+               "resolve_placement", "pg_advisory_xact_lock"}
+    users: dict[str, set[str]] = {}
+    for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef)):
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Name) and node.id in watched:
+                users.setdefault(node.id, set()).add(fn.name)
+            elif isinstance(node, ast.Attribute) and node.attr in watched:
+                users.setdefault(node.attr, set()).add(fn.name)
+            elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                  and "SELECT pg_advisory_xact_lock" in node.value):   # the statement, not prose
+                users.setdefault("pg_advisory_xact_lock", set()).add(fn.name)
+    assert users["scope_keys"] == {"_lock_scopes"}
+    assert users["pg_advisory_xact_lock"] == {"_lock_scopes"}
+    assert users["_STORAGE_AVAIL"] == {"_locked_fit"}
+    assert users["_NODE_AVAIL"] == {"_locked_fit", "headroom"}
+    assert users["_PROJECT_AVAIL"] == {"_locked_fit", "project_headroom"}
+    assert users["_TEMPLATE_GOVERNED"] == users["shortfall"] == users["resolve_placement"] == {"_locked_fit"}

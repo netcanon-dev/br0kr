@@ -81,11 +81,6 @@ _NODE_AVAIL = f"""
   FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL}
   WHERE n.id = %s GROUP BY n.id
 """
-# A template's catalog id — read under the node lock to confirm it still EXISTS (unknown_template). Since the
-# PR-5 cross-cluster widening it NO LONGER gates on the template's home cluster: resolve_placement picks a
-# usable instance in the TARGET NODE's own cluster (its catalog home OR a replica there), so a template homed
-# elsewhere is placeable from a node-cluster-local replica. None row = the catalog id is unknown.
-_TEMPLATE_CLUSTER = "SELECT cluster_id FROM template WHERE id = %s"
 # Per-project image governance (phase A3), re-checked at PROMOTE time only: is the chosen template usable by
 # the lease's project — public, OR granted via the project_template allowlist? The synchronous mcp_server
 # gate (auth.template_allowed) guards the IMMEDIATE path, but a QUEUED lease sits PENDING for up to
@@ -105,7 +100,8 @@ _TEMPLATE_GOVERNED = (
 # term now floors instead — so a landed replica's physical bytes are NEVER discounted (the over-commit the
 # reservation-then-settle would otherwise open). Count READY only: a REPLICATING twin is still floored by its
 # in-flight reservation, so counting it too would double-count (the exact double vs undercount §5.3 resolves —
-# an undercount is the unsafe direction). Used by BOTH admit() and promote_pinned; inventory mirrors it.
+# an undercount is the unsafe direction). Read by _locked_fit, the core admit() and promote_pinned() share;
+# inventory mirrors it.
 # The THIRD subtraction (0046, the multi-disk arc) floors every ACTIVE lease's DATA disks (lease_data_disk)
 # landing on the pool — the SAME _ACTIVE_SQL filter as the boot-lease term, so a data byte is counted
 # identically (never the undercount). INERT today: the arc's admit writer that inserts lease_data_disk rows
@@ -280,8 +276,9 @@ class EnqueueResult:
 @dataclass(frozen=True)
 class PromoteResult:
     """Outcome of a promote_pinned() call. `promoted` True = the PENDING lease became ADMITTED;
-    `reason` is None on success, a shortfall reason (`insufficient_*`) when it still doesn't fit (stays
-    PENDING), or `gone`/`no_node`/`unknown_*` for a lease that left PENDING or can't be placed."""
+    `reason` is None on success; otherwise the lease stays PENDING (or has left it) and `reason` is a
+    _locked_fit refusal (`insufficient_*`, `node_cordoned`, `template_forbidden`, a placement reason, `unknown_*`)
+    or `gone`/`no_node` for a lease that left PENDING or has no node to try."""
 
     promoted: bool
     reason: str | None
@@ -547,6 +544,111 @@ def _fk_reason(exc: psycopg.errors.ForeignKeyViolation) -> str:
     return _FK_REASON.get(getattr(exc.diag, "constraint_name", None) or "", "stale_reference")
 
 
+# ── The shared locked core of admit() and promote_pinned() ──────────────────────
+# The race-critical sequence (scope locks → node + cordon → template placement → per-pool storage → project →
+# shortfall) used to be written out twice, once in each function, and had to be edited in lockstep: a fix that
+# landed in one twin and not the other was a silent double-allocation path. It now lives ONCE, in the two helpers
+# below. admit() and promote_pinned() differ only in what comes between the locks and the fit (admit's idempotency
+# lookup) and in how a fit is committed (admit's INSERT vs promote's CAS).
+def _lock_scopes(cur: psycopg.Cursor[Any], node_id: str, storage_id: str | None, project_id: str | None,
+                 data_disks: tuple[multidisk.DataDisk, ...]) -> None:
+    """Take the advisory lock of every scope the ask debits, in canonical order (scope_keys): the node, the boot
+    pool, every DISTINCT data pool (a pool named twice dedupes to one lock, so its debit is read once), and the
+    project. The ONE place the admission transaction locks. The locks are transaction-scoped, so they span the
+    caller's whole read-then-write and release at its commit or rollback.
+
+    hashtext() is 32-bit, so two distinct scope strings could collide onto the same lock id. That is harmless
+    for correctness: it can only OVER-serialize two unrelated scopes occasionally, never MISS an exclusion (the
+    same scope always hashes the same). The one non-benign edge (review S21) needs a SINGLE collision that
+    inverts two txns' lock order (ABBA): e.g. A={node:m, project:p}, B={node:n2, project:p, storage:q} with
+    hash("storage:q")==hash("node:m") — both hold project:p, then A waits on project:p / B waits on the colliding
+    id → a Postgres-DETECTED deadlock → one txn aborts as a caught error (a transient 5xx), never a double
+    allocation. Astronomically improbable, and DETECTED — so the floor is never weakened."""
+    for key in scope_keys(node_id, storage_id, project_id, tuple(d.storage_id for d in data_disks)):
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+
+
+@dataclass(frozen=True)
+class _Fit:
+    """_locked_fit's verdict. `reason` names the refusal, None when the ask fits; `placement` is the resolved
+    template placement to stamp on the lease when it fits (None for an ask with no template)."""
+
+    reason: str | None
+    placement: placement.PlacementDecision | None = None
+
+
+def _locked_fit(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any], ask: AdmissionRequest, *,
+                recheck_governance: bool) -> _Fit:
+    """Whether `ask` fits on `ask.node_id` NOW, read under the scope locks the caller already holds
+    (_lock_scopes). Checks, in this order, and returns the first refusal:
+      1. the node: unknown_node, or node_cordoned (the operator closed it to NEW provisioning; read under the node
+         lock, so even a pinned ask can't race a concurrent cordon);
+      2. a named template: with `recheck_governance`, the project's image grant (template_forbidden), then its
+         PLACEMENT (br0kr/placement.py), resolving which template_instance this node clones and which pool the
+         disk lands on (unknown_template / no_reachable_instance / a clone-storage refusal);
+      3. each DISTINCT debited pool's headroom, the boot pool plus every data pool, deduped and SUMMED by
+         multidisk.required_by_pool (unknown_storage if a pool vanished);
+      4. the project's budget (unknown_project);
+      5. shortfall(): node, then storage, then project.
+    Reads only, never commits: the caller owns the transaction (admit() INSERTs on a fit, promote_pinned() CASes).
+
+    `recheck_governance` is promote_pinned()'s and is part of the signature on purpose. An immediate admit is
+    gated synchronously by the request surface (auth.template_allowed), but a QUEUED lease waits up to
+    max_wait_seconds for its promote, long enough for an operator to revoke the project's grant; the deferred
+    promote must honour that committed revoke. An unknown template is refused unknown_template either way: by the
+    governance read (no row) when it runs, else by placement's own template read. full_clone / cross_node_clone /
+    clone_content_enforcement come from the SHARED operator_setting knobs, so this gate and the daemon agree."""
+    node = cur.execute(_NODE_AVAIL, (ask.node_id,)).fetchone()
+    if node is None:
+        return _Fit("unknown_node")
+    if node[2]:
+        return _Fit("node_cordoned")
+    node_cpu, node_mem = float(node[0]), int(node[1])
+
+    placement_dec: placement.PlacementDecision | None = None
+    if ask.template_id is not None:
+        if recheck_governance and ask.project_id is not None:
+            grow = cur.execute(_TEMPLATE_GOVERNED, (ask.project_id, ask.template_id)).fetchone()
+            if grow is None:   # the template is gone (placement would say the same; refuse here, fail-closed)
+                return _Fit("unknown_template")
+            if not (grow[0] or grow[1]):   # not public AND not granted
+                return _Fit("template_forbidden")
+        eff = settings.effective(conn)
+        placement_dec = placement.resolve_placement(
+            cur, template_id=ask.template_id, node_id=ask.node_id, ask_storage_id=ask.storage_id,
+            full_clone=bool(eff.get("full_clone", True)),
+            cross_node_clone=bool(eff.get("cross_node_clone", False)),
+            clone_content_enforcement=bool(eff.get("clone_content_enforcement", False)),
+            data_disks=ask.data_disks)   # each data disk resolves in the SAME gate (all-or-nothing)
+        if not placement_dec.ok:
+            # every refusal names its reason; the fallback only keeps a nameless one a refusal
+            return _Fit(placement_dec.reason or "unnamed_placement_refusal")
+
+    required = multidisk.required_by_pool(ask.storage_id, ask.req_disk_gb, ask.data_disks)
+    avail_by_pool: dict[str, int] = {}
+    for pool in sorted(required):
+        srow = cur.execute(_STORAGE_AVAIL, (pool,)).fetchone()
+        if srow is None:
+            return _Fit("unknown_storage")
+        avail_by_pool[pool] = int(srow[0])
+
+    # An unknown project id is refused (like unknown_node/_storage) rather than admitted ungoverned: a caller
+    # naming a project means it to bind. NULL project_id skips this (ungoverned).
+    proj_cpu: float | None = None
+    proj_mem: int | None = None
+    proj_slots: int | None = None
+    if ask.project_id is not None:
+        prow = cur.execute(_PROJECT_AVAIL, (ask.project_id,)).fetchone()
+        if prow is None:
+            return _Fit("unknown_project")
+        proj_cpu, proj_mem, proj_slots = float(prow[0]), int(prow[1]), int(prow[2])
+
+    reason = shortfall(ask, node_cpu, node_mem,
+                       project_cpu_avail=proj_cpu, project_mem_avail=proj_mem, project_slots_avail=proj_slots,
+                       required_by_pool=required, avail_by_pool=avail_by_pool)
+    return _Fit(reason, placement_dec if reason is None else None)
+
+
 def admit(conn: psycopg.Connection[Any], req: AdmissionRequest) -> AdmissionResult:
     """Admit (or reject) one request, race-free. Locks every debited scope in
     canonical order, re-reads derived capacity, and inserts an ADMITTED lease iff it
@@ -579,23 +681,8 @@ def admit(conn: psycopg.Connection[Any], req: AdmissionRequest) -> AdmissionResu
         return AdmissionResult(None, admitted=False, idempotent=False, reason=bad)
 
     cur = conn.cursor()
-    # 1. Serialize every contended scope (canonical order → deadlock-free).
-    #    hashtext() is 32-bit, so two distinct scope strings could collide onto the
-    #    same advisory-lock id — harmless for correctness: it can only OVER-serialize
-    #    two unrelated scopes occasionally, never MISS an exclusion (same scope → same
-    #    hash always). The one non-benign edge (review S21) needs a SINGLE collision that
-    #    inverts two txns' lock-acquisition order (ABBA): e.g. A={node:m, project:p},
-    #    B={node:n2, project:p, storage:q} with hash("storage:q")==hash("node:m") — both
-    #    hold project:p, then A waits on project:p / B waits on the colliding id → a
-    #    Postgres-DETECTED deadlock → one txn aborts as a caught error (a transient 5xx),
-    #    never a double allocation. Astronomically improbable, and DETECTED — so even in
-    #    that case the floor is never weakened, only a request transiently fails.
-    # The lock SET unions the boot pool with EVERY distinct data pool (multi-disk arc): a pool named twice
-    # dedupes to one lock (scope_keys uses a set), so the per-pool debit reads each contended pool exactly once
-    # and the aggregated shortfall can't be double-booked. Same single global sort order → still deadlock-free.
-    for key in scope_keys(req.node_id, req.storage_id, req.project_id,
-                          tuple(d.storage_id for d in req.data_disks)):
-        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+    # 1. Serialize every contended scope (canonical order → deadlock-free; see _lock_scopes).
+    _lock_scopes(cur, req.node_id, req.storage_id, req.project_id, req.data_disks)
 
     # 2. Idempotency: a prior LIVE grant for the SAME ask wins, regardless of current
     #    capacity. A terminal-keyed or different-ask match is refused (replay_result),
@@ -612,77 +699,19 @@ def admit(conn: psycopg.Connection[Any], req: AdmissionRequest) -> AdmissionResu
                  extra={"idem_key": req.idem_key})
         return result
 
-    # 3. Fresh capacity read AFTER the lock (READ COMMITTED sees committed competitors).
-    node = cur.execute(_NODE_AVAIL, (req.node_id,)).fetchone()
-    if node is None:
+    # 3. Fresh capacity read AFTER the lock (READ COMMITTED sees committed competitors): the shared locked core.
+    #    It runs AFTER idempotency (step 2) on purpose: a retry of an already-granted lease on a now-cordoned or
+    #    now-full node still returns its lease (a cordon or a full scope stops NEW work, never an existing grant).
+    #    A templated fit carries the resolved instance + clone-storage, STAMPED on the lease below (excluded from
+    #    the idem-key surface, I6). An immediate admit doesn't re-check image governance: the request surface
+    #    gated it synchronously (auth.template_allowed).
+    fit = _locked_fit(conn, cur, req, recheck_governance=False)
+    if fit.reason is not None:
         conn.commit()
-        return AdmissionResult(None, admitted=False, idempotent=False, reason="unknown_node")
-    # Cordon: the operator has closed this node to NEW provisioning. Read UNDER the node:<id> scope lock
-    # (acquired in step 1), so even a PINNED request can't race a concurrent cordon — it sees the committed
-    # flag and is refused. Checked AFTER idempotency (step 2): a retry of an already-granted lease on a
-    # now-cordoned node still returns its lease (cordon stops NEW work, never an existing grant), exactly as
-    # the capacity path lets an idempotent replay through on a now-full node. Existing leases are untouched.
-    if node[2]:
-        conn.commit()
-        log.info("admission rejected (node_cordoned)", extra={"idem_key": req.idem_key, "node": req.node_id})
-        return AdmissionResult(None, admitted=False, idempotent=False, reason="node_cordoned")
-    node_cpu, node_mem = float(node[0]), int(node[1])
-    # (node[3] = the node's cluster; the placement gate below reads it itself, under the same node lock.)
-    # Template PLACEMENT gate (A2 + the 0033 reachability arc): if the request names a catalog template, the
-    # gate resolves — UNDER the node lock — WHICH physical template_instance this node may clone AND WHICH
-    # storage pool the disk must land on (br0kr/placement.py). Fail-closed on unknown_template /
-    # no_reachable_instance / a clone-storage refusal (the catalog-cluster pre-reject was retired by the PR-5
-    # cross-cluster widening — a node's cluster may hold a REPLICA of a template homed elsewhere). Debits no scope
-    # — purely a placement/validity gate — and STAMPS the resolved instance + clone-storage on the lease
-    # below (excluded from the idem-key surface, I6). full_clone is read from the SHARED operator_setting knob
-    # so the gateway's gate and the daemon agree on full-vs-linked resolution (§3.5 anti-env-drift).
-    placement_dec: placement.PlacementDecision | None = None
-    if req.template_id is not None:
-        eff = settings.effective(conn)
-        placement_dec = placement.resolve_placement(
-            cur, template_id=req.template_id, node_id=req.node_id, ask_storage_id=req.storage_id,
-            full_clone=bool(eff.get("full_clone", True)),
-            cross_node_clone=bool(eff.get("cross_node_clone", False)),
-            clone_content_enforcement=bool(eff.get("clone_content_enforcement", False)),
-            data_disks=req.data_disks)   # PR-3: resolve each data disk in the SAME gate (all-or-nothing)
-        if not placement_dec.ok:
-            conn.commit()
-            log.info("admission rejected (%s)", placement_dec.reason,
-                     extra={"idem_key": req.idem_key, "node": req.node_id, "template": req.template_id})
-            return AdmissionResult(None, admitted=False, idempotent=False, reason=placement_dec.reason)
-    # Physical pool headroom, per DISTINCT debited pool (the boot pool + every data pool, DEDUPED and SUMMED by
-    # multidisk.required_by_pool). Read under the widened scope locks so each derived floor is fresh. A pool
-    # that vanished (operator delete) → unknown_storage, exactly as the single-pool path. For a single-disk
-    # lease required = {boot: boot_gb}, so this reads the boot pool once — byte-identical to the pre-arc path.
-    required = multidisk.required_by_pool(req.storage_id, req.req_disk_gb, req.data_disks)
-    avail_by_pool: dict[str, int] = {}
-    for pool in sorted(required):
-        srow = cur.execute(_STORAGE_AVAIL, (pool,)).fetchone()
-        if srow is None:
-            conn.commit()
-            return AdmissionResult(None, admitted=False, idempotent=False, reason="unknown_storage")
-        avail_by_pool[pool] = int(srow[0])
-
-    # Tenant budget: read the project's derived availability under the same lock. An unknown
-    # project id is refused (like unknown_node/_storage) rather than admitted ungoverned — a
-    # caller naming a project means it to bind. NULL project_id skips this (ungoverned).
-    proj_cpu: float | None = None
-    proj_mem: int | None = None
-    proj_slots: int | None = None
-    if req.project_id is not None:
-        prow = cur.execute(_PROJECT_AVAIL, (req.project_id,)).fetchone()
-        if prow is None:
-            conn.commit()
-            return AdmissionResult(None, admitted=False, idempotent=False, reason="unknown_project")
-        proj_cpu, proj_mem, proj_slots = float(prow[0]), int(prow[1]), int(prow[2])
-
-    reason = shortfall(req, node_cpu, node_mem,
-                       project_cpu_avail=proj_cpu, project_mem_avail=proj_mem, project_slots_avail=proj_slots,
-                       required_by_pool=required, avail_by_pool=avail_by_pool)
-    if reason is not None:
-        conn.commit()
-        log.info("admission rejected (%s)", reason, extra={"idem_key": req.idem_key, "node": req.node_id})
-        return AdmissionResult(None, admitted=False, idempotent=False, reason=reason)
+        log.info("admission rejected (%s)", fit.reason,
+                 extra={"idem_key": req.idem_key, "node": req.node_id, "template": req.template_id})
+        return AdmissionResult(None, admitted=False, idempotent=False, reason=fit.reason)
+    placement_dec = fit.placement
 
     # 4. Insert the grant + its data-disk child rows ATOMICALLY (one txn → all-or-nothing: any rollback drops
     #    every row, so a lease can never carry a subset of its admitted disks). ON CONFLICT covers a same-key
@@ -879,7 +908,7 @@ def enqueue(
 def promote_pinned(
     conn: psycopg.Connection[Any], lease_id: int, *, onto_node: str | None = None
 ) -> PromoteResult:
-    """Promote a PENDING lease to ADMITTED iff it fits NOW — admit()'s twin.
+    """Promote a PENDING lease to ADMITTED iff it fits NOW — admit()'s sibling, sharing its locked core.
 
     Reads the lease's IMMUTABLE ask (to know which scopes to lock), acquires `pg_advisory_xact_lock` over
     every debited scope in canonical order, re-reads derived capacity UNDER the lock, and CASes
@@ -920,87 +949,21 @@ def promote_pinned(
         if node is None:
             conn.commit()
             return PromoteResult(False, "no_node")   # a scheduled entry handed to promote_pinned with no target
-        for key in scope_keys(node, storage_id, project_id,
-                              tuple(d.storage_id for d in data_disks)):
-            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
-        nrow = cur.execute(_NODE_AVAIL, (node,)).fetchone()
-        if nrow is None:
+        _lock_scopes(cur, node, storage_id, project_id, data_disks)
+        # The shared locked core, as admit() runs it, plus the governance re-check (see _locked_fit): everything
+        # that may have changed while the lease waited — a cordon, a revoked image grant, a template no longer
+        # placeable from this node, a full scope — refuses here, and the lease stays PENDING for a later tick (the
+        # promoter's non-holding set keeps a refused head from blocking the queue). A promote onto a node in
+        # ANOTHER cluster places from a replica there (the PR-5 cross-cluster widening, inside resolve_placement).
+        ask_now = AdmissionRequest(idem_key="(promote)", node_id=node, req_cpu=float(req_cpu),
+                                   req_mem_mb=int(req_mem_mb), storage_id=storage_id,
+                                   req_disk_gb=int(req_disk_gb), project_id=project_id,
+                                   template_id=template_id, data_disks=data_disks)
+        fit = _locked_fit(conn, cur, ask_now, recheck_governance=True)
+        if fit.reason is not None:
             conn.commit()
-            return PromoteResult(False, "unknown_node")
-        if nrow[2]:   # the node was cordoned while this request waited — leave it PENDING (don't promote)
-            conn.commit()
-            return PromoteResult(False, "node_cordoned")
-        # Re-validate the template under the node lock. The template's CATALOG cluster no longer gates the
-        # promote (PR-5 cross-cluster widening): resolve_placement (below) scopes the usable-instance pick to the
-        # CHOSEN node's OWN cluster, so a promote onto a node in ANOTHER cluster is placed from a REPLICA there,
-        # and a node whose cluster has no usable copy refuses no_reachable_instance + stays PENDING. The scalar
-        # `template.cluster == node.cluster` check that used to live here is GONE — it was redundant with (and
-        # narrower than) resolve_placement, which is the single source of truth. Only the existence check remains.
-        placement_dec: placement.PlacementDecision | None = None
-        if template_id is not None:
-            trow = cur.execute(_TEMPLATE_CLUSTER, (template_id,)).fetchone()
-            if trow is None:
-                conn.commit()
-                return PromoteResult(False, "unknown_template")
-            # Governance (phase A3): a queued lease can sit PENDING for up to max_wait_seconds, long enough
-            # for the operator to REVOKE the project's grant on a non-public template after enqueue. The
-            # synchronous mcp_server gate only guarded enqueue, so re-verify public-OR-grant HERE under the
-            # node lock — the deferred admit must honour a committed revoke (NOT the accepted sub-ms TOCTOU).
-            # A non-public, ungranted template stays PENDING (template_forbidden) and is never cloned; it
-            # queue-expires. Skipped for an ungoverned (project-less) lease — governance is per-project, like
-            # the tenant-budget check below (and the agent path always carries a project via bind_project).
-            if project_id is not None:
-                grow = cur.execute(_TEMPLATE_GOVERNED, (project_id, template_id)).fetchone()
-                if grow is not None and not (grow[0] or grow[1]):   # not public AND not granted
-                    conn.commit()
-                    return PromoteResult(False, "template_forbidden")
-            # Placement gate MIRROR (0033): resolve the usable instance + clone-storage under the node lock,
-            # exactly as admit() does, and STAMP them on the promote CAS. A PENDING lease was enqueued before
-            # any instance was resolved, so a queued lease onto a now-unreachable template refuses HERE
-            # (no_reachable_instance / a clone-storage refusal) and stays PENDING (the promoter's non-holding
-            # set keeps it from head-blocking) rather than cloning onto the wrong pool.
-            eff = settings.effective(conn)
-            pdec = placement.resolve_placement(cur, template_id=template_id, node_id=node,
-                                               ask_storage_id=storage_id,
-                                               full_clone=bool(eff.get("full_clone", True)),
-                                               cross_node_clone=bool(eff.get("cross_node_clone", False)),
-                                               clone_content_enforcement=bool(
-                                                   eff.get("clone_content_enforcement", False)),
-                                               data_disks=data_disks)   # PR-3: the queued lease's stamped disks
-            if not pdec.ok:
-                conn.commit()
-                return PromoteResult(False, pdec.reason)
-            placement_dec = pdec
-        node_cpu, node_mem = float(nrow[0]), int(nrow[1])
-        # Per-DISTINCT-pool headroom (boot + every data pool, deduped + summed) under the widened lock set —
-        # the same aggregated read admit() does, so a queued multi-disk lease re-debits its full disk set.
-        required = multidisk.required_by_pool(storage_id, req_disk_gb, data_disks)
-        avail_by_pool: dict[str, int] = {}
-        for pool in sorted(required):
-            srow = cur.execute(_STORAGE_AVAIL, (pool,)).fetchone()
-            if srow is None:
-                conn.commit()
-                return PromoteResult(False, "unknown_storage")
-            avail_by_pool[pool] = int(srow[0])
-        proj_cpu: float | None = None
-        proj_mem: int | None = None
-        proj_slots: int | None = None
-        if project_id is not None:
-            prow = cur.execute(_PROJECT_AVAIL, (project_id,)).fetchone()
-            if prow is None:
-                conn.commit()
-                return PromoteResult(False, "unknown_project")
-            proj_cpu, proj_mem, proj_slots = float(prow[0]), int(prow[1]), int(prow[2])
-        fit = AdmissionRequest(idem_key="(promote)", node_id=node, req_cpu=float(req_cpu),
-                               req_mem_mb=int(req_mem_mb), storage_id=storage_id,
-                               req_disk_gb=int(req_disk_gb), project_id=project_id, data_disks=data_disks)
-        reason = shortfall(fit, node_cpu, node_mem,
-                           project_cpu_avail=proj_cpu, project_mem_avail=proj_mem,
-                           project_slots_avail=proj_slots,
-                           required_by_pool=required, avail_by_pool=avail_by_pool)
-        if reason is not None:
-            conn.commit()
-            return PromoteResult(False, reason)   # still doesn't fit — stays PENDING for a later tick
+            return PromoteResult(False, fit.reason)
+        placement_dec = fit.placement
         won = promote_to_admitted(   # CAS + commit (releases the lock); stamps placement for a templated lease
             conn, lease_id, node_id=onto_node,
             template_instance_id=placement_dec.instance_id if placement_dec else None,
