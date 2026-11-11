@@ -393,7 +393,8 @@ def replication_status(
 ) -> dict[str, Any]:
     """Read one replication job's status. Returns the shaped row (see `_row`) PLUS `replication_enabled` (the
     data-plane fact — False until the engine ships) and `age_seconds` (since `created_at`), or {replication_id,
-    found: False, reason} on miss. `project_id` scopes a TENANT read: a tenant sees ONLY its own jobs — a
+    exists: False, found: False, reason} on miss. `exists` matches every other lookup's key (review UX-03); `found`
+    is its older name, kept for one release. `project_id` scopes a TENANT read: a tenant sees ONLY its own jobs — a
     nonexistent id AND another project's id return the IDENTICAL {found: False, reason: 'unknown_replication'},
     so a scoped token cannot enumerate which ids exist or learn that a foreign job is running (the
     anti-enumeration doctrine of auth.lease_owned_by — distinguishing them would be an existence oracle over the
@@ -403,13 +404,13 @@ def replication_status(
         "WHERE id = %s", (replication_id,)).fetchone()
     if row is None:
         conn.commit()
-        return {"replication_id": replication_id, "found": False, "reason": "unknown_replication"}
+        return {"replication_id": replication_id, "exists": False, "found": False, "reason": "unknown_replication"}
     d = _row(row[:-1])
     if project_id is not None and d["project_id"] != project_id:
         # A foreign row is answered as if it did not exist — shape it (no leak; d is not returned) then hide it.
         conn.commit()
-        return {"replication_id": replication_id, "found": False, "reason": "unknown_replication"}
-    d["found"] = True
+        return {"replication_id": replication_id, "exists": False, "found": False, "reason": "unknown_replication"}
+    d["exists"] = d["found"] = True
     d["reason"] = None
     d["age_seconds"] = round(float(row[-1]), 2) if row[-1] is not None else None
     d["replication_enabled"] = replication_enabled(conn)

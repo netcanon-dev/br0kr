@@ -28,7 +28,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PKG = _ROOT / "br0kr"
 # The modules on the agent-facing request path: no known code may appear in them as a literal.
 _AGENT_MODULES = ("admission", "gateway", "scheduler", "pin", "placement", "cloudinit", "multidisk", "mcp_server",
-                  "bulk", "imgbuild", "build", "auth", "actas", "inventory")
+                  "bulk", "imgbuild", "build", "auth", "actas", "inventory", "envelope")
 _SNAKE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 # The keys and keyword names that carry a reason, and the calls whose positional strings are one (result types and
 # the refusal helpers).

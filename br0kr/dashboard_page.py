@@ -346,6 +346,8 @@ const REASON_HINT = {
   node_wrong_cluster: 'that node belongs to a different cluster',
   pair_quarantined: 'a failed post-clone check fenced this node and storage pair off',
   reserved_idem_key: 'that idempotency key is reserved; pick another',
+  lease_not_live: 'the lease has already ended (releasing, released or expired)',
+  lease_queued: 'it is still waiting in the queue: cancel it instead',
   node_and_cluster: 'pick a node or a cluster, not both',
   storage_unbound: 'that storage pool is not bound to a cluster and PVE pool yet',
 };
@@ -383,8 +385,8 @@ function hint(code){
   }
   return '';
 }
-// The one-line reason for a failed {ok,status,data} result. `fallback` covers a 200 that names no reason (cancel
-// and renew answer cancelled:false / renewed:false for a no-op).
+// The one-line reason for a failed {ok,status,data} result. `fallback` covers a 200 that names no reason (a server
+// older than the renew / cancel answers that carry reason lease_not_live).
 function why(r, fallback){
   if(!r || !r.status) return 'no answer from the dashboard server (network error)';
   const code = r.data && (r.data.error || r.data.reason);

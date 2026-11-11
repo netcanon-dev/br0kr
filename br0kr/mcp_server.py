@@ -44,6 +44,11 @@ termination (SECURITY.md C3 / the agent-auth control).
 catch-all route. It carries `br0kr_admit_total{tool,outcome}`, counted here at the tool boundary
 (`_counts_admission`), and this process's PVE call timings (review OPS-03).
 
+**Results.** Every tool answer carries `ok` (did the call do what was asked), and a negative one a snake_case
+`reason`, on top of its own keys (br0kr/envelope.py, review UX-03). It is added where each tool is registered
+(`_tool`, `register_operator_tools`), so an agent always gets it while the functions here keep their plain answers
+for direct callers. The agent-facing contract is docs/runbooks/connecting-an-agent.md, "Reading a result".
+
 The tool DOCSTRINGS are what an agent sees as each tool's description — keep them
 accurate and task-focused.
 """
@@ -70,6 +75,7 @@ from br0kr import (
     auth,
     bulk,
     db,
+    envelope,
     gateway,
     inventory,
     logging_setup,
@@ -283,7 +289,27 @@ def _counts_admission(tool: str) -> Callable[[Callable[_P, dict[str, Any]]], Cal
     return wrap
 
 
-@mcp.tool()
+def _enveloped(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """`fn` with its answers passed through `envelope.envelope` under its own name, so the agent gets `ok` and, on a
+    negative, a `reason` (review UX-03). `functools.wraps` keeps the signature, annotations and docstring FastMCP
+    builds the tool from. A KeyError here, at registration, means a tool has no envelope.RESULT_FLAG entry."""
+    name = fn.__name__
+    envelope.RESULT_FLAG[name]   # fail at import, not at an agent's first call, for a tool with no verdict rule
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        return envelope.envelope(name, fn(*args, **kwargs))
+    return wrapped
+
+
+def _tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Register `fn` as a tenant MCP tool, its answers enveloped (`_enveloped`); return `fn` as written, so direct
+    callers (the unit tests, the generated API reference) see the plain function."""
+    mcp.tool()(_enveloped(fn))
+    return fn
+
+
+@_tool
 @_counts_admission("request_lease")
 def request_lease(
     ctx: Context,
@@ -310,8 +336,8 @@ def request_lease(
     safely get the same lease back (reusing it for a different ask is refused). The lease is
     always counted against YOUR token's project, so project_id may be omitted (passing a
     DIFFERENT project is refused with {"error":"project_forbidden"}); the request is also
-    refused if your project is over its cpu/mem/lease-count quota. Returns {lease_id, admitted,
-    queued, idempotent, reason, pinned}. If admitted is false, reason says why (e.g.
+    refused if your project is over its cpu/mem/lease-count quota. Returns {ok, lease_id, admitted,
+    queued, idempotent, reason, pinned}: ok is true when admitted or queued. If not, reason says why (e.g.
     insufficient_node_cpu, insufficient_project_cpu, project_lease_limit, idem_key_conflict,
     lease_not_live); docs/reference/reason-codes.md lists every code with what to do about it.
     Heartbeat the returned lease_id before its ttl_seconds elapse or the broker reclaims it.
@@ -411,7 +437,7 @@ def request_lease(
         return r
 
 
-@mcp.tool()
+@_tool
 @_counts_admission("schedule_lease")
 def schedule_lease(
     ctx: Context,
@@ -441,7 +467,8 @@ def schedule_lease(
     is refused outright if your project is over its (global) cpu/mem/lease-count quota. idem_key
     MUST be a stable id for THIS request — retry with the SAME key to get the same lease back (it
     returns the same lease wherever it was placed; reusing it for a different ask is refused).
-    Returns {lease_id, node_id, admitted, queued, idempotent, reason, tried, pinned}. `tried` is the
+    Returns {ok, lease_id, node_id, admitted, queued, idempotent, reason, tried, pinned}; ok is true when
+    admitted or queued. `tried` is the
     per-candidate trace — a list of {node_id, reason} recording each node the broker attempted and why it
     did not take the lease (reason=None for the node that DID) — so you can see exactly which nodes were
     considered. If admitted is false, reason says why (e.g. no_capacity, unknown_cluster,
@@ -522,11 +549,12 @@ def schedule_lease(
         return r
 
 
-@mcp.tool()
+@_tool
 def renew_lease(ctx: Context, lease_id: int) -> dict[str, Any]:
-    """Heartbeat a lease to extend its TTL. Returns {lease_id, renewed, expires_at}.
-    If renewed is false, the lease is no longer live (released or reaped) — STOP the
-    work you were doing under it; the capacity is no longer yours. You may only renew a
+    """Heartbeat a lease to extend its TTL. Returns {ok, lease_id, renewed, expires_at}.
+    If renewed is false (reason lease_not_live), the lease is no longer live (released or reaped,
+    or a queued spot past its max_wait_seconds) — STOP the work you were doing under it; the
+    capacity is no longer yours. You may only renew a
     lease that belongs to YOUR project (else {"error":"lease_forbidden"}). Requires a
     consume-tier token."""
     principal = _authorize(ctx, "renew_lease")
@@ -539,10 +567,12 @@ def renew_lease(ctx: Context, lease_id: int) -> dict[str, Any]:
         return gateway.renew_lease(c, lease_id)
 
 
-@mcp.tool()
+@_tool
 def release_lease(ctx: Context, lease_id: int) -> dict[str, Any]:
     """Release a lease when you're done so its capacity is reclaimed. Idempotent —
-    released is false if it was already releasing/gone. Returns {lease_id, released}.
+    released is false if it was already releasing/gone (reason lease_not_live), or if it is still
+    queued (reason lease_queued: use cancel_lease to drop a queued request). Returns
+    {ok, lease_id, released}; a repeat answers ok false with lease_not_live: already gone, nothing to do.
     You may only release a lease that belongs to YOUR project (else
     {"error":"lease_forbidden"}). Requires a consume-tier token."""
     principal = _authorize(ctx, "release_lease")
@@ -558,7 +588,7 @@ def release_lease(ctx: Context, lease_id: int) -> dict[str, Any]:
         return r
 
 
-@mcp.tool()
+@_tool
 def lease_status(ctx: Context, lease_id: int) -> dict[str, Any]:
     """Look up a lease's current state (PENDING=queued/waiting, ADMITTED=reserved,
     ACTIVE=provisioned, RELEASING/RELEASED/REJECTED/RELEASE_FAILED=on the way out) AND its VM-access
@@ -583,13 +613,14 @@ def lease_status(ctx: Context, lease_id: int) -> dict[str, Any]:
         return gateway.lease_status(c, lease_id)
 
 
-@mcp.tool()
+@_tool
 def cancel_lease(ctx: Context, lease_id: int) -> dict[str, Any]:
     """Give up a QUEUED request (or release a live lease you no longer want). If the lease is
     still waiting in line (PENDING) it is dropped; if it was already promoted to a live lease it
-    is released instead. Idempotent. Returns {lease_id, cancelled, outcome} (outcome:
-    cancelled/released/noop). You may only cancel a lease that belongs to YOUR project (else
-    {"error":"lease_forbidden"}). Requires a consume-tier token."""
+    is released instead. Idempotent. Returns {ok, lease_id, cancelled, outcome} (outcome:
+    cancelled/released/noop; a noop is ok false with lease_not_live: already gone, nothing to do).
+    You may only cancel a lease that belongs to YOUR project (else {"error":"lease_forbidden"}).
+    Requires a consume-tier token."""
     principal = _authorize(ctx, "cancel_lease")
     if isinstance(principal, dict):
         return principal
@@ -603,7 +634,7 @@ def cancel_lease(ctx: Context, lease_id: int) -> dict[str, Any]:
         return r
 
 
-@mcp.tool()
+@_tool
 def queue_status(ctx: Context, lease_id: int) -> dict[str, Any]:
     """Check a QUEUED lease: its state and how many requests are AHEAD of it in line (its GLOBAL
     position across the whole queue). Returns {lease_id, state, queue_position, blocked_reason, exists}.
@@ -636,13 +667,13 @@ def _owned_then(
     return op(conn, lease_id)
 
 
-@mcp.tool()
+@_tool
 def renew_leases(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
-    """Heartbeat MANY leases in one call (keep a whole fleet alive) — the bulk form of renew_lease. Pass
-    the list of lease ids; each is renewed independently. Returns {results, count} where each result is
-    {lease_id, renewed, expires_at} or {lease_id, error}: a `renewed:false` means that lease is no longer
-    live (STOP work under it); an id NOT in your project (or unknown) comes back {error:"lease_forbidden"}
-    without affecting the others; a repeated id runs once. At most 100 ids per call (else
+    """Heartbeat MANY leases in one call (keep a whole fleet alive) — the bulk form of renew_lease. Pass the list of
+    lease ids; each is renewed independently. Returns {ok, results, count} where each result carries its own ok (and
+    a reason when false) beside {lease_id, renewed, expires_at} or {lease_id, error}: a `renewed:false` means that
+    lease is no longer live (STOP work under it); an id NOT in your project (or unknown) comes back
+    {error:"lease_forbidden"} without affecting the others; a repeated id runs once. At most 100 ids per call (else
     {error:"batch_too_large"} and nothing runs) — chunk beyond that. Requires a consume-tier token."""
     principal = _authorize(ctx, "renew_leases")
     if isinstance(principal, dict):
@@ -652,13 +683,13 @@ def renew_leases(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
             cc, lid, principal.project_id, gateway.renew_lease))
 
 
-@mcp.tool()
+@_tool
 def release_leases(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
     """Release MANY leases in one call (fleet shutdown) — the bulk form of release_lease. Each is released
-    independently and idempotently. Returns {results, count} where each result is {lease_id, released} or
-    {lease_id, error}: an id NOT in your project (or unknown) comes back {error:"lease_forbidden"} without
-    affecting the others; a repeated id runs once. At most 100 ids per call (else {error:"batch_too_large"}
-    and nothing runs) — chunk beyond that. Requires a consume-tier token."""
+    independently and idempotently. Returns {ok, results, count} where each result carries its own ok (and a reason
+    when false) beside {lease_id, released} or {lease_id, error}: an id NOT in your project (or unknown) comes back
+    {error:"lease_forbidden"} without affecting the others; a repeated id runs once. At most 100 ids per call (else
+    {error:"batch_too_large"} and nothing runs) — chunk beyond that. Requires a consume-tier token."""
     principal = _authorize(ctx, "release_leases")
     if isinstance(principal, dict):
         return principal
@@ -674,14 +705,14 @@ def release_leases(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
         return res
 
 
-@mcp.tool()
+@_tool
 def cancel_leases(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
-    """Give up MANY queued requests (or release the live ones) in one call — the bulk form of cancel_lease.
-    Each is dropped if still PENDING, else released if already promoted; idempotent. Returns {results,
-    count} where each result is {lease_id, cancelled, outcome} (outcome: cancelled/released/noop) or
-    {lease_id, error}: an id NOT in your project (or unknown) comes back {error:"lease_forbidden"} without
-    affecting the others; a repeated id runs once. At most 100 ids per call (else {error:"batch_too_large"}
-    and nothing runs) — chunk beyond that. Requires a consume-tier token."""
+    """Give up MANY queued requests (or release the live ones) in one call — the bulk form of cancel_lease. Each is
+    dropped if still PENDING, else released if already promoted; idempotent. Returns {ok, results, count} where each
+    result carries its own ok (and a reason when false) beside {lease_id, cancelled, outcome} (outcome:
+    cancelled/released/noop) or {lease_id, error}: an id NOT in your project (or unknown) comes back
+    {error:"lease_forbidden"} without affecting the others; a repeated id runs once. At most 100 ids per call (else
+    {error:"batch_too_large"} and nothing runs) — chunk beyond that. Requires a consume-tier token."""
     principal = _authorize(ctx, "cancel_leases")
     if isinstance(principal, dict):
         return principal
@@ -695,7 +726,7 @@ def cancel_leases(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
         return res
 
 
-@mcp.tool()
+@_tool
 def lease_statuses(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
     """Look up MANY leases' state + VM-access connection facts in one call — the bulk form of lease_status
     (so an agent that provisioned several VMs gets all their ip/vmid/state at once). Returns {results,
@@ -712,7 +743,7 @@ def lease_statuses(ctx: Context, lease_ids: list[int]) -> dict[str, Any]:
             cc, lid, principal.project_id, gateway.lease_status))
 
 
-@mcp.tool()
+@_tool
 def migration_status(ctx: Context, migration_id: int) -> dict[str, Any]:
     """Watch a cross-cluster MIGRATION of one of YOUR leases progress (REQUESTED → RESERVED → MIGRATING →
     DONE/ABORTED). Returns {migration_id, exists, state, lease_id, source_node, target_node, reservation_id,
@@ -740,7 +771,7 @@ def migration_status(ctx: Context, migration_id: int) -> dict[str, Any]:
         return gateway.migration_status(c, migration_id)
 
 
-@mcp.tool()
+@_tool
 def node_capacity(ctx: Context, node_id: str) -> dict[str, Any]:
     """Current free capacity on a node (cpu + mem, derived live) so you can size a
     request before making it. Returns {node_id, cpu_available, mem_mb_available,
@@ -755,7 +786,7 @@ def node_capacity(ctx: Context, node_id: str) -> dict[str, Any]:
         return gateway.node_capacity(c, node_id)
 
 
-@mcp.tool()
+@_tool
 def cluster_capacity(ctx: Context, cluster_id: str) -> dict[str, Any]:
     """Current free capacity across a whole cluster (sum of its nodes, derived live) so you
     can pick a cluster with room before choosing a node in it. Returns {acting_as, cluster_id,
@@ -771,7 +802,7 @@ def cluster_capacity(ctx: Context, cluster_id: str) -> dict[str, Any]:
         return {**gateway.cluster_capacity(c, cluster_id), "acting_as": principal.project_id}
 
 
-@mcp.tool()
+@_tool
 def project_capacity(ctx: Context, project_id: str | None = None) -> dict[str, Any]:
     """Remaining tenant budget for YOUR project (cpu + mem + how many more leases it may hold,
     derived live) so you can check your quota before requesting. project_id may be omitted (it
@@ -795,7 +826,7 @@ def project_capacity(ctx: Context, project_id: str | None = None) -> dict[str, A
         return {**gateway.project_capacity(c, pid), "acting_as": principal.project_id}
 
 
-@mcp.tool()
+@_tool
 def whoami(ctx: Context) -> dict[str, Any]:
     """Identify the tenant + privilege THIS token acts as — so you can confirm WHICH project the connector is
     bound to before you request or release anything. (MCP connectors are selected per host/app, not per
@@ -811,7 +842,7 @@ def whoami(ctx: Context) -> dict[str, Any]:
     return {"project_id": principal.project_id, "scope": principal.scope, "token_id": principal.token_id}
 
 
-@mcp.tool()
+@_tool
 def set_quota(ctx: Context, cpu_limit: float, mem_limit_mb: int, max_leases: int) -> dict[str, Any]:
     """Raise or lower YOUR project's quota within the envelope your operator set (the provision tier's
     self-service). cpu/mem/lease limits must each be > 0 and at most your project's ceiling; a dimension
@@ -834,7 +865,7 @@ def set_quota(ctx: Context, cpu_limit: float, mem_limit_mb: int, max_leases: int
         return r
 
 
-@mcp.tool()
+@_tool
 def request_template_download(
     ctx: Context, cluster_id: str, target_template_id: str, url: str, sha256: str, storage_id: str,
     size_gb: int, name: str | None = None, description: str | None = None,
@@ -875,7 +906,7 @@ def request_template_download(
         return r
 
 
-@mcp.tool()
+@_tool
 def list_nodes(ctx: Context) -> dict[str, Any]:
     """Inventory EVERY node at once (not just one by id): each node's cpu/mem used-vs-total, utilization
     %, live lease count, and its cluster (null = unassigned/capacity-only). Use this to survey the whole
@@ -889,7 +920,7 @@ def list_nodes(ctx: Context) -> dict[str, Any]:
         return {"acting_as": principal.project_id, "nodes": inventory.list_nodes(c)}
 
 
-@mcp.tool()
+@_tool
 def list_clusters(ctx: Context) -> dict[str, Any]:
     """Inventory EVERY cluster at once: per-cluster cpu/mem used-vs-total (summed across its nodes), node
     count, and live lease count. Use this to find a cluster with room before scheduling into it. Clusters
@@ -901,7 +932,7 @@ def list_clusters(ctx: Context) -> dict[str, Any]:
         return {"clusters": inventory.list_clusters(c)}
 
 
-@mcp.tool()
+@_tool
 def list_storage(ctx: Context) -> dict[str, Any]:
     """Inventory EVERY shared-storage pool at once: disk used-vs-total and active lease count per pool.
     Shared infrastructure. Returns {storage: [...]}. Requires a read-tier (or higher) token."""
@@ -912,7 +943,7 @@ def list_storage(ctx: Context) -> dict[str, Any]:
         return {"storage": inventory.list_storage(c)}
 
 
-@mcp.tool()
+@_tool
 def list_projects(ctx: Context) -> dict[str, Any]:
     """Inventory YOUR project (tenant): cpu/mem/lease quota vs live usage, plus your current
     admission-queue depth. Scoped to your token's project — a PROJECT-BOUND token never sees other tenants;
@@ -925,7 +956,7 @@ def list_projects(ctx: Context) -> dict[str, Any]:
         return {"projects": inventory.list_projects(c, project_id=principal.project_id)}
 
 
-@mcp.tool()
+@_tool
 def list_templates(ctx: Context) -> dict[str, Any]:
     """Inventory the OS-template images YOUR project may clone: each public image PLUS any private image an
     operator has granted to your project (id, cluster + vmid, optional name/description). Use it to see what
@@ -940,7 +971,7 @@ def list_templates(ctx: Context) -> dict[str, Any]:
         return {"templates": inventory.list_templates(c, project_id=principal.project_id)}
 
 
-@mcp.tool()
+@_tool
 def queue_view(ctx: Context, limit: int = 100) -> dict[str, Any]:
     """View YOUR project's admission queue: depth plus the oldest-first head of your waiting requests (up
     to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the
@@ -957,7 +988,7 @@ def queue_view(ctx: Context, limit: int = 100) -> dict[str, Any]:
         return inventory.queue_view(c, limit=limit, project_id=principal.project_id)
 
 
-@mcp.tool()
+@_tool
 def list_leases(ctx: Context, limit: int = 100) -> dict[str, Any]:
     """List YOUR project's ACTIVE leases — the ones currently HOLDING capacity (ADMITTED/PROVISIONING/
     ACTIVE/RELEASING), oldest-first (up to `limit`). Each entry carries the lease id, where it runs (node/
@@ -975,7 +1006,7 @@ def list_leases(ctx: Context, limit: int = 100) -> dict[str, Any]:
                 "leases": inventory.list_leases(c, limit=limit, project_id=principal.project_id)}
 
 
-@mcp.tool()
+@_tool
 def fleet_stats(ctx: Context) -> dict[str, Any]:
     """Fleet-wide admission health — shared infrastructure (like list_nodes), not per-tenant: the current
     admission-queue depth, the oldest waiting request's age, and admission-latency percentiles over the last
@@ -1027,7 +1058,7 @@ def register_operator_tools(server: FastMCP, *, enabled: bool) -> int:
     if not enabled:
         return 0
     for fn in _OPERATOR_TOOLS:
-        server.tool()(fn)
+        server.tool()(_enveloped(fn))
     return len(_OPERATOR_TOOLS)
 
 
@@ -1423,13 +1454,14 @@ def replicate_template(
         return r
 
 
-@mcp.tool()
+@_tool
 def replication_status(ctx: Context, replication_id: int) -> dict[str, Any]:
     """Status of a replication job: its state (REQUESTED → COPYING → CONVERTING → READY | FAILED), mechanism,
     attempts, any (pre-redacted) error, the target (cluster/storage), the declared size, `replication_enabled`
     (whether the data plane is advancing jobs yet), and `age_seconds`. A TENANT token sees ONLY jobs attributed
-    to its OWN project (another project's id returns found=false); an operator sees any. Returns the job dict or
-    {replication_id, found:false, reason}. Requires a read-tier (or higher) token."""
+    to its OWN project (another project's id returns exists=false); an operator sees any. Returns the job dict
+    (with ok and exists true) or {ok:false, replication_id, exists:false, reason}; `found` is the older name of
+    `exists`, kept one release. Requires a read-tier (or higher) token."""
     gate = _authorize(ctx, "replication_status")
     if isinstance(gate, dict):
         return gate
@@ -1462,10 +1494,11 @@ def cancel_replication(ctx: Context, replication_id: int) -> dict[str, Any]:
 def prune_replications(ctx: Context, older_than_days: int, cluster_id: str | None = None) -> dict[str, Any]:
     """OPERATOR only: retention for the replication job table — delete SETTLED TERMINAL jobs older than
     `older_than_days` (optionally scoped to one target cluster), so a decommissioned cluster's job history can't
-    FK-block it forever. OPT-IN — `older_than_days <= 0` is a no-op. An UNSETTLED terminal job (its transient
-    guest not provably gone) is RETAINED, never a silent teardown; terminal-lease waiter links are severed
-    first. Breadcrumbs survive in the audit trail, so the history is not lost — only the FK anchor. Returns
-    {pruned, reason}. Requires an OPERATOR-tier token (read/consume/provision get {"error":"forbidden_scope"})."""
+    FK-block it forever. A negative `older_than_days` is a no-op; 0 prunes every settled terminal job. An UNSETTLED
+    terminal job (its transient guest not provably gone) is RETAINED, never a silent teardown; terminal-lease
+    waiter links are severed first. Breadcrumbs survive in the audit trail, so the history is not lost — only the
+    FK anchor. Returns {pruned, reason}. Requires an OPERATOR-tier token (read/consume/provision get
+    {"error":"forbidden_scope"})."""
     gate = _authorize(ctx, "prune_replications")
     if isinstance(gate, dict):
         return gate

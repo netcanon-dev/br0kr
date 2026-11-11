@@ -432,17 +432,30 @@ def schedule_lease(
 def renew_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
     """Heartbeat a lease to push its TTL out — OR hold your place in the admission QUEUE (a PENDING
     lease's renewable spot, capped at its max-wait ceiling). ``renewed`` is False (with ``expires_at``
-    null) if the lease is no longer renewable — released/reaped, or a queued spot that timed out — in
-    which case the caller must stop work (or re-request); the broker has reclaimed it / dropped the spot."""
+    null and reason ``lease_not_live``) if the lease is no longer renewable — released/reaped, or a queued
+    spot past its wait ceiling — in which case the caller must stop work (or re-request); the broker has
+    reclaimed it / dropped the spot."""
     exp = lease.heartbeat(conn, lease_id)
-    return {"lease_id": lease_id, "renewed": exp is not None,
-            "expires_at": exp.isoformat() if exp is not None else None}
+    if exp is None:
+        return {"lease_id": lease_id, "renewed": False, "expires_at": None, "reason": reasons.LEASE_NOT_LIVE}
+    return {"lease_id": lease_id, "renewed": True, "expires_at": exp.isoformat()}
 
 
 def release_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
-    """Release a lease (normal completion). ``released`` is True if this call began
-    the release, False if it was already releasing/gone (idempotent)."""
-    return {"lease_id": lease_id, "released": lease.release(conn, lease_id)}
+    """Release a lease (normal completion). ``released`` is True if this call began the release. Otherwise it is
+    False with a reason (idempotent): ``lease_queued`` for a lease still waiting in the queue (release does not drop
+    a queued request: cancel_lease does), else ``lease_not_live`` (already releasing or ended)."""
+    if lease.release(conn, lease_id):
+        return {"lease_id": lease_id, "released": True}
+    # The release lost: the lease is queued, already on its way out, or it was promoted between that release and
+    # this read. A lease now live is released once more, so a promotion in the window can never leave a live lease
+    # the caller was told is gone.
+    state = lease.state_of(conn, lease_id)
+    if state == "PENDING":
+        return {"lease_id": lease_id, "released": False, "reason": reasons.LEASE_QUEUED}
+    if state in lease.LIVE_STATES and lease.release(conn, lease_id):
+        return {"lease_id": lease_id, "released": True}
+    return {"lease_id": lease_id, "released": False, "reason": reasons.LEASE_NOT_LIVE}
 
 
 def lease_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
@@ -469,12 +482,12 @@ def cancel_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
     A QUEUED (PENDING) request is dropped before it is promoted → REJECTED. If the request was already
     promoted (now a live lease), it is RELEASED instead (same intent: you no longer want it). Idempotent.
     Returns {lease_id, cancelled, outcome}: ``outcome`` is 'cancelled' (was queued), 'released' (was
-    live), or 'noop' (already terminal / unknown)."""
+    live), or 'noop' (already terminal / unknown, with reason ``lease_not_live``)."""
     if lease.cancel_pending(conn, lease_id):
         return {"lease_id": lease_id, "cancelled": True, "outcome": "cancelled"}
     if lease.release(conn, lease_id):
         return {"lease_id": lease_id, "cancelled": True, "outcome": "released"}
-    return {"lease_id": lease_id, "cancelled": False, "outcome": "noop"}
+    return {"lease_id": lease_id, "cancelled": False, "outcome": "noop", "reason": reasons.LEASE_NOT_LIVE}
 
 
 def queue_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:

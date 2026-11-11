@@ -45,12 +45,33 @@ def test_renew_lease_iso_formats_a_live_expiry(monkeypatch):
 
 
 def test_renew_lease_reports_a_lost_lease_as_not_renewed(monkeypatch):
-    """heartbeat returning None (lease no longer live) maps to renewed=False /
-    expires_at=None — the signal that tells an agent to stop work. Guards a None
-    leaking through as a truthy 'renewed'."""
+    """heartbeat returning None (lease no longer live) maps to renewed=False / expires_at=None with reason
+    lease_not_live — the signal that tells an agent to stop work. Guards a None leaking through as a truthy
+    'renewed', and a negative answer with no reason (review UX-03)."""
     monkeypatch.setattr(lease, "heartbeat", lambda c, lid: None)
     out = gateway.renew_lease(object(), 7)
-    assert out == {"lease_id": 7, "renewed": False, "expires_at": None}
+    assert out == {"lease_id": 7, "renewed": False, "expires_at": None, "reason": "lease_not_live"}
+
+
+def test_release_lease_says_why_it_did_not_release(monkeypatch):
+    """A release that began nothing says why: lease_queued for a lease still waiting in the queue (release does not
+    drop a queued request, cancel_lease does), lease_not_live for one already releasing or ended. Guards an agent
+    reading released=false on a queued lease as done, while its spot stays in line, and a lease promoted between the
+    losing release and the state read being reported gone while it is live: it is released once more (UX-03)."""
+    from br0kr import reasons
+    calls: dict[int, int] = {}
+
+    def release(_c, lid, reason="completed"):
+        calls[lid] = calls.get(lid, 0) + 1
+        return lid == 3 and calls[lid] == 2   # lease 3: queued at the first release, promoted by the second
+
+    monkeypatch.setattr(lease, "release", release)
+    monkeypatch.setattr(lease, "state_of", lambda c, lid: {1: "PENDING", 2: "RELEASED", 3: "ADMITTED"}[lid])
+    assert gateway.release_lease(object(), 1) == {"lease_id": 1, "released": False, "reason": reasons.LEASE_QUEUED}
+    assert gateway.release_lease(object(), 2) == {"lease_id": 2, "released": False,
+                                                  "reason": reasons.LEASE_NOT_LIVE}
+    assert gateway.release_lease(object(), 3) == {"lease_id": 3, "released": True}
+    assert calls == {1: 1, 2: 1, 3: 2}
 
 
 def test_release_lease_maps_won_flag(monkeypatch):
@@ -222,7 +243,8 @@ def test_cancel_lease_three_outcomes(monkeypatch):
     monkeypatch.setattr(lease, "release", lambda c, lid, reason="completed": lid == 2)
     assert gateway.cancel_lease(object(), 1) == {"lease_id": 1, "cancelled": True, "outcome": "cancelled"}
     assert gateway.cancel_lease(object(), 2) == {"lease_id": 2, "cancelled": True, "outcome": "released"}
-    assert gateway.cancel_lease(object(), 3) == {"lease_id": 3, "cancelled": False, "outcome": "noop"}
+    assert gateway.cancel_lease(object(), 3) == {"lease_id": 3, "cancelled": False, "outcome": "noop",
+                                                 "reason": "lease_not_live"}
 
 
 class _QSConn:

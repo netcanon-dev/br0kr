@@ -54,7 +54,8 @@ DATA_DISK_MALFORMED: Final = "data_disk_malformed"
 
 # ── Idempotency and the request surface ─────────────────────────────────────────────────────────────────────────
 IDEM_KEY_CONFLICT: Final = "idem_key_conflict"                # the idem_key was used for a different ask
-LEASE_NOT_LIVE: Final = "lease_not_live"                      # the idem_key's lease has already ended
+LEASE_NOT_LIVE: Final = "lease_not_live"                      # the idem_key's (or the named) lease has ended
+LEASE_QUEUED: Final = "lease_queued"                          # release_lease on a still-queued lease: cancel it
 RESERVED_IDEM_KEY: Final = "reserved_idem_key"                # an internal reservation namespace
 MULTI_DISK_DISABLED: Final = "multi_disk_disabled"            # data disks are off (operator setting)
 LOST_INSERT: Final = "lost_insert"                            # a racing insert of the same idem_key vanished; retry
@@ -79,6 +80,7 @@ UNKNOWN_TEMPLATE: Final = "unknown_template"
 UNKNOWN_TEMPLATE_INSTANCE: Final = "unknown_template_instance"
 UNKNOWN_LEASE: Final = "unknown_lease"
 UNKNOWN_BUILD: Final = "unknown_build"
+UNKNOWN_MIGRATION: Final = "unknown_migration"
 
 # ── The admission queue ─────────────────────────────────────────────────────────────────────────────────────────
 QUEUED: Final = "queued"                                      # parked; poll lease_status, heartbeat to hold the spot

@@ -138,6 +138,32 @@ Once connected the agent sees the tools and calls them like any other MCP tool. 
 The MCP layer is pure request/response; admission, per-VMID fencing, and the double-allocation floor all happen
 *below* it, unchanged by which client connected. Every tool, its tier and its parameters: [api.md](../api.md).
 
+### Reading a result
+
+Every tool answers with a JSON object that carries `ok`:
+
+- `ok: true`: the call did what was asked. A queued request is ok too (`queued: true`, `reason: "queued"`,
+  plus `queue_position` and `next`): it is in line.
+- `ok: false`: it did not, and `reason` says why, as a snake_case code. Every code, with what to do about it, is in
+  [reason-codes.md](../reference/reason-codes.md).
+
+Branch on `ok`, and read `reason` as a failure only when `ok` is false: on a true answer it can carry context (a
+queued request's `queued`, an admitted replay's `pin_refused_on_replay`, a migration's own reason). `ok` says whether
+this call made the change, so an idempotent repeat is false: a second `release_lease` or `cancel_lease` answers
+`ok: false, reason: lease_not_live`, which means the lease is already gone and there is nothing left to do. The
+tool's own keys are still there (`admitted`, `renewed`, `released`, `exists`, ...), so a client written against
+them keeps working. A refusal from the authorisation layer (`no_token`, `forbidden_scope`, `lease_forbidden`,
+...) still carries its `error` key as well, with the same code in `reason`.
+
+The bulk tools (`renew_leases`, `release_leases`, `cancel_leases`, `lease_statuses`) answer `ok: true` when the
+batch ran; each item in `results` carries its own `ok` and, when false, its `reason`.
+
+Two failures do not come back as a JSON answer: a call whose arguments do not match the tool's schema, and a call
+that fails inside the broker. Both arrive as an MCP error result (`isError: true`) with a message. Treat the first as
+a bug in the call, and the second like `internal_error`: retry later, and tell the operator if it persists.
+
+`replication_status` answers `exists` like every other lookup; `found`, its older name, stays for one release.
+
 ## 6 · From a CI job, with no MCP client
 
 A CI job borrows a VM the same way an agent does, through the same gateway, tiers and project binding, but it has

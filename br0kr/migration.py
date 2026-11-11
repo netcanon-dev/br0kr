@@ -576,7 +576,7 @@ def cancel_migration(conn: psycopg.Connection[Any], migration_id: int) -> dict[s
     over-commit. Returns {migration_id, cancelled, state, reason}; commits its own steps."""
     mig = _refresh(conn, migration_id)
     if mig is None:
-        return {"migration_id": migration_id, "cancelled": False, "state": None, "reason": "unknown_migration"}
+        return {"migration_id": migration_id, "cancelled": False, "state": None, "reason": reasons.UNKNOWN_MIGRATION}
     if mig.state in ("DONE", "ABORTED"):
         return {"migration_id": migration_id, "cancelled": False, "state": mig.state,
                 "reason": "already_terminal"}

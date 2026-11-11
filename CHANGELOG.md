@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **One way to tell whether any tool call worked: `ok`, and a `reason` when false.** Agents met five failure
+  shapes; `br0kr/envelope.py` adds both keys to every MCP answer, keeping the old ones (`test_envelope.py`, UX-03).
 - **Every reason code an agent can receive, with what to do: `docs/reference/reason-codes.md`.** ~15 were written
   down nowhere; a test keeps the table equal to `br0kr/reasons.py`. Queued answers add `queue_position` (UX-04).
 - **A day-2 runbook and scheduled ledger backups.** Upgrade, rollback, rotation and decommission lived in memory;
@@ -34,11 +36,17 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **renew_lease, release_lease and cancel_lease say why they did nothing.** They answered a bare false;
+  now `lease_not_live`, or `lease_queued` when releasing a still-queued lease (cancel it) (UX-03).
 - **The request path's refusal and error codes are named constants in `br0kr/reasons.py`.** A typo could ship a
   new, undocumented reason, and the scheduler re-listed admission's sets by hand; `test_reasons.py` pins it (CODE-01).
 - **Admission's race-critical core is written once (`br0kr/admission.py`).** `admit()` and `promote_pinned()` carried
   copies that had to change in lockstep; both now run `_lock_scopes` + `_locked_fit`, and `admit()` logs every
   refusal. Harnesses unchanged and GO; a unit test pins the shared path (review ARCH-01).
+
+### Deprecated
+- **`replication_status`'s `found`: read `exists`, which every other lookup uses.** `found` stays for one
+  more release, then goes (review UX-03).
 
 ### Fixed
 - **The documented sync-standby alert paged forever on an async ledger.** It keyed on `standbys_sync == 0`, always
