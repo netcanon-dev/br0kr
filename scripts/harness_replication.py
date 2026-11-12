@@ -185,7 +185,7 @@ def main() -> int:
         settings.set_settings(c, {"replication_mechanisms": None})   # clear back to the default
         c.commit()
 
-    # ── A2: PLANNER correctness (Fable) — quantify target-reach over candidates + exclude a quarantined source ─
+    # ── A2: PLANNER correctness — quantify target-reach over candidates + exclude a quarantined source ─
     with connect() as c:
         cur = c.cursor()
         # NbPool bound clA, reachable from nB only.
@@ -275,7 +275,7 @@ def main() -> int:
     check("prune_negative_horizon_is_noop", noop == {"pruned": 0, "reason": None} and still == 1, f"{noop}")
     with connect() as c:
         # the debian12 job was cancelled moments ago (updated_at≈now, settled) — prune(0) must remove it SAME
-        # SESSION, proving the decommission recipe no longer stalls a day on the retention floor (Fable).
+        # SESSION, proving the decommission recipe no longer stalls a day on the retention floor.
         pruned = replication.prune_replications(c, 0)
         c.commit()
         gone = c.execute("SELECT count(*) FROM template_replication WHERE id=%s", (rid,)).fetchone()[0]
@@ -302,7 +302,7 @@ def main() -> int:
     check("delete_cluster_refuses_replications", dr.get("reason") == "cluster_has_replications",
           f"{dr} (fresh_req={fresh.get('reason')})")
 
-    # ── I: FK INTEGRITY (Fable HIGH/MED) — the 0034 FKs must never regress an existing delete verb ─────
+    # ── I: FK INTEGRITY — the 0034 FKs must never regress an existing delete verb ─────
     with connect() as c:
         cur = c.cursor()
         reset(cur)

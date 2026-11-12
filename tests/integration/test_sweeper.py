@@ -312,7 +312,7 @@ def test_below_floor_all_absent_still_sweeps(states):
     """Under MASS_ABSENT_FLOOR guests with NO rollback signal (a POPULATED ledger whose watermark is far above
     these ids — so they are all below-watermark and none is at/above it), an all-absent scan is too small to be
     a reliable misconfig signal, so the breaker stays out and the below-watermark orphans are reclaimed. NOTE
-    (review S20/Fable F3): an actually-EMPTY ledger reads watermark 0, so every absent id is at/above it → a
+    (review S20): an actually-EMPTY ledger reads watermark 0, so every absent id is at/above it → a
     rollback signal → all spared (reclaim then needs allow_mass_absent); this test is the populated-ledger path."""
     states.watermark = 10**9   # a populated ledger; these low ids are below-watermark with no rollback signal
     d = _FakeDriver([(101, 1), (102, 2)])   # 2 < MASS_ABSENT_FLOOR (3), all absent, both below watermark
@@ -353,7 +353,7 @@ def test_below_watermark_absent_is_destroyed_only_without_a_rollback_signal(stat
 
 
 def test_a_rollback_signal_spares_below_watermark_absents_too(states):
-    """THE Fable F1 FIX: lease id order is NOT commit order (concurrent admissions in different scopes commit
+    """Lease id order is NOT commit order (concurrent admissions in different scopes commit
     out of id order), so a below-watermark absent can be a LIVE guest whose lower-id lease committed AFTER a
     restore cutoff. So once ANY above-watermark absent is present (an unambiguous rollback/lag signal), the
     sweep spares EVERY absent guest that pass — the below-watermark ones too, not just the above-watermark ones.

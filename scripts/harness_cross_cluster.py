@@ -67,7 +67,7 @@ def seed(cur: psycopg.Cursor) -> dict[str, int]:
     cur.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id,pve_node) VALUES ('nA',100,100000,'clA','nA')")
     # nB is sized LARGER than nA so 'spread' ranks it FIRST (most-free-first) — scenario G needs the node with
     # NO alpine copy (nB) tried BEFORE the alpine-bearing node (nA) to exercise promote_scheduled's per-candidate
-    # loop (the promote twin of schedule() that Fable found short-circuiting on the first no_reachable_instance).
+    # loop (the promote twin of schedule() that short-circuited on the first no_reachable_instance).
     cur.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id,pve_node) VALUES ('nB',200,200000,'clB','nB')")
     cur.execute("INSERT INTO storage(id,total_gb,cluster_id,pve_name) VALUES "
                 "('poolA',500,'clA','poolA'),('poolB',500,'clB','poolB')")
@@ -178,8 +178,8 @@ def main() -> int:
           _scalar("SELECT template_instance_id FROM lease WHERE id=%s", (eq.lease_id,)) == ids["deb_clB"])
 
     # ── G: PROMOTE_SCHEDULED cross-cluster — a queued ANY-cluster templated lease whose FIRST-ranked candidate
-    #       is a replica-LESS node must LOOP to the replica node (the promote twin of schedule(), the path Fable
-    #       found short-circuiting). alpine has an instance ONLY in clA (nA); nB (clB, sized larger → ranks first
+    #       is a replica-LESS node must LOOP to the replica node (the promote twin of schedule(), the path that
+    #       short-circuited). alpine has an instance ONLY in clA (nA); nB (clB, sized larger → ranks first
     #       under 'spread') holds NO alpine copy. promote_scheduled must skip nB (no_reachable) and land on nA.
     with connect() as c:
         gq = admission.enqueue(c, idem_key="g-sched", node_id=None, cluster_id=None,

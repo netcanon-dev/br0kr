@@ -1151,8 +1151,8 @@ def test_settings_edit_and_reload_are_token_gated_and_reach_the_verb(monkeypatch
 
 def test_force_fail_replication_action_settles_unconditionally_after_commit(monkeypatch):
     """dashboard._force_fail_replication_action commits the CAS THEN frees the byte reservation via
-    settle_forced_reservation UNCONDITIONALLY (idempotent — the repair path on an already_terminal retry, Fable
-    LOW #04). Guards the settle being dropped from the surface (regressing the ~4h dangling-reservation leak
+    settle_forced_reservation UNCONDITIONALLY (idempotent — the repair path on an already_terminal retry).
+    Guards the settle being dropped from the surface (regressing the ~4h dangling-reservation leak
     that refuses a re-request target_storage_insufficient) and the CAS-then-settle ordering."""
     order: list[str] = []
 
@@ -1168,8 +1168,8 @@ def test_force_fail_replication_action_settles_unconditionally_after_commit(monk
     assert out["forced"] is True
     assert order == ["force", "commit", "settle"]   # settle AFTER the durable CAS, and always (the repair path)
     order.clear()
-    # the DISCRIMINATING case (Fable #09): on an already_terminal retry the settle STILL fires — the crash-window
-    # repair path. Reverting to the round-1 `if r.get("forced"):` guard would drop this and keep the first case green.
+    # the DISCRIMINATING case: on an already_terminal retry the settle STILL fires — the crash-window
+    # repair path. Reverting to the earlier `if r.get("forced"):` guard would drop this and keep the first case green.
     monkeypatch.setattr(dashboard.replication, "force_fail_replication",
                         lambda c, rid, reason: order.append("force") or {"replication_id": rid, "forced": False,
                                                                          "reason": "already_terminal"})

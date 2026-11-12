@@ -171,7 +171,7 @@ def orphan_sweep(
         # (no lease row) whose id is AT/ABOVE the watermark references a lease NEWER than the ledger has — the
         # UNAMBIGUOUS signature of a restored-backup / promoted-lagging-standby ledger that is BEHIND the real
         # fleet. When ANY such guest is seen, the ledger is stale FLEET-WIDE, so we spare EVERY absent guest this
-        # pass — including the ones BELOW the watermark. Why below too (review S20 / Fable F1): lease id order is
+        # pass — including the ones BELOW the watermark. Why below too (review S20): lease id order is
         # NOT commit order (admissions in different scopes hold different advisory locks and commit concurrently),
         # so a consistent restore/standby cutoff — which lands at a COMMIT-order (LSN) point — is NOT a clean
         # id-prefix; a lower-id lease can commit AFTER the cutoff, leaving a LIVE guest whose id is below the

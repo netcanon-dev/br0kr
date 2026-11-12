@@ -306,7 +306,7 @@ def _is_disk_value(value: Any) -> bool:
     (a CD-ROM/cloud-init drive is not the guest's root disk), so both are excluded from boot-disk detection.
     The cloud-init check looks at the VOLUME name only (the part after the storage id, e.g. ``vm-107-cloudinit``
     in ``FastStorage:vm-107-cloudinit``), NOT the whole value — so a real disk on a storage that merely happens
-    to be named ``cloudinit-pool`` is not falsely excluded (Fable F4)."""
+    to be named ``cloudinit-pool`` is not falsely excluded."""
     if not isinstance(value, str) or not value:
         return False
     low = value.lower()
@@ -460,7 +460,7 @@ def clone_orphan_decision(exists: bool, tags: str | None) -> str:
       • 'repl_fence_appeared' — a guest carrying a `br0kr-repl-<id>` replication fence lives here; REFUSE — a
                            replication COPY (in-flight OR FAILED-with-live-guest) is NEVER destroyed by this
                            generic path, which relies on a single pre-stop ledger read; its teardown is the §6.6
-                           repl-orphan reclaim gated on POSITIVE job-FAILED evidence (Fable HIGH — a repl copy is
+                           repl-orphan reclaim gated on POSITIVE job-FAILED evidence (a repl copy is
                            the one broker guest class whose vmid reuse this last-line recheck couldn't detect).
       • 'not_clone'      — a guest with NO br0kr template marker; not ours — REFUSE (never touch a foreign
                            or hand-made VM).
@@ -797,7 +797,7 @@ class Pve:
                         "%sGB; leaving the template size", dev, vmid, req_gb, extra={"vmid": vmid})
             return None
         # FLOOR the current size for the grow decision (parse_disk_size_gb ceils, which would skip a legit grow
-        # of a fractional-GB template — Fable F1). Resize fires only when req_gb > floor(actual) >= would-be a
+        # of a fractional-GB template). Resize fires only when req_gb > floor(actual) >= would-be a
         # genuine grow, so a shrink is never attempted; a request that already fits (req_gb <= floor) is a no-op.
         current = math.floor(raw)
         if req_gb <= current:
@@ -1307,7 +1307,7 @@ class Pve:
         lease's / another job's, or not our clone — refuse, never clobber a foreign guest). Idempotent: a guest
         already carrying THIS job's fence re-stamps the same tags. Synchronous; raises on a transient API error.
 
-        POSITIVE-IDENTITY adoption (Fable HIGH — adopt-by-marker-alone was unsafe): when the guest does NOT
+        POSITIVE-IDENTITY adoption (adopt-by-marker-alone was unsafe): when the guest does NOT
         already carry OUR fence (an ADOPT of an unfenced clone), it is stamped ONLY if it carries the template
         marker AND is template=0 AND — when `expected_name` is given — its name equals the job's deterministic
         `_replica_name`. Without this, a vmid our job stamped but never cloned onto (a crash before clone_start,
@@ -1347,7 +1347,7 @@ class Pve:
         set BEFORE the marker; the fence KEPT so a crash before the instance is READY leaves a reclaimable copy —
         finalize_template strips it once READY). Mirrors make_template's convert-then-tag ordering.
 
-        CONVERGENT (Fable MEDIUM): reads the config ONCE and, if the guest is ALREADY template=1 carrying this
+        CONVERGENT: reads the config ONCE and, if the guest is ALREADY template=1 carrying this
         job's fence (a resume after the /template task succeeded but before _mark_ready, or a convert task that
         outran its wait budget), re-asserts the tags idempotently and reports 'OK' — it never re-POSTs /template,
         which PVE rejects on an already-converted template (that raise would wedge the job until the stale reclaim

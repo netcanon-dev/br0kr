@@ -284,7 +284,7 @@ def _audit_refused(
     """BEST-EFFORT record of a FINAL admission refusal (outcome='refused'). Callers fire this on a response
     that is neither admitted nor queued — the gateway hard-refusal / queue_full, AND the pre-gateway
     governance short-circuit (template_forbidden), which the dashboard's act-as path already records, so the
-    two surfaces stay symmetric (Fable review). A queued-then-promoted ask (queued=True) is never audited as
+    two surfaces stay symmetric. A queued-then-promoted ask (queued=True) is never audited as
     refused (promotion happens later, in the daemon). Coalesced per (surface, action, reason, template_id,
     project_id) on the fast-fail denial connector; NEVER breaks the tool response. Attributed to the caller."""
     if not reason:   # a refusal with no reason code is not a classifiable refusal — skip
@@ -1686,7 +1686,7 @@ def force_fail_replication(ctx: Context, replication_id: int, reason: str | None
         c.commit()   # force_fail_replication does NOT self-commit — commit the CAS BEFORE the settle + audit
         # Free the held byte reservation UNCONDITIONALLY after the commit — idempotent, and on the already_terminal
         # retry this is the REPAIR path for a crash between a PRIOR CAS commit and its settle (which would else
-        # leave the reservation ADMITTED until TTL, refusing a re-request target_storage_insufficient; Fable LOW).
+        # leave the reservation ADMITTED until TTL, refusing a re-request target_storage_insufficient).
         # A no-op on an unknown id / already-settled reservation.
         replication.settle_forced_reservation(c, replication_id)
         if r.get("forced"):   # audit only a REAL force-fail (skip unknown / already-terminal no-ops)

@@ -316,7 +316,7 @@ def project_template_disk_used(conn: psycopg.Connection[Any], project_id: str) -
     non-terminal set the instant mark_ready inserts the owned template (one atomic CTE); a replication job leaves
     the non-terminal set AND its twin instance flips REPLICATING→READY in ONE atomic CTE (`_mark_ready`), so the
     in-flight-job term hands the charge to the READY-instance term with no gap and no overlap — a landing replica
-    can never be un-counted mid-flight (Fable MEDIUM). The replica charge survives the byte-RESERVATION settle
+    can never be un-counted mid-flight. The replica charge survives the byte-RESERVATION settle
     (the in-flight br0kr-repl reservation is project_id=NULL, quota-exempt) — which is what kills the free-fan-out
     attack the moment tenant self-service can request replicas. This sum MUST stay byte-identical to
     inventory._LIST_PROJECTS_TMPL's template_disk_used (the gate and the dashboard must agree). Read under the

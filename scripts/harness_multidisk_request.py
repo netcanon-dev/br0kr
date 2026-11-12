@@ -139,7 +139,7 @@ def main() -> int:
     check("admit writes the lease_data_disk rows (the ask, pre-attach)",
           rows == [(1, "poolB", 30, None, None), (2, "poolC", 20, None, None)], f"rows={rows}")
 
-    # ── MID-FLIGHT KNOB FLIP: an admitted lease's idempotent retry must SURVIVE a knob-OFF (Fable MED) ──
+    # ── MID-FLIGHT KNOB FLIP: an admitted lease's idempotent retry must SURVIVE a knob-OFF ──
     # The knob is advertised as "instantly revertible" — an operator flips it OFF exactly when in-flight asks are
     # retrying. A retry of an ALREADY-admitted multi-disk lease must REPLAY (return its lease), not be refused
     # multi_disk_disabled — else the live lease is orphaned (client can't address it, daemon keeps actuating).

@@ -215,10 +215,10 @@ def test_prune_noop_below_zero_but_zero_prunes_all_settled_terminal():
 
 def test_prune_severs_the_lease_fk_before_deleting_only_settled_terminal():
     """prune_replications must (0) FAST-FAIL parked waiters behind the to-be-pruned FAILED jobs (via
-    sweep_waiters, else the sever silently disarms the §5.4 fast-fail; Fable LOW), then (1) sever any REMAINING
+    sweep_waiters, else the sever silently disarms the §5.4 fast-fail), then (1) sever any REMAINING
     terminal-lease awaiting_replication_id link into the to-be-pruned set (the NO ACTION FK would else abort the
     delete), then (2) DELETE only SETTLED TERMINAL jobs past the horizon (READY/FAILED AND guest_settled_at NOT
-    NULL) whose replica INSTANCE is no longer live (Fable MED) — an unsettled job (a live fence) or a live replica
+    NULL) whose replica INSTANCE is no longer live — an unsettled job (a live fence) or a live replica
     is never deleted. Guards a reorder that FK-aborts, a delete that orphans a fence, or an un-charge of a live replica."""
     rc = _ScriptConn(rowcount=2)
     out = replication.prune_replications(rc, 90, cluster_id="clA")

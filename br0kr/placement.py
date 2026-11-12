@@ -913,7 +913,7 @@ def verify_declarations(
     NEVER WIDENS (never clears a quarantine, never marks a pair verified — `verified_at` is runtime post-clone
     evidence only), never inserts a declaration; narrowing is verify's ONLY write.
 
-    TWO PASSES so the write phase can't leave a lying/half report (rev — Fable review):
+    TWO PASSES so the write phase can't leave a lying/half report:
       1. GATHER every served node's PVE storage list FIRST. If ANY node is ACL-denied (ACL_FORBIDDEN), return
          `{ok:False, reason:'acl_insufficient', …}` NOW, before a single write — so the contract 'quarantines
          nothing' holds even with per-cluster tokens where one cluster can audit and another can't. A node that

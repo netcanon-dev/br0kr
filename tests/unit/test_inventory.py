@@ -165,16 +165,16 @@ def test_project_template_disk_used_charges_attributed_replica_instances():
     """template_disk_used must add Σ READY template_instance.size_gb attributed to the project via a replication
     job (template_replication.project_id → template_instance.replication_id) alongside owned templates + in-flight
     builds — the PR-5 §5.3 read-side byte-charge that survives the reservation settle (kills the free-fan-out
-    attack; Fable MED). It MUST stay byte-identical to build._template_disk_used (the gate the dashboard mirrors).
+    attack). It MUST stay byte-identical to build._template_disk_used (the gate the dashboard mirrors).
     Drift-guards both SQL sources against losing the replica term."""
     from br0kr import build
     for sql in (inventory._LIST_PROJECTS_TMPL, ):
         assert "JOIN template_replication tr ON tr.id = ti.replication_id" in sql
         assert "tr.project_id = p.id" in sql and "ti.instance_state = 'READY'" in sql
         # the IN-FLIGHT (non-terminal) replication-JOB reserve, parity with builds — a landing replica can't be
-        # un-counted between REPLICATING and READY (Fable MED #19).
+        # un-counted between REPLICATING and READY.
         assert "sum(size_gb) FROM template_replication" in sql and "job_state NOT IN ('READY','FAILED')" in sql
-    # the POOL-side used_gb term (Fable #33 — was unguarded): READY template_instance bytes floor the pool, and
+    # the POOL-side used_gb term (was unguarded): READY template_instance bytes floor the pool, and
     # this MUST mirror admission._STORAGE_AVAIL so the dashboard and admit() agree on headroom.
     assert ("sum(ti.size_gb) FROM template_instance ti" in inventory._LIST_STORAGE
             and "ti.instance_state = 'READY'" in inventory._LIST_STORAGE)

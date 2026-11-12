@@ -730,7 +730,7 @@ def test_build_template_download_timeout_is_left_non_terminal(monkeypatch, build
 
 
 def test_build_template_survives_a_download_task_persist_failure(monkeypatch, build_ledger):
-    """0045 (Fable-review fix, MEDIUM-2): persisting the download task handle is PURE reap-hygiene and must NEVER
+    """0045: persisting the download task handle is PURE reap-hygiene and must NEVER
     fail the build. If build.set_download_task RAISES (a transient DB error, or a ForeignKeyViolation when the
     build node's row was deleted between the pick and the stamp), build_template SWALLOWS it and proceeds — it
     does NOT propagate to the daemon's build catch-all, which would mark the build FAILED while the server-side

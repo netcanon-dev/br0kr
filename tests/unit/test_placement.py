@@ -424,7 +424,7 @@ def test_recheck_severed_bound_instance_is_not_a_usable_seed():
 def test_recheck_genuine_unbound_seed_on_single_node_still_ok():
     """A GENUINE unbound seed (node_id AND storage_id BOTH NULL) in a single-node cluster stays usable — the
     seed-disjunct narrowing excludes only SEVERED bound instances (node NULL + storage SET), never a real seed.
-    Guards the round-3 narrowing over-refusing the live pre-bind seed shape (the .232 0032 backfill topology)."""
+    Guards a narrowing over-refusing the live pre-bind seed shape (the topology the 0032 backfill produces)."""
     cur = _Cur(instance=(9900, None, None, "READY", "c1", None), node=("c1",), count=(1,), reach=(1,))
     dec = placement.recheck_instance(cur, instance_id=1, node_id="n1", ask_storage_id=None, full_clone=True)
     assert dec.ok and dec.clone_storage_id is None
@@ -827,7 +827,7 @@ def test_verify_declarations_matches_on_effective_pve_name_not_the_storage_id():
 
 
 def test_verify_declarations_acl_on_any_node_aborts_before_any_write():
-    """Two-pass all-or-nothing (Fable review): with per-cluster tokens one node can be ACL-denied while
+    """Two-pass all-or-nothing: with per-cluster tokens one node can be ACL-denied while
     another has a quarantine-worthy pair. verify_declarations GATHERS every node's listing FIRST, so an
     ACL_FORBIDDEN on ANY node returns acl_insufficient BEFORE the reconcile pass — the earlier node's disabled
     pair is NEVER quarantined, honouring the 'quarantines nothing' contract. Guards a committed quarantine
@@ -857,7 +857,7 @@ def test_verify_declarations_skips_a_transiently_unreachable_node_without_raisin
 
 
 def test_verify_declarations_commits_the_quarantine_before_the_audit():
-    """The disabled-pool quarantine is COMMITTED before the best-effort audit row (Fable review: on the MCP
+    """The disabled-pool quarantine is COMMITTED before the best-effort audit row (on the MCP
     non-autocommit conn, audit.record ROLLS BACK on any error, which would wipe an uncommitted quarantine). So
     a commit must fall between quarantine_pair's INSERT and the audit INSERT. Guards the durability of the
     safety write against a swallowed audit failure."""
@@ -1150,9 +1150,9 @@ def test_discover_reachability_makes_no_bridge_suggestion_without_a_declared_nam
 def test_discover_reachability_quarantined_declaration_is_not_a_basis_and_still_excludes_its_node():
     """A QUARANTINED network_node mapping is known-broken, so it is NEVER the name basis for a suggestion — AND the
     node holding a quarantined row is still EXCLUDED from receiving one (it has a row → a re-point, not a widen).
-    NON-VACUOUS by construction (Fable-review fix): a LIVE basis exists (n3 declares lan=vmbr0 un-quarantined +
-    present), so if the row-holder exclusion regressed to gate on `quar_at is None` (the mutation the reviewer
-    named), n1 would ALSO be suggested — this test would then fail. So BOTH branches are load-bearing: the emitted
+    NON-VACUOUS by construction: a LIVE basis exists (n3 declares lan=vmbr0 un-quarantined +
+    present), so if the row-holder exclusion regressed to gate on `quar_at is None` (the mutation this test
+    kills), n1 would ALSO be suggested — this test would then fail. So BOTH branches are load-bearing: the emitted
     suggestion cites ONLY n3 (n1's quarantined mapping is not evidence) and fires ONLY for the rowless n2."""
     def _br(iface):
         return {"iface": iface, "type": "bridge", "bridge_vlan_aware": 1}
@@ -1170,7 +1170,7 @@ def test_discover_reachability_quarantined_declaration_is_not_a_basis_and_still_
 
 
 def test_discover_reachability_absent_declared_bridge_is_not_a_name_basis():
-    """Fable-review fix (MEDIUM): the name basis is restricted to a declaration whose bridge PVE actually PRESENTS.
+    """The name basis is restricted to a declaration whose bridge PVE actually PRESENTS.
     An un-quarantined declaration whose bridge PVE OMITS this run is `declared_missing_bridge` (strong ambiguous:
     false evidence PVE contradicts the mapping), so it must NOT seed a suggestion nor be cited as evidence — the
     same standard the quarantine exclusion applies. n1 declares lan=vmbr0 but presents only vmbr1 (vmbr0 absent);
@@ -1187,7 +1187,7 @@ def test_discover_reachability_absent_declared_bridge_is_not_a_name_basis():
 
 
 def test_discover_reachability_flags_a_cross_cluster_name_coincidence():
-    """Fable-review fix (MEDIUM): `logical_network` is fleet-global (0039), so a fleet-wide (cluster_id=None) run —
+    """`logical_network` is fleet-global (0039), so a fleet-wide (cluster_id=None) run —
     the MCP verb's default — can build a suggestion whose evidence is in a DIFFERENT cluster than the suggestee.
     Cross-cluster same-name is the WEAKEST coincidence (vmbr0 is the install default everywhere), so the entry is
     flagged `cross_cluster:true` for the operator to weigh. Guards presenting a cross-cluster guess at the same

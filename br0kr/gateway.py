@@ -127,7 +127,7 @@ def _multi_disk_refused(conn: psycopg.Connection[Any], idem_key: str,
     before any admission lock/debit), while an EMPTY ask never even reads the knob (the single-disk path is
     byte-identical).
 
-    The idem-key existence carve-out is LOAD-BEARING (Fable review): the knob is advertised as "instantly
+    The idem-key existence carve-out is LOAD-BEARING: the knob is advertised as "instantly
     revertible", i.e. an operator flips it OFF precisely when a bad data-disk provision is misbehaving — exactly
     when in-flight asks are RETRYING. If the gate refused a retry of an ALREADY-admitted/queued multi-disk lease,
     the client would get `multi_disk_disabled` instead of its idempotent replay, never learn the lease_id, and
@@ -764,7 +764,7 @@ def request_replication(
 
     `project_id` attributes the job to a tenant — a non-terminal job's DECLARED `size_gb` is charged LIVE against
     the project's `template_disk_used` (build.project_template_disk_used), so a landing replica can't be
-    un-counted mid-flight (Fable MEDIUM) — and, when set, applies the SAME per-project image-governance gate the
+    un-counted mid-flight — and, when set, applies the SAME per-project image-governance gate the
     lease path applies (`auth.template_allowed`) so a GUI/act-as replicate cannot bypass governance for the chosen
     project; None = an operator replication (governance-exempt, quota-exempt). This operator-attributed path does
     NOT itself enforce the `max_template_disk_gb` CEILING (the byte reservation protects the physical pool via

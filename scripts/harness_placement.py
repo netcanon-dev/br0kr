@@ -27,27 +27,27 @@ and that a migration reservation is UNAFFECTED by the gate. Zero Proxmox, pure l
      with it ON a SHARED-pool instance on n2 admits the n1 lease (stamped, not re-picked, clone_storage='omv'
      so the assertion is armed); and even ON, a NODE-LOCAL pool on n2 stays unusable from n1 (the storage-reach
      clause keeps the widening fail-closed).
-  J. PICK ORDER (Fable #2) — a node_id-NULL unbound seed must NOT outrank a node-LOCAL BOUND instance (the old
+  J. PICK ORDER — a node_id-NULL unbound seed must NOT outrank a node-LOCAL BOUND instance (the old
      ORDER BY `(node_id = node) DESC` sorted the NULL-node seed NULLS-FIRST, i.e. ABOVE the bound row): the bound
      instance is stamped (clone_storage non-NULL, arming the post-clone assertion), not the seed.
-  K. XNODE + DELETED HOST (Fable #3) — a node_id-NULL instance (host deleted, node_id ON DELETE SET NULL) is NOT
+  K. XNODE + DELETED HOST — a node_id-NULL instance (host deleted, node_id ON DELETE SET NULL) is NOT
      admitted cross-node: the pick's `node_id IS NOT NULL` guard on the xnode disjunct keeps admit in EXACT
      lockstep with recheck_instance (which HOLDS it), so no grant-then-kill drift → refuse no_reachable_instance.
-  L. XNODE SOURCE REACH (Fable #5) — a cross-node FULL clone whose ask pool reaches the PLACEMENT node but NOT
+  L. XNODE SOURCE REACH — a cross-node FULL clone whose ask pool reaches the PLACEMENT node but NOT
      the SOURCE node refuses storage_unreachable (the clone executes on the source; reach must hold there too).
-  M. XNODE GOLDEN-DISK REACH (Fable re-verify SQL-2) — even a cross-node clone with NO ask pool READS the golden
+  M. XNODE GOLDEN-DISK REACH — even a cross-node clone with NO ask pool READS the golden
      disk on the source, so a quarantined (inst_storage, source) home pair refuses storage_unreachable (the pick
      only proved reach to the PLACEMENT node).
-  N. SET_NODE REPOINT GUARD (Fable re-verify L1) — set_node refuses `node_has_instances` on a cluster REPOINT
+  N. SET_NODE REPOINT GUARD — set_node refuses `node_has_instances` on a cluster REPOINT
      while the node hosts live template_instance rows (a capacity edit that leaves the cluster unchanged is
      allowed), closing the drift the cross-node gate would otherwise trust.
-  O. GATE-SIDE SOURCE-CLUSTER COHERENCE (Fable re-verify round-3) — a cross-node instance whose SOURCE node has
+  O. GATE-SIDE SOURCE-CLUSTER COHERENCE — a cross-node instance whose SOURCE node has
      drifted to another cluster (by ANY path — set_node guards the common one, but delete+recreate, a replica
      claimed into a since-repointed node, or a race could still produce it) is refused no_reachable_instance by
      the pick's EXISTS clause, so the daemon never POSTs the clone to the wrong cluster (grant-then-kill).
-  P. DELETE_NODE INSTANCE GUARD (Fable re-verify round-3) — delete_node refuses `node_has_instances` (EVEN under
+  P. DELETE_NODE INSTANCE GUARD — delete_node refuses `node_has_instances` (EVEN under
      force) while the node hosts a live instance, closing the delete+recreate workaround to set_node's guard.
-  Q. SEVERED-BOUND INSTANCE IS NOT A SEED (Fable re-verify round-3) — a READY instance with node_id NULL but
+  Q. SEVERED-BOUND INSTANCE IS NOT A SEED — a READY instance with node_id NULL but
      storage_id SET (a bound instance whose host was deleted) is refused no_reachable_instance: the seed disjunct
      now requires storage_id NULL too, so a severed instance can't masquerade as an unbound seed (its config
      lives on the departed host). Closes pre-existing severances + the delete race at the gate.
@@ -333,7 +333,7 @@ def main() -> int:
         check("I_cross_node_on_excludes_node_local_pool",
               not safe.admitted and safe.reason == placement.NO_REACHABLE_INSTANCE, f"reason={safe.reason}")
 
-    # ── J (Fable #2): a node_id-NULL unbound seed must NOT outrank a node-LOCAL BOUND instance ──
+    # ── J: a node_id-NULL unbound seed must NOT outrank a node-LOCAL BOUND instance ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -359,7 +359,7 @@ def main() -> int:
               adm.admitted and st == (bound_id, "fast"),
               f"admitted={adm.admitted} stamps={st} bound_id={bound_id}")
 
-    # ── K (Fable #3): a deleted-host instance (node_id NULL) is NOT admitted cross-node — admit/recheck lockstep ──
+    # ── K: a deleted-host instance (node_id NULL) is NOT admitted cross-node — admit/recheck lockstep ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -381,7 +381,7 @@ def main() -> int:
         check("K_deleted_host_instance_refused_cross_node",
               not drift.admitted and drift.reason == placement.NO_REACHABLE_INSTANCE, f"reason={drift.reason}")
 
-    # ── L (Fable #5): a cross-node FULL clone whose ask pool doesn't reach the SOURCE node is refused ──
+    # ── L: a cross-node FULL clone whose ask pool doesn't reach the SOURCE node is refused ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -404,7 +404,7 @@ def main() -> int:
         check("L_cross_node_ask_unreachable_from_source_refuses",
               not l5.admitted and l5.reason == placement.STORAGE_UNREACHABLE, f"reason={l5.reason}")
 
-    # ── M (Fable re-verify SQL-2): a cross-node clone's golden disk (inst_storage) must reach the SOURCE node ──
+    # ── M: a cross-node clone's golden disk (inst_storage) must reach the SOURCE node ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -425,7 +425,7 @@ def main() -> int:
         check("M_cross_node_golden_disk_unreachable_from_source_refuses",
               not m.admitted and m.reason == placement.STORAGE_UNREACHABLE, f"reason={m.reason}")
 
-    # ── N (Fable re-verify L1): set_node refuses a cluster REPOINT while the node hosts live instances ──
+    # ── N: set_node refuses a cluster REPOINT while the node hosts live instances ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -445,7 +445,7 @@ def main() -> int:
               and allowed.get("updated") is True,
               f"blocked={blocked} allowed={allowed}")
 
-    # ── O (Fable re-verify round-3): the gate refuses a cross-node instance whose SOURCE node drifted clusters ──
+    # ── O: the gate refuses a cross-node instance whose SOURCE node drifted clusters ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -467,7 +467,7 @@ def main() -> int:
         check("O_cross_node_source_repointed_cluster_refused",
               not o.admitted and o.reason == placement.NO_REACHABLE_INSTANCE, f"reason={o.reason}")
 
-    # ── P (Fable re-verify round-3): delete_node refuses a node hosting live instances (even under force) ──
+    # ── P: delete_node refuses a node hosting live instances (even under force) ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)
@@ -485,7 +485,7 @@ def main() -> int:
               and forced_del.get("reason") == "node_has_instances" and still_there,
               f"blocked={blocked_del} forced={forced_del} still_there={still_there}")
 
-    # ── Q (Fable re-verify round-3): a SEVERED bound instance (node_id NULL, storage SET) is NOT a usable seed ──
+    # ── Q: a SEVERED bound instance (node_id NULL, storage SET) is NOT a usable seed ──
     with connect(autocommit=False) as c:
         _fresh(c)
         migrate.apply_pending(c)

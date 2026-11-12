@@ -113,7 +113,7 @@ def test_pick_boot_disk_returns_none_when_no_real_disk_present():
 def test_pick_boot_disk_excludes_cloudinit_by_volume_name_not_storage_name():
     """The cloud-init exclusion keys on the VOLUME name (after the storage id), not the whole value — so a real
     boot disk on a storage literally named `cloudinit-pool` is still picked, while the actual cloud-init drive
-    (`…-cloudinit` volume, or a `media=cdrom` CD) is still excluded. Guards Fable F4: a bare `"cloudinit" in
+    (`…-cloudinit` volume, or a `media=cdrom` CD) is still excluded. Guards the case where a bare `"cloudinit" in
     value` check would wrongly skip a disk on a cloudinit-named pool (leaving the guest at the template size)."""
     assert pve.pick_boot_disk({"boot": "order=scsi0",
                                "scsi0": "cloudinit-pool:vm-1-disk-0,size=8G"}) == "scsi0"   # storage name ≠ drive
@@ -203,7 +203,7 @@ def test_attach_data_disk_posts_a_new_volume_directive(monkeypatch):
 
 
 def test_get_config_raises_on_a_non_dict_payload(monkeypatch):
-    """Fable MED: get_config RAISES on a non-dict PVE response (e.g. a {"data": null} → None) rather than
+    """get_config RAISES on a non-dict PVE response (e.g. a {"data": null} → None) rather than
     returning {}. A {} would let the multi-disk attach loop actuate on an EMPTY config — next_free_disk_slots
     would hand out scsi0 and displace the guest's real boot disk. Failing loud releases the fenced guest to the
     reaper (the documented failed-config-read contract). A real dict passes through unchanged."""

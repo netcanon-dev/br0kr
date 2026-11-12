@@ -402,7 +402,7 @@ Name the residual, why it's accepted, and what would close it.
   wrong/empty DSN), and a **rollback watermark** — when ANY absent guest's lease id is at/above
   `lease.max_lease_id` (an unambiguous "ledger is behind the fleet" signal a restored-backup / lagging-standby
   presents), the sweep spares EVERY absent guest that pass, below-watermark ones included (lease id order is not
-  commit order, so a below-watermark absent can be a live, later-committed guest — Fable F1). Both are
+  commit order, so a below-watermark absent can be a live, later-committed guest). Both are
   overridable with `allow_mass_absent` after a `dry_run` audit. **This narrows but does not fully close the DR
   blast radius:** the id sequence is rolled back with the ledger, so post-restore admissions re-mint ids in the
   spared range and a re-minted id going terminal can still destroy the old guest via the terminal branch — the

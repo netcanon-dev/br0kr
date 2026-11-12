@@ -557,7 +557,7 @@ def test_note_refusal_coalesces_per_template_and_reason_not_globally():
 def test_note_refusal_keys_include_project_so_two_tenants_dont_coalesce():
     """The refusal key includes project_id, so two DIFFERENT tenants refused for the same (reason, template)
     write SEPARATE rows each carrying its OWN identity — never one coalesced row that mis-attributes one
-    tenant's refusal/count to the other (Fable review). Guards the security-trail attribution across tenants,
+    tenant's refusal/count to the other. Guards the security-trail attribution across tenants,
     and (with _note_core using the caller's OWN params) a row whose identity and params come from one caller."""
     conn = _DenialConn()
     dl = audit.DenialLog(window_s=60, now=_Clock(), outcome="refused")

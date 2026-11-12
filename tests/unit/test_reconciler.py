@@ -358,7 +358,7 @@ def test_single_disk_lease_attaches_nothing_and_carries_no_devices(monkeypatch):
 
 
 def test_multidisk_transient_read_back_skips_single_shot_without_retrying(monkeypatch):
-    """Liveness guard (Fable MED): a read-back that RAISES (a transient API blip) is fail-soft SKIPPED on the
+    """Liveness guard: a read-back that RAISES (a transient API blip) is fail-soft SKIPPED on the
     FIRST attempt — disk_storage is called EXACTLY ONCE, never retried. This is the pre-hardening single-shot
     behaviour, kept deliberately: retrying a raise would multiply a wedged-PVE read (each config GET hanging to
     the request timeout) into a read-back long enough to blow the daemon's liveness stall budget mid-provision.
@@ -411,7 +411,7 @@ def test_multidisk_read_back_settles_after_retry_then_passes_when_correct(monkey
 
 
 def test_multidisk_read_back_settling_on_the_last_allowed_read_still_asserts(monkeypatch):
-    """Budget boundary — guards an OFF-BY-ONE in the retry loop (Fable LOW). A read that settles on the LAST
+    """Budget boundary — guards an OFF-BY-ONE in the retry loop. A read that settles on the LAST
     allowed attempt (`_READBACK_ATTEMPTS - 1` clean-None reads, then the real volid on read `_READBACK_ATTEMPTS`)
     must still be READ and asserted — here it settles to a WRONG pool and must FIRE the tripwire. A loop that ran
     one fewer read (`range(_READBACK_ATTEMPTS - 1)`) would never see the settled value, skip, and silently drop
@@ -446,7 +446,7 @@ def test_multidisk_read_back_not_settling_within_budget_skips_fail_soft(monkeypa
 
 
 def test_multidisk_boot_device_none_skips_the_boot_assertion(monkeypatch):
-    """Fable LOW / §8 #1 residual: when a multi-disk lease's CLEAN pre-attach config yields NO identifiable boot
+    """§8 #1 residual: when a multi-disk lease's CLEAN pre-attach config yields NO identifiable boot
     disk (boot_device None), the boot assertion is SKIPPED — NEVER re-derived via boot_disk_storage on the
     POLLUTED post-attach config (whose scsi<virtio fallback would pick the DATA disk and false-mismatch). Guards
     the exact pollution hole the pre-attach capture was built to close, on the no-boot-disk edge."""

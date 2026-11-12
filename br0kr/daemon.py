@@ -417,7 +417,7 @@ class Daemon:
         # reservation goes through admit() on its OWN non-autocommit conn (_replicate_connect, like migrate).
         # repl_stale_seconds sizes the reclaim cutoff AND the reservation TTL (2× it). main ALWAYS provides
         # _replicate_connect: the ADVANCE step gates on limit > 0 (no copies while off), but the RECLAIM step runs
-        # whenever the conn is set, so a disabled engine still drains jobs stranded mid-copy (Fable MEDIUM).
+        # whenever the conn is set, so a disabled engine still drains jobs stranded mid-copy.
         self._replicate_connect = replicate_connect
         self.replicate_limit = replicate_limit
         self.repl_stale_seconds = repl_stale_seconds
@@ -1090,8 +1090,8 @@ class Daemon:
                 # non-autocommit conn (the settle path + the destroy). Runs whenever a replicate conn exists,
                 # NOT gated on the limit: reclaim only TEARS DOWN + settles, so disabling the engine
                 # (BR0KR_REPLICATE_LIMIT=0 — the natural feature-rollback) still DRAINS jobs stranded mid-copy or
-                # force-failed with a leaked guest, instead of silently over-committing the pool until TTL (Fable
-                # MEDIUM). A no-op (three empty reads) in a deployment that never enabled replication.
+                # force-failed with a leaked guest, instead of silently over-committing the pool until TTL.
+                # A no-op (three empty reads) in a deployment that never enabled replication.
                 if self._replicate_connect is not None:
                     with closing(self._replicate_connect()) as rconn:
                         summary.replications_reclaimed = self._reclaim_replications(rconn)
@@ -1492,7 +1492,7 @@ class Daemon:
                 # the download has SETTLED, reap the transient source — the download-stage twin of the vmid-branch
                 # reap, closing the guest-free-DOWNLOADING orphan the #127 review named. UNLIKE the vmid branch,
                 # this build has NO guest, so finalizing it is ALWAYS S04-safe — the reap is PURE hygiene and must
-                # NEVER gate the finalize. A Fable review showed that deferring finalization on the reap wedges the
+                # NEVER gate the finalize. Deferring finalization on the reap wedges the
                 # build in RECLAIMING forever whenever the reap can't make progress: pve.wait maps a rotated-out /
                 # unqueryable UPID to 'TIMEOUT' (indistinguishable from still-running), an un-served download node
                 # can never be reached, and a genuinely-stuck download never settles — each stranding the build

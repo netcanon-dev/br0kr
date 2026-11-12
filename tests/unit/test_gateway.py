@@ -282,7 +282,7 @@ def test_request_lease_knob_off_but_existing_lease_falls_through_to_admit(monkey
     """A mid-flight knob flip OFF must NOT refuse an idempotent RETRY of an already-admitted/queued multi-disk
     lease — that would orphan a live lease the client can no longer address while the knob-agnostic daemon keeps
     actuating it. With the knob OFF but a lease ALREADY existing for idem_key (_GConn(exists=True)), request_lease
-    FALLS THROUGH to admit(), which returns the idempotent replay. Guards the Fable-found ordering bug: the go-
+    FALLS THROUGH to admit(), which returns the idempotent replay. Guards the ordering bug: the go-
     live gate must not preempt the idempotency verdict that admit() owns."""
     monkeypatch.setattr(gateway.admission, "admit",
                         lambda conn, req: AdmissionResult(lease_id=7, admitted=True, idempotent=True, reason=None))

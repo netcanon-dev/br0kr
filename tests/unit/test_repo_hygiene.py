@@ -242,7 +242,8 @@ _PRIVATE_V4 = re.compile(
     rf"(?<![\d.])(?:10\.{_OCTET}\.{_OCTET}\.{_OCTET}|10\.\d{{1,3}}\.\d{{1,3}}/\d|10\.[a-zA-Z*](?!\w)"
     rf"|172\.(?:1[6-9]|2\d|3[01])\.{_OCTET}\.{_OCTET}|192\.168\.)")
 # Where made-up private addresses may stay: the fixtures (tests/, the harnesses), the frozen review trail, the
-# applied migrations (never edited once applied), and CHANGELOG.md, whose [Unreleased] section is checked below.
+# applied migrations (their SQL never changes once applied), and CHANGELOG.md,
+# whose [Unreleased] section is checked below.
 _ADDRESS_EXEMPT = ("tests/", "scripts/harness_", "docs/reviews/", "db/migrations/", "CHANGELOG.md")
 
 
@@ -290,3 +291,47 @@ def test_no_private_address_outside_the_fixtures():
         if _PRIVATE_V4.search(line):
             hits.append(f"CHANGELOG.md [Unreleased] line {n}")
     assert not hits, f"private addresses outside the fixtures (use 192.0.2.x, 198.51.100.x, 203.0.113.x): {hits}"
+
+
+# The names of the internal review tooling (the review model, the workflow mode, the sign-off prompt), assembled
+# from parts so this file never holds them as whole words.
+# No letter may precede a name, and none may follow the first (so `unspoofable`, `fabled` and `task-user`
+# pass); the other two still match when joined to more (the prompt's tool name is the third name plus
+# "Question") or split by `-` or `_`.
+_TOOL_A, _TOOL_B, _TOOL_C = "fab" + "le", "ultra", "ask"
+_REVIEW_TOOL_WORDS = re.compile(
+    rf"(?<![a-z])(?:{_TOOL_A}(?![a-z])|{_TOOL_B}[-_]?code|{_TOOL_C}[-_]?user)", re.IGNORECASE)
+# The dated history keeps its wording: the review trail and the released CHANGELOG ([Unreleased] is checked).
+_REVIEW_TOOL_EXEMPT = ("docs/reviews/", "CHANGELOG.md")
+
+
+def test_the_review_tool_pattern_catches_what_it_should():
+    """The review-tool pattern matches the names in the forms they were written (a possessive, a hyphen or
+    underscore join, upper case, a severity or digit suffix, the prompt's full tool name) and not English words
+    that contain the first one. Guards a later edit of the pattern letting a spelling back in, or flagging
+    `unspoofable`."""
+    a, b, c = _TOOL_A, _TOOL_B, _TOOL_C
+    hits = [f"{a.title()}'s", f"{a}-round", a.upper(), f"({a.title()} HIGH)", f"{a.title()}_HIGH", f"{a.title()}5",
+            f"{c.title()}{'User'}Question", f"{c}_user", f"{b}-code", f"{b}code", f"`{a}`"]
+    misses = ["unspoofable", "fabled", "fables", "ultraviolet", "a user asks", "task-user"]
+    assert [s for s in hits if not _REVIEW_TOOL_WORDS.search(s)] == []
+    assert [s for s in misses if _REVIEW_TOOL_WORDS.search(s)] == []
+
+
+def test_no_review_tool_names_outside_the_history():
+    """No tracked file outside the dated history names the internal review tooling, and neither does the
+    CHANGELOG's [Unreleased] section. A public reader has no referent for those names, and a severity tag such as
+    "(… HIGH)" is a review artefact, not a design fact: a comment says what would otherwise go wrong. Guards the
+    tags creeping back into source comments, docstrings, harness labels and design docs (review CODE-02)."""
+    files = [p for p in _tracked_text_files()
+             if not p.relative_to(_ROOT).as_posix().startswith(_REVIEW_TOOL_EXEMPT)]
+    assert any(p.relative_to(_ROOT).as_posix() == "br0kr/pve.py" for p in files), "the scan saw nothing"
+    hits = []
+    for path in files:
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if _REVIEW_TOOL_WORDS.search(line):
+                hits.append(f"{path.relative_to(_ROOT).as_posix()}:{n}")
+    for n, line in enumerate(_changelog_sections()[0][1].splitlines(), 1):
+        if _REVIEW_TOOL_WORDS.search(line):
+            hits.append(f"CHANGELOG.md [Unreleased] line {n}")
+    assert not hits, f"review-tool names outside the history (say what would go wrong instead): {hits}"

@@ -49,7 +49,7 @@ class FakePve:
     """An in-memory guest fleet standing in for pve.Pve — exactly the surface run_replication_step drives. A
     guest is {tags, storage, name, template}. `landed_storage` is where a clone lands the boot disk (set !=
     target to drive the landed_wrong_pool assertion). `wait_rc` forces the clone task result. It models `name`
-    and the `template` flag so the POSITIVE-IDENTITY adopt guard (Fable HIGH) can be exercised."""
+    and the `template` flag so the POSITIVE-IDENTITY adopt guard can be exercised."""
 
     def __init__(self, landed_storage: str = "SlowStorage", wait_rc: str = "OK",
                  convert_rc: str = "OK") -> None:
@@ -73,7 +73,7 @@ class FakePve:
     def clone_start(self, tmpl_vmid: int, new_vmid: int, name: str, *, full: bool = True,
                     storage: str | None = None) -> str:
         self.clone_calls += 1
-        # A landed clone INHERITS the SOURCE's tags (Fable #12 — the whole reason the source pre-clone gate
+        # A landed clone INHERITS the SOURCE's tags (the whole reason the source pre-clone gate
         # exists), carries the requested NAME (the deterministic _replica_name the adopt/stamp identity check
         # verifies), and is template=0 (a VM, not yet converted).
         src = self.guests.get(tmpl_vmid, {})
@@ -94,8 +94,8 @@ class FakePve:
         return g["tags"] if g else None
 
     def stamp_repl_fence(self, vmid: int, replication_id: int, *, expected_name: str | None = None) -> str:
-        # Mirrors pve.Pve.stamp_repl_fence incl. the POSITIVE-IDENTITY adopt guard, using the REAL parsers (Fable
-        # #12 — a substring match would adopt a foreign fence like repl-77 for job 7): an unfenced guest is
+        # Mirrors pve.Pve.stamp_repl_fence incl. the POSITIVE-IDENTITY adopt guard, using the REAL parsers
+        # (a substring match would adopt a foreign fence like repl-77 for job 7): an unfenced guest is
         # stamped only if it carries the marker AND is template=0 AND (when given) its name matches.
         g = self.guests.get(vmid)
         if g is None:
@@ -301,7 +301,7 @@ def main() -> int:
                   "AND node_id='nA'") is True)
     check("wrong_pool_destroyed_the_guest", len(wrong.destroyed) == 1, f"destroyed={wrong.destroyed}")
 
-    # ── E: STALE RECLAIM ADOPTS an UNFENCED landed clone (Fable HIGH — H2/H4) ─────────
+    # ── E: STALE RECLAIM ADOPTS an UNFENCED landed clone (the unfenced-clone window) ─────────
     # A leader clones (guest lands, INHERITS only TEMPLATE_TAG) then dies BEFORE stamp_repl_fence. The reclaim
     # must NOT read fence_mismatch → settle → orphan: it ADOPTS (wait the clone task → stamp our fence → destroy),
     # then marks FAILED + settled. Simulated: stall to COPYING with an unfenced guest, then the clone "finishes".
@@ -331,7 +331,7 @@ def main() -> int:
     check("reclaim_stamped_guest_settled",
           _scalar("SELECT guest_settled_at IS NOT NULL FROM template_replication WHERE id=%s", (rid4,)) is True)
     # settle-by-key on the reclaim path: the byte RESERVATION lease itself must be RELEASED (not just the job
-    # stamp) — proves _reclaim_and_fail's _settle_by_key runs on the reclaim terminal path (Fable MEDIUM #29).
+    # stamp) — proves _reclaim_and_fail's _settle_by_key runs on the reclaim terminal path.
     check("reclaim_RELEASED_the_reservation_lease",
           _scalar("SELECT state FROM lease WHERE idem_key=%s", (replication.reservation_key(rid4),)) == "RELEASED")
 
@@ -355,7 +355,7 @@ def main() -> int:
     check("still_cloning_guest_not_destroyed", copy5 not in d5.destroyed, f"destroyed={d5.destroyed}")
     # RESUME the RECLAIMING job at the NEXT cutoff: the clone has since finished, so re-aging updated_at (the
     # claim refreshed it) must let the reclaim DRAIN the upid → adopt → destroy → FAIL + settle. This is the
-    # second half of the H2/H4 contract — an 'unresolved' RECLAIMING job is EVENTUALLY drained (Fable MEDIUM #30).
+    # second half of the adopt contract — an 'unresolved' RECLAIMING job is EVENTUALLY drained.
     with connect() as c:
         d5.wait_rc = "OK"   # the clone task has now completed
         c.execute("UPDATE template_replication SET updated_at=now() - interval '3 hours' WHERE id=%s", (rid5,))
@@ -416,7 +416,7 @@ def main() -> int:
     check("zero_window_disables_cooldown", cd0.get("reason") != "replication_cooldown",
           f"reason={cd0.get('reason')}")
 
-    # ── H: READY-INSTANCE BYTE FLOOR — admit() must NOT over-commit the pool (Fable HIGH, H6) ─────────
+    # ── H: READY-INSTANCE BYTE FLOOR — admit() must NOT over-commit the pool ─────────
     # Isolate the READY-instance term: clear SlowStorage's leftover debits (the earlier scenarios' reservations +
     # terminal instances) and stage exactly one READY 8GB debian12 copy. admit()'s pool headroom must now subtract
     # those 8GB (500 total → 492 free): a lease asking 495GB must be REFUSED insufficient_storage, or the
@@ -439,7 +439,7 @@ def main() -> int:
                                      storage_id="SlowStorage", req_disk_gb=490)   # 490 <= 492 free → admits
     check("a_lease_within_the_remaining_headroom_admits", fits.get("admitted") is True, f"fits={fits}")
 
-    # ── I: DEFAULT-NAMED (pve_name NULL) TARGET POOL — the copy completes (Fable HIGH, H7) ────────────
+    # ── I: DEFAULT-NAMED (pve_name NULL) TARGET POOL — the copy completes ────────────
     # A pool whose pve_name is NULL (the id IS the physical name — the common/default case, incl. the live
     # FastStorage row). _read_facts must resolve COALESCE(pve_name, id); without it the copy fails before
     # cloning. Add such a pool reachable from nA and replicate onto it.
@@ -456,7 +456,7 @@ def main() -> int:
     fdef = _drive_to_terminal(ddef, rid_def)
     check("default_named_pool_copy_reaches_ready", fdef == "READY", f"final={fdef}")
 
-    # ── J: WAITER ATTACH — request_lease parks behind a live covering replication (Fable HIGH, H8) ────
+    # ── J: WAITER ATTACH — request_lease parks behind a live covering replication ────
     # A node nB that can't reach the only debian12 instance (on nA/FastStorage), but a live replication is
     # copying debian12 onto poolB (reachable from nB). request_lease(nB, debian12, queue) must PARK with
     # awaiting_replication_id + reason no_reachable_instance_replicating — then force-failing the job must
@@ -497,9 +497,9 @@ def main() -> int:
           _scalar("SELECT state FROM lease WHERE idem_key='waiter-nb'") == "REJECTED"
           and _scalar("SELECT released_reason FROM lease WHERE idem_key='waiter-nb'") == "replication_failed")
 
-    # ── the SECOND Fable-verify round (K–V): the hardening fixes, each a mutation-killer ─────────────────
+    # ── K–V: the hardening fixes, each a mutation-killer ─────────────────
     def _clean() -> None:
-        """Reset the replication ledger to a deterministic slate between the new scenarios (the last round's
+        """Reset the replication ledger to a deterministic slate between the new scenarios (
         scenario-coupling was a real bug source): drop repl jobs + repl instances + repl/test leases, clear
         quarantine + waiter links, and default the cooldown off (a scenario that needs it turns it on)."""
         with connect() as c:
@@ -512,7 +512,7 @@ def main() -> int:
             c.execute("UPDATE operator_setting SET replication_cooldown_seconds = 0, replication_enabled = true WHERE id = 1")
             c.commit()
 
-    # ── K: ADOPT IDENTITY GUARD — a FOREIGN guest at OUR job's vmid is NEVER adopted/destroyed (Fable HIGH) ──
+    # ── K: ADOPT IDENTITY GUARD — a FOREIGN guest at OUR job's vmid is NEVER adopted/destroyed ──
     _clean()
     ridk = _request("SlowStorage")
     dk = FakePve(wait_rc="TIMEOUT")   # stall → COPYING with a stamped vmid + our unfenced clone
@@ -535,7 +535,7 @@ def main() -> int:
           _scalar("SELECT job_state FROM template_replication WHERE id=%s", (ridk,)) == "FAILED"
           and _scalar("SELECT guest_settled_at IS NOT NULL FROM template_replication WHERE id=%s", (ridk,)) is True)
 
-    # ── L: LEAKED force-failed guest is reclaimed + made prunable (Fable HIGH — the pre-fence force-fail leak) ──
+    # ── L: LEAKED force-failed guest is reclaimed + made prunable (the pre-fence force-fail leak) ──
     _clean()
     ridl = _request("SlowStorage")
     dl = FakePve(wait_rc="TIMEOUT")   # COPYING with a landed UNFENCED clone (marker-only, our name)
@@ -556,7 +556,7 @@ def main() -> int:
     check("leaked_force_fail_row_now_prunable",
           _scalar("SELECT guest_settled_at IS NOT NULL FROM template_replication WHERE id=%s", (ridl,)) is True)
 
-    # ── M: _touch keeps a healthy long copy from being idle-reclaimed by its OWN live leader (Fable HIGH #26) ──
+    # ── M: _touch keeps a healthy long copy from being idle-reclaimed by its OWN live leader ──
     _clean()
     ridm = _request("SlowStorage")
     dm = FakePve(wait_rc="TIMEOUT")   # a healthy copy that runs longer than the stale window
@@ -573,7 +573,7 @@ def main() -> int:
           _scalar("SELECT job_state FROM template_replication WHERE id=%s", (ridm,)) == "COPYING",
           f"state={_scalar('SELECT job_state FROM template_replication WHERE id=%s', (ridm,))}")
 
-    # ── P: RESUME with a LOST clone upid ADOPTS the landed guest instead of re-POSTing (Fable HIGH #31) ──
+    # ── P: RESUME with a LOST clone upid ADOPTS the landed guest instead of re-POSTing ──
     _clean()
     ridp = _request("SlowStorage")
     dp = FakePve(wait_rc="TIMEOUT")
@@ -648,7 +648,7 @@ def main() -> int:
         c.commit()
     check("cancelled_job_does_not_arm_cooldown", rc2.get("reason") != "replication_cooldown", f"r={rc2}")
 
-    # ── S: with the engine DISABLED, an ask does NOT park behind a job that can never advance (Fable HIGH #13) ──
+    # ── S: with the engine DISABLED, an ask does NOT park behind a job that can never advance ──
     _clean()
     with connect() as c:   # a REQUESTED job covering debian12 onto poolB (reachable from nB) exists...
         gateway.request_replication(c, template_id="debian12", target_cluster_id="clA",
@@ -763,7 +763,7 @@ def main() -> int:
           _scalar("SELECT state FROM lease WHERE idem_key='sib-waiter'") == "REJECTED")
 
     # ── W: leader-overlap SAFETY — a loser's advance-path reclaim on a job a WINNER already completed does NOT
-    #      destroy the winner's live catalog replica (Fable HIGH — the pre-strip catalog-destroy) ──
+    #      destroy the winner's live catalog replica (the pre-strip catalog-destroy) ──
     _clean()
     ridw = _request("SlowStorage")
     dw = FakePve(landed_storage="SlowStorage")
@@ -784,8 +784,8 @@ def main() -> int:
           and _scalar("SELECT job_state FROM template_replication WHERE id=%s", (ridw,)) == "READY",
           f"guest_present={vw in dw.guests} destroyed={dw.destroyed}")
 
-    # ── M2: _touch keeps a healthy long CONVERT from being idle-reclaimed by its own live leader (Fable HIGH #26,
-    #      the CONVERT leg — scenario M covered only the COPY leg) ──
+    # ── M2: _touch keeps a healthy long CONVERT from being idle-reclaimed by its own live leader
+    #      (the CONVERT leg — scenario M covered only the COPY leg) ──
     _clean()
     ridm2 = _request("SlowStorage")
     dm2 = FakePve(convert_rc="TIMEOUT")   # the clone lands (wait_rc OK) but the /template CONVERT never finishes

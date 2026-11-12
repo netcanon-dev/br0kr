@@ -325,7 +325,7 @@ def test_request_lease_coerces_json_data_disks_to_a_typed_tuple(monkeypatch):
 def test_request_lease_refuses_malformed_data_disks_without_touching_gateway(monkeypatch):
     """A malformed data_disks SHAPE (here an item missing req_disk_gb) is refused data_disk_malformed BEFORE
     the gateway (and the ledger) is reached — the pure coerce gate runs before `with _conn()`. It is still
-    RECORDED as a final refusal (Fable review: symmetric with every other refusal on this verb, incl. the
+    RECORDED as a final refusal (symmetric with every other refusal on this verb, incl. the
     value-path data_disk_malformed one step later). Guards a malformed ask reaching admission as an opaque
     error, and pins that no lease work happens for a bad shape but the refusal is not audit-invisible."""
     monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
@@ -382,7 +382,7 @@ def test_request_lease_records_a_refused_row_only_on_a_final_refusal(monkeypatch
 def test_request_lease_records_template_forbidden_as_refused_symmetric_with_dashboard(monkeypatch):
     """A governance refusal (template_forbidden) short-circuits BEFORE the gateway, but it is a FINAL refusal
     the dashboard act-as path already records as outcome='refused' — so the MCP surface records it too, keeping
-    the refused channel symmetric (Fable review). Guards a per-surface blind spot for image-governance refusals
+    the refused channel symmetric. Guards a per-surface blind spot for image-governance refusals
     in the operator's 'refused' view (and that the gateway is still never reached)."""
     monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
     monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
@@ -751,7 +751,7 @@ def test_force_fail_build_commits_before_the_best_effort_audit(monkeypatch):
 def test_force_fail_replication_settles_after_commit_unconditionally_and_audits_only_a_real_force(monkeypatch):
     """force_fail_replication commits the FAILED CAS, then FREES the byte reservation via
     settle_forced_reservation UNCONDITIONALLY (the documented release valve AND the repair path for a crash
-    between a prior commit and settle — so it fires even on the already_terminal retry; Fable LOW #04), and
+    between a prior commit and settle — so it fires even on the already_terminal retry), and
     audits ONLY a real force. Guards the settle being dropped (regressing the 4h dangling-reservation leak that
     refuses a re-request) and the ordering inverting (force → commit → settle → audit)."""
     order: list[str] = []

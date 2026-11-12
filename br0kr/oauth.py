@@ -149,7 +149,7 @@ def valid_redirect_uri(uri: str) -> bool:
     target. (Exact-match against the registered set is still enforced at /authorize + /token.) ALSO rejects
     any control char or whitespace: a CRLF in a redirect URI would otherwise ride the exact-match into the
     /authorize `Location` response header (stdlib `send_header` does NO CRLF sanitization) = response-header
-    injection on the trusted origin, so a control-bearing URI can never enter the registered set (Fable MED)."""
+    injection on the trusted origin, so a control-bearing URI can never enter the registered set."""
     if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7f for c in uri):
         return False
     try:
@@ -460,7 +460,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
             if not isinstance(uris, list) or not uris or not all(isinstance(u, str) for u in uris):
                 self._oauth_error(400, "invalid_redirect_uri", "redirect_uris must be a non-empty array")
                 return
-            # Bound a SINGLE registration's storage (open DCR is unauthenticated by spec — Fable LOW): a
+            # Bound a SINGLE registration's storage (open DCR is unauthenticated by spec): a
             # caller can't stuff an unbounded blob into one oauth_client row. The count of registrations is
             # itself unbounded (accepted risk — opt-in + TLS-gated; a minted token is revocable). SECURITY C16.
             if len(uris) > 16 or any(len(u) > 2048 for u in uris):
@@ -522,7 +522,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
                        "code_challenge_method", "scope", "state", "resource")}
             # Validate the pasted project token with the SAME resolver the gateway uses, on a DEDICATED
             # autocommit connection: auth.resolve's contract is that its best-effort last_used bump must not
-            # hold the api_token row lock — here that would otherwise last until our write txn commits (Fable LOW).
+            # hold the api_token row lock — here that would otherwise last until our write txn commits.
             token = f.get("project_token", "").strip()
             principal = None
             if token:
@@ -577,7 +577,7 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
                     conn.commit()   # the code is already consumed (single-use); do not re-issue it
                     self._oauth_error(400, "invalid_grant", "client/redirect/PKCE mismatch")
                     return
-                label = f"oauth:{bound['client_id'][:16]}"   # ONE label — validated AND stored (Fable LOW)
+                label = f"oauth:{bound['client_id'][:16]}"   # ONE label — validated AND stored
                 reason = admin.validate_token(bound["scope"], label, token_ttl_days())
                 if reason is not None:                 # defensive: scope came from a CHECK-constrained column
                     conn.commit()

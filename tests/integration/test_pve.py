@@ -787,7 +787,7 @@ def test_stamp_repl_fence_adopts_our_unfenced_clone_by_name():
 def test_stamp_repl_fence_refuses_a_foreign_guest_at_a_collided_vmid():
     """A guest with a DIFFERENT name at our job's vmid (a recycled/collided vmid pointing at a foreign lease's
     unfenced clone) is REFUSED and NEVER stamped — the guard that stops the adopt from stamping+destroying
-    someone else's guest (Fable HIGH #07/#09)."""
+    someone else's guest."""
     p = _StampStub(tags="br0kr-template", name="someone-elses-clone", template=0)
     assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7") == "fence_mismatch"
     assert p.posts == []   # never wrote the fence
@@ -795,7 +795,7 @@ def test_stamp_repl_fence_refuses_a_foreign_guest_at_a_collided_vmid():
 
 def test_stamp_repl_fence_refuses_a_stripped_catalog_template():
     """A fence-stripped READY catalog template (marker-only, template=1) is REFUSED — never re-stamp (then
-    destroy) a finished catalog template under leader overlap (Fable HIGH #20/#22)."""
+    destroy) a finished catalog template under leader overlap."""
     p = _StampStub(tags="br0kr-template", name="repl-debian12-7", template=1)
     assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7") == "fence_mismatch"
     assert p.posts == []
@@ -811,7 +811,7 @@ def test_stamp_repl_fence_idempotent_restamp_of_our_own_fence_skips_identity():
 def test_make_replica_template_converges_on_an_already_converted_guest():
     """make_replica_template on an ALREADY template=1 guest carrying our fence re-asserts the tags and returns
     OK WITHOUT re-POSTing /template (PVE rejects /template on a template → the raise would wedge the job until
-    the reclaim destroyed a healthy fully-converted copy; Fable #34/M4)."""
+    the reclaim destroyed a healthy fully-converted copy)."""
     p = _StampStub(tags="br0kr-repl-7;br0kr-template", name="repl-debian12-7", template=1)
     assert p.make_replica_template(9500, 7) == "OK"
     assert all(not path.endswith("/template") for path, _ in p.posts)   # never re-POST /template
@@ -910,7 +910,7 @@ def test_resize_disk_awaits_the_task_when_pve_returns_a_upid():
     """When a PVE build runs resize as a worker (the PUT returns a UPID), resize_disk AWAITS the task and
     returns its exitstatus rather than falsely reporting 'OK' immediately. Guards a resize reported done while
     its worker is still running — asserting wait() actually ran (else the test would pass even if the UPID were
-    ignored, Fable F3)."""
+    ignored)."""
     p = _ResizeStub(put_data="UPID:n:resize", wait_rc="OK")
     assert p.resize_disk(107, "scsi0", 20) == "OK" and p.waited is True
     assert p.puts == [("/nodes/n/qemu/107/resize", {"disk": "scsi0", "size": "20G"})]
@@ -936,7 +936,7 @@ def test_grow_boot_disk_grows_only_when_the_request_exceeds_the_current_size():
 
 def test_grow_boot_disk_grows_a_fractional_gb_template_to_the_reserved_whole_gb():
     """The grow decision floors the current size (parse_disk_size_gb ceils it for QUOTA) — so a fractional-GB
-    template (e.g. a 3.5GB cloud image, size=3584M → ceil 4) still grows to a 4GB request. Guards Fable F1: a
+    template (e.g. a 3.5GB cloud image, size=3584M → ceil 4) still grows to a 4GB request. Guards the case where a
     ceil-based compare would read current=4 and SKIP `4<=4`, silently re-admitting the under-provisioning bug
     (the agent charged 4 boots on 3.5). A request that already fits the floor (3 <= floor(3.5)=3) is skipped —
     the agent gets ≥ what it asked, and no shrink is attempted."""
@@ -950,7 +950,7 @@ def test_grow_boot_disk_grows_a_fractional_gb_template_to_the_reserved_whole_gb(
 def test_grow_boot_disk_skips_when_the_boot_disk_size_is_unreadable():
     """A boot disk with no readable `size=` token can't be told grow-from-shrink, so grow_boot_disk degrades
     to the template size (WARN) rather than issuing a BLIND absolute resize that could try to shrink and 4xx —
-    which would brick every clone of that template (Fable F5). Guards a malformed-config resize bricking
+    which would brick every clone of that template. Guards a malformed-config resize bricking
     provisioning. (A real PVE disk always carries size=, so this is a guard, not a normal path.)"""
     p = _ResizeStub(config={"boot": "order=scsi0", "scsi0": "FastStorage:vm-1-disk-0"})   # no size= token
     assert p.grow_boot_disk(1, 20) is None and p.puts == []
@@ -1001,7 +1001,7 @@ def test_free_import_volume_refuses_a_non_broker_filename_without_deleting():
     filename — raises `NotABrokerImportArtifact` and issues NO DELETE, so a bug / malformed build row / injected
     value can never escalate the reap into deleting an arbitrary volume on the pool. **BOTH request-URL
     components are fenced:** a malformed `storage` (a `?`/`#`/`/`/`:`/space that would rewrite the raw-concatenated
-    DELETE path — the URL is NOT encoded) is refused too, even with a valid `br0kr-*` filename (Fable MED). Guards
+    DELETE path — the URL is NOT encoded) is refused too, even with a valid `br0kr-*` filename. Guards
     the exact delete-arbitrary-volume escalation the guard closes (the safeguard that makes granting
     Datastore.Allocate on a shared pool tolerable)."""
     p = _ReapStubPve()
@@ -1010,7 +1010,7 @@ def test_free_import_volume_refuses_a_non_broker_filename_without_deleting():
         with pytest.raises(pve.NotABrokerImportArtifact):
             p.free_import_volume("omv", bad)
     # a malformed STORAGE (the other URL component) is refused too — with a perfectly valid br0kr filename — so a
-    # `?`/`#`/`/` in storage cannot rewrite the DELETE path into an arbitrary-volume delete (the Fable MED).
+    # `?`/`#`/`/` in storage cannot rewrite the DELETE path into an arbitrary-volume delete.
     for bad_storage in ["omv/content/omv:vm-101-disk-0.qcow2?", "omv#x", "omv/../x", "omv:x", "", "omv x"]:
         with pytest.raises(pve.NotABrokerImportArtifact):
             p.free_import_volume(bad_storage, "br0kr-x.qcow2")

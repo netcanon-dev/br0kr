@@ -217,7 +217,7 @@ concurrent promoters a non-steady-state case; the lock + CAS is the belt-and-sus
   5. **Idempotent enqueue:** retry of a queued `idem_key` returns the same `PENDING` lease (no second
      row); a retry after promotion returns the `ADMITTED` lease.
   6. **Depth cap:** enqueue past the cap → `queue_full`.
-- **Adversarial review** (Workflow, ultracode) before merge, focused on the promote race + the
+- **Adversarial review** before merge, focused on the promote race + the
   `PENDING`-in/out-of state-set audit.
 - **Live-Proxmox:** not required — promotion is a ledger decision; the chosen lease's provisioning is the
   already-proven path (`driver.provision` unchanged).

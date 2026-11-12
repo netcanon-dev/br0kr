@@ -156,7 +156,7 @@ def plan_replication(
     # The clone SOURCE. Candidates are USABLE copies — READY + node-hosted + their OWN (storage, node) reaches
     # un-quarantined (the gate's usable(); never clone FROM a proven-misplaced copy) — that ALSO sit on a node
     # reaching the TARGET pool. Quantifying target-reach INSIDE the pick (not testing one arbitrary pick) means a
-    # satisfiable replication off a DIFFERENT instance is found, not falsely refused (Fable). Prefer a SIZED,
+    # satisfiable replication off a DIFFERENT instance is found, not falsely refused. Prefer a SIZED,
     # storage-bound source, then lowest id — deterministic + idempotent across retries.
     src = conn.execute(
         f"SELECT ti.id, ti.node_id, ti.size_gb FROM template_instance ti "
@@ -457,7 +457,7 @@ def prune_replications(
     is daemon-driven with no decommission need). A candidate is prunable ONLY when terminal (READY/FAILED) AND
     carrying `guest_settled_at` (its transient guest provably ended, so a pruned row can never leave a live fence
     behind) AND having NO live (READY/REPLICATING) replica INSTANCE (its provenance row must outlive the instance
-    it attributes, so the tenant byte-charge can't be silently un-charged by a retention prune; Fable MEDIUM); an
+    it attributes, so the tenant byte-charge can't be silently un-charged by a retention prune); an
     UNSETTLED terminal job — or one whose replica is still live — is RETAINED (not an error), never a silent
     teardown. A PENDING waiter
     still parked behind a to-be-pruned FAILED job is FAST-FAILED first (via `sweep_waiters`, honoring the sibling-
@@ -474,7 +474,7 @@ def prune_replications(
     cparam: tuple[Any, ...] = (cluster_id,) if cluster_id is not None else ()
     # A job whose replica INSTANCE is still live (READY/REPLICATING) is NOT prunable: template_instance.replication_id
     # has NO FK (0032), so deleting the job would silently orphan the provenance link the tenant byte-charge JOINs
-    # through — un-charging a project for a replica that still exists + still floors pool bytes (Fable MEDIUM, the
+    # through — un-charging a project for a replica that still exists + still floors pool bytes (the
     # free-fan-out hole). The instance must be retired/deleted first (delete_template_instance), after which the job
     # becomes prunable — the decommission ordering delete_storage/delete_cluster already enforce.
     live_instance = ("AND NOT EXISTS (SELECT 1 FROM template_instance ti WHERE ti.replication_id = "
@@ -484,7 +484,7 @@ def prune_replications(
                 f"AND updated_at < now() - make_interval(days => %s){cpred} {live_instance}")
     # 0. FAST-FAIL any PENDING waiter still parked behind a now-FAILED job BEFORE severing its link — else the
     #    sever would silently detach it (the §5.4 fast-fail disarmed) and it would wait out its full queue window
-    #    to a generic queue_timeout instead of getting the honest 'replication_failed' (Fable LOW). Reuses the
+    #    to a generic queue_timeout instead of getting the honest 'replication_failed'. Reuses the
     #    sweep's exact predicate (the already_present + sibling-live-job carve-outs both apply). prune can run
     #    while the leader — and thus the tick's own sweep — is down, so this is the waiter's only fast-fail chance.
     sweep_waiters(conn)
@@ -612,7 +612,7 @@ def _read_facts(conn: psycopg.Connection[Any], job: ReplicationJob) -> _Facts:
     NULL pve_name means the id already IS the physical name, the SAME effective-name every other reader uses
     (placement._USABLE_INSTANCE_PICK, _resolve_clone_storage, recheck_instance). Without the COALESCE a
     default-named pool (pve_name NULL — the common case, incl. the live FastStorage row) reads target_pve_name
-    None and the job fails before cloning (Fable HIGH). Re-resolves the source instance fresh (it may have been
+    None and the job fails before cloning. Re-resolves the source instance fresh (it may have been
     retired) — a NULL source_vmid means the source vanished, so the caller fails+reclaims. Commits the read txn."""
     row = conn.execute(
         "SELECT si.vmid, COALESCE(ts.pve_name, ts.id) FROM template_replication tr "
@@ -658,7 +658,7 @@ def _replica_name(job: ReplicationJob) -> str:
     JOB ID leads (before the template slug) so the [:60] PVE-name cap can NEVER erase the per-job discriminator:
     the adopt identity guard (stamp_repl_fence expected_name) relies on this name to tell OUR clone from a
     sibling job's clone at a recycled/collided vmid — a long (>=~49 char) template_id would otherwise truncate the
-    `-{id}` suffix so two jobs share a name and the guard degrades to marker-alone (Fable HIGH)."""
+    `-{id}` suffix so two jobs share a name and the guard degrades to marker-alone."""
     return f"repl-{job.id}-{job.template_id}"[:60]
 
 
@@ -671,7 +671,7 @@ def replication_cooldown_remaining(
     one until `window_seconds` pass from the MOST RECENT FAILED row's `updated_at` (§5.3) — so a persistently-
     failing target isn't hammered by a mint+reclaim retry loop. A CANCELLED job (error='cancelled') is EXCLUDED:
     it never actuated anything (no guest, no reservation, no retry loop to dampen), so an operator who requests
-    then immediately cancels can re-request the same target at once (Fable LOW). window ≤ 0 = no cooldown. Pure
+    then immediately cancels can re-request the same target at once. window ≤ 0 = no cooldown. Pure
     read; no commit (the caller's request txn owns it). The window is resolved by the caller (gateway) from the
     operator_setting knob so the gateway + dashboard act-as agree."""
     if window_seconds <= 0:
@@ -712,12 +712,12 @@ def sweep_waiters(conn: psycopg.Connection[Any]) -> int:
     race. A waiter that STILL has a LIVE covering job for its (template, cluster) reachable from its node is also
     EXCLUDED: a waiter is spared while it could STILL be satisfied — (a) a READY covering INSTANCE reachable from
     its node now exists (a sibling job SUCCEEDED, or the copy landed; the promoter will admit it — rejecting it
-    would be the reject-at-the-moment-of-success race the already_present carve-out also guards; Fable MEDIUM), OR
+    would be the reject-at-the-moment-of-success race the already_present carve-out also guards), OR
     (b) a LIVE covering job (REQUESTED/COPYING/CONVERTING) on a DIFFERENT reachable pool exists AND the engine is
     ENABLED so it can actually advance (two live jobs for one template on different pools are legal —
     replication_one_active is per-pool; but a disabled engine can NEVER advance the sibling, so it must NOT keep
     the waiter parked to queue_timeout — the exact park-behind-a-dead-job outcome the disabled-park refusal
-    forbids; Fable MEDIUM/LOW). Level-triggered (a single guarded UPDATE over PENDING rows), so late attachers and
+    forbids). Level-triggered (a single guarded UPDATE over PENDING rows), so late attachers and
     races are covered on the next tick. Runs every tick regardless of the engine limit (the always-on reclaim +
     force-fail CAN set jobs FAILED while the engine is off, so this is NOT a no-op then). Caller commits."""
     cur = conn.execute(
@@ -833,7 +833,7 @@ def settle_forced_reservation(conn: psycopg.Connection[Any], replication_id: int
     itself is caller-commits (its CAS mirrors build.force_fail) and settling inside would break that atomicity +
     the audit-after-commit ordering. Without it, a force-failed job's reservation lingers ADMITTED (debiting the
     target pool) until its TTL (2× stale ≈ 4h) reaps it — so the release valve fails to release the one thing it
-    documents releasing, and a natural re-request is refused target_storage_insufficient (Fable HIGH). Idempotent
+    documents releasing, and a natural re-request is refused target_storage_insufficient. Idempotent
     (no reservation / already settled = a clean no-op); the guest, if any, stays the operator's to clean."""
     _settle_by_key(conn, replication_id)
 
@@ -854,7 +854,7 @@ def _touch(conn: psycopg.Connection[Any], job_id: int) -> None:
     """Bump `updated_at` on a job the leader is ACTIVELY POLLING (build.py's progress-bump discipline), so the
     IDLE stale-reclaim (`updated_at < now() - stale`) measures LEADER-POLLING, not copy DURATION. Without this,
     a healthy copy that runs longer than the stale window is falsely idle-reclaimed by its OWN live leader — the
-    clone destroyed mid-flight and the (template, pool) key never able to replicate (§5.3; Fable HIGH). Called
+    clone destroyed mid-flight and the (template, pool) key never able to replicate (§5.3). Called
     on every poll pass that observes the clone/convert task still running (the TIMEOUT branch). Guarded on
     COPYING/CONVERTING so it never resurrects a terminal/RECLAIMING row's timestamp. The wall-clock cap
     (`copy_started_at`) remains the backstop for a polling-but-never-progressing wedge. Commits."""
@@ -920,7 +920,7 @@ def _set_upid(conn: psycopg.Connection[Any], job_id: int, upid: str) -> None:
     leader that already persisted a upid WINS (the `upid IS NULL` guard), so the caller re-reads + adopts it.
     Guarded ONLY on `upid IS NULL` (NOT on state): a force-fail landing between clone_start and this persist would
     otherwise DROP the upid for a task that WAS posted, so the leaked-guest reclaim would later see exists=False
-    (the clone still queued) and FALSELY settle a job whose full-size guest then lands invisible (Fable MEDIUM).
+    (the clone still queued) and FALSELY settle a job whose full-size guest then lands invisible.
     Recording the handle on a now-terminal job lets 1b DRAIN the task (TIMEOUT → 'unresolved' → retry) instead."""
     conn.execute(
         "UPDATE template_replication SET upid = %s, updated_at = now() "
@@ -965,7 +965,7 @@ def _mark_ready(conn: psycopg.Connection[Any], job_id: int) -> bool:
         # statement snapshot while the twin CTE EPQ-SKIPPED a twin an operator concurrently retired/deleted —
         # committing would persist a READY job with NO READY instance (the exact invariant this CTE exists to
         # protect, and finalize-retry would then re-drive finalize_template on a gone vmid forever). Roll back so
-        # the job stays CONVERTING; the caller's _reclaim_and_fail correctly fails a CONVERTING job (Fable MEDIUM).
+        # the job stays CONVERTING; the caller's _reclaim_and_fail correctly fails a CONVERTING job.
         conn.rollback()
         log.warning("replication %s _mark_ready split averted: twin not flippable (raced retire/delete) — rolled "
                     "back, job stays CONVERTING", job_id, extra={"replication_id": job_id})
@@ -1041,7 +1041,7 @@ def repl_orphan_reclaimable(conn: psycopg.Connection[Any], vmid: int, replicatio
 def stamp_repl_guest_settled(conn: psycopg.Connection[Any], replication_id: int) -> None:
     """PUBLIC: stamp `guest_settled_at` on a FAILED job whose leaked guest the §6.6 sweep just destroyed — so the
     force-failed/leaked copy becomes PRUNE-eligible (closing the 'force-failed jobs are permanently unprunable →
-    the pool is undeletable through verbs' gap; Fable LOW). Guarded (never un-sets an existing stamp). Commits."""
+    the pool is undeletable through verbs' gap). Guarded (never un-sets an existing stamp). Commits."""
     _stamp_settled(conn, replication_id)
 
 
@@ -1140,7 +1140,7 @@ def force_fail_replication(conn: psycopg.Connection[Any], replication_id: int, r
 def _teardown_transient(job: ReplicationJob, driver: pve.Pve,
                         on_progress: Callable[[], None] | None = None) -> str:
     """Tear down the job's transient copy guest, ADOPTING an unfenced-but-ours landed clone FIRST so a guest we
-    minted is never orphaned (Fable HIGH — the unfenced-clone window). The repl fence is stamped only AFTER the
+    minted is never orphaned (the unfenced-clone window). The repl fence is stamped only AFTER the
     clone task completes (the clone API can't tag atomically), so between the clone landing and `stamp_repl_fence`
     OUR copy carries only the inherited TEMPLATE_TAG — a bare `fenced_destroy_replica` reads `fence_mismatch` and
     a naive reclaim would settle the job while a full-size guest keeps consuming pool bytes forever. Returns:
@@ -1181,8 +1181,8 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
     COPYING/CONVERTING→RECLAIMING, the claim_stale_for_reclaim discipline): a concurrent overlap WINNER that
     already completed the job READY — or a force-fail that FAILED it — makes this claim LOSE, and we return
     WITHOUT touching the guest, so a losing leader can NEVER destroy the winner's just-completed catalog replica
-    in the pre-strip window (it still carries our fence, so the identity guard would otherwise adopt+destroy it;
-    Fable HIGH). `on_progress` is threaded through the teardown's upid-drain + stop + DELETE waits so a long
+    in the pre-strip window (it still carries our fence, so the identity guard would otherwise adopt+destroy it).
+    `on_progress` is threaded through the teardown's upid-drain + stop + DELETE waits so a long
     advance-path reclaim keeps the daemon's liveness heartbeat fresh (S04/F3)."""
     claim = conn.execute(
         "UPDATE template_replication SET job_state = 'RECLAIMING', updated_at = now() "
@@ -1211,7 +1211,7 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
     if not _mark_failed(conn, job.id, reason, settled=True):
         # A concurrent operator force_fail_replication won the CAS mid-teardown (FAILED, guest_settled_at NULL by
         # its contract), so _mark_failed no-ops. The teardown above just proved the guest gone — stamp settled
-        # so the row is prunable + its pool/cluster decommissionable (else it is immortal; Fable MEDIUM).
+        # so the row is prunable + its pool/cluster decommissionable (else it is immortal).
         _stamp_settled(conn, job.id)
     _settle_by_key(conn, job.id)
     return True
@@ -1315,7 +1315,7 @@ def _do_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve
     adopted = False
     if job.upid is None:
         if driver.exists(vmid):
-            # RESUME with a lost upid (Fable HIGH): a prior pass POSTed the clone but crashed before persisting
+            # RESUME with a lost upid: a prior pass POSTed the clone but crashed before persisting
             # the write-once upid, so the guest already exists (landing/landed). Re-POSTing clone_start would
             # collide on `newid` → the step would raise every pass forever. ADOPT the orphaned clone: skip the
             # POST + upid persist and converge on the landed guest below. If it is still `lock:clone`, the
@@ -1699,7 +1699,7 @@ def reclaim_stale_replications(
     # 1. finalize-retry: a READY job still carrying its fence (guest_settled_at NULL) is repairable — re-drive
     #    the strip so a sweep can't trip on the lingering fence (§5.3), AND settle its reservation (a crash
     #    between _mark_ready and settle leaks the byte floor until TTL — the READY instance already floors the
-    #    bytes read-side, so this is a safe, idempotent re-settle by key; Fable M5).
+    #    bytes read-side, so this is a safe, idempotent re-settle by key).
     for row in conn.execute(
             "SELECT id, vmid, target_node_id FROM template_replication "
             "WHERE job_state = 'READY' AND guest_settled_at IS NULL AND vmid IS NOT NULL "
@@ -1725,7 +1725,7 @@ def reclaim_stale_replications(
         except Exception:
             log.warning("replication %s finalize-retry: fence strip still failing (vmid %s)", rid, vmid,
                         extra={"replication_id": rid, "vmid": vmid})
-    # 1b. LEAKED-guest reclaim (Fable HIGH): a FAILED job that still carries a stamped vmid with guest_settled_at
+    # 1b. LEAKED-guest reclaim: a FAILED job that still carries a stamped vmid with guest_settled_at
     #     NULL leaked a guest no other path can reach — an operator force_fail_replication during the pre-fence
     #     COPYING window (the landed clone carries only the inherited marker, so §6.6's fence-keyed sweep never
     #     lists it and the generic clone-orphan sweep spares it — no lease at that vmid), or a reclaim whose
@@ -1745,7 +1745,7 @@ def reclaim_stale_replications(
             # The host NODE was deleted (target_node_id is FK ON DELETE SET NULL) — no served daemon can ever
             # reach a guest on a node outside the fleet, so the row would be immortal + block its pool/cluster
             # decommission forever. delete_node's contract is that a removed node's guests go with it, so stamp
-            # settled: the guest (if any) is provably outside the broker's purview, not ours to destroy (Fable LOW).
+            # settled: the guest (if any) is provably outside the broker's purview, not ours to destroy.
             _stamp_settled(conn, rid)
             continue
         driver = driver_for(node_id)
@@ -1787,7 +1787,7 @@ def reclaim_stale_replications(
                             extra={"replication_id": job.id, "vmid": claim.vmid})
                 continue
             # DESTROY-first, ADOPTING an unfenced landed clone (the RECLAIMING row carries its upid) so OUR
-            # in-flight/landed copy is never orphaned + settled mid-materialise (Fable HIGH).
+            # in-flight/landed copy is never orphaned + settled mid-materialise.
             fresh = _refresh(conn, job.id)   # RECLAIMING now — read the persisted upid alongside the vmid
             if fresh is None:
                 continue

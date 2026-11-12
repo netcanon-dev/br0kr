@@ -32,7 +32,7 @@ that composition stays correct, race-free, and idempotently resumable:
      mid-saga (even one that shares a node hostname with the source), the still-on-source guest would
      false-match as the destination. The saga REFUSES that phantom commit, retries with the reservation
      held, and resumes to DONE once the registry is corrected — recoverable, not a permanent strand.
-  K. INTRA-CLUSTER RELOCATION (review S25 / Fable axis 2): a legitimately-landed guest relocated to a
+  K. INTRA-CLUSTER RELOCATION (review S25): a legitimately-landed guest relocated to a
      DIFFERENT node WITHIN the target cluster (PVE HA / maintenance) still CONFIRMS — the confirm is
      remote-only while the source cluster is known-distinct, so the node isn't over-pinned into a wedge.
   L. ONE ACTIVE SAGA PER LEASE (review S01): the migration_in_progress partial unique index (0028) admits
@@ -43,7 +43,7 @@ that composition stays correct, race-free, and idempotently resumable:
   N. LEASE-CLUSTER GUARD (review S25 residual): the TWO-mutation attack (source repointed away AND target
      onto the guest's physical cluster, shared hostname) that the LIVE-node-value guard missed — the guard
      now compares the target against the lease's OWN immutable cluster_id (0004), REFUSES, then resumes.
-  O. FLIP STAMPS THE CONFIRMED CLUSTER (review S25 residual / Fable): `_flip_lease` records dest.remote (the
+  O. FLIP STAMPS THE CONFIRMED CLUSTER (review S25 residual): `_flip_lease` records dest.remote (the
      cluster the guest was confirmed on), NOT a re-read of the target node — so a target repoint mid-pass
      can't poison the lease.cluster_id the guard trusts.
 
@@ -659,7 +659,7 @@ def main() -> int:  # noqa: C901 - a linear gate of independent checks
     check("s25_recovers_reservation_released", reservation_state(mid) == "RELEASED",
           f"reservation={reservation_state(mid)}")
 
-    # ── K. INTRA-CLUSTER RELOCATION (review S25 / Fable axis 2): a legitimately-landed guest that has since
+    # ── K. INTRA-CLUSTER RELOCATION (review S25): a legitimately-landed guest that has since
     #      moved to a DIFFERENT node WITHIN the target cluster (PVE HA / node maintenance) must STILL confirm —
     #      the remote + travelling fence identify it. The confirm stays remote-only while the source cluster is
     #      known-distinct, so pinning the node can't wedge a NORMAL migration in endless retry (the regression
@@ -807,7 +807,7 @@ def main() -> int:  # noqa: C901 - a linear gate of independent checks
     check("s25res_recovers_to_done", recovered.state == "DONE" and node == "B" and st == "ACTIVE",
           f"mig={recovered.state} lease={st}@{node}")
 
-    # ── O. FLIP STAMPS THE CONFIRMED CLUSTER (review S25 residual / Fable): `_flip_lease` records the cluster the
+    # ── O. FLIP STAMPS THE CONFIRMED CLUSTER (review S25 residual): `_flip_lease` records the cluster the
     #      guest was CONFIRMED on (dest.remote), NOT a re-read of the target node's live cluster_id — so an operator
     #      repoint of the TARGET node during the actuation pass can't poison lease.cluster_id (the guard's ground
     #      truth) and re-open the phantom-commit path a follow-up migration would exploit. ─

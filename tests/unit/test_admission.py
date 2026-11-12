@@ -324,7 +324,7 @@ def test_storage_avail_subtracts_ready_template_instance_bytes():
     """_STORAGE_AVAIL (the pool-headroom read admit() + promote_pinned use) must subtract Σ READY
     template_instance.size_gb on the pool ALONGSIDE the active-lease bytes — the PR-5 §5.3 single-debit handoff:
     when a replica's br0kr-repl reservation settles at READY, the READY instance must keep flooring its physical
-    bytes, or admit() over-commits the pool by the replica's size (Fable HIGH). READY-only (a REPLICATING twin is
+    bytes, or admit() over-commits the pool by the replica's size. READY-only (a REPLICATING twin is
     floored by its in-flight reservation, already in the lease term). Drift-guards the read-side term."""
     assert "template_instance ti" in admission._STORAGE_AVAIL
     assert "ti.instance_state = 'READY'" in admission._STORAGE_AVAIL

@@ -241,8 +241,8 @@ def _patch_repl(monkeypatch, rec):
 def test_replication_publish_and_waiter_sweep_run_every_tick_regardless_of_limit(wired, monkeypatch):
     """The leader PUBLISHES replication_enabled + runs the §5.4 waiter sweep EVERY tick, and — with the engine
     OFF (BR0KR_REPLICATE_LIMIT=0) but a replicate conn provided (main always provides one) — still runs the
-    RECLAIM step so a disabled engine drains jobs stranded mid-copy, while the ADVANCE step does NOT run (Fable
-    #02/#27). Deleting the publish/sweep or gating reclaim on the limit would leave this red."""
+    RECLAIM step so a disabled engine drains jobs stranded mid-copy, while the ADVANCE step does NOT run.
+    Deleting the publish/sweep or gating reclaim on the limit would leave this red."""
     rec: dict = {}
     _patch_repl(monkeypatch, rec)
     d = _daemon(replicate_limit=0, replicate_connect=lambda: _FakeConn(), sweep_every=1)
@@ -250,7 +250,7 @@ def test_replication_publish_and_waiter_sweep_run_every_tick_regardless_of_limit
     assert rec.get("published") == [False]      # published the OFF fact every tick
     assert rec.get("swept") == 1                # the honest fast-fail waiter sweep ran
     assert rec.get("advanced") is None          # NO advance while the engine is off
-    assert rec.get("reclaimed") == 1            # but the reclaim (drain) STILL ran (Fable #02)
+    assert rec.get("reclaimed") == 1            # but the reclaim (drain) STILL ran
     assert summary.replications_reclaimed == 3  # and its counter landed in the summary
 
 
@@ -1580,7 +1580,7 @@ def test_reclaim_builds_reattaches_to_a_settled_download_and_reaps_its_source(mo
 
 
 def test_reclaim_builds_finalizes_a_still_running_download_without_reaping(monkeypatch):
-    """0045 (the soundness + no-wedge crux, a Fable-review fix): if the re-attach poll returns 'TIMEOUT' the
+    """0045 (the soundness + no-wedge crux): if the re-attach poll returns 'TIMEOUT' the
     download is either STILL running or its UPID is unqueryable (pve.wait cannot tell them apart) — its source is
     not yet renamed to the final volid, so a free would 404 and the file could land AFTER it. So the reclaim must
     NOT reap. But it must STILL finalize: a download-stage build has no guest, so deferring finalization on the
@@ -1605,7 +1605,7 @@ def test_reclaim_builds_finalizes_a_still_running_download_without_reaping(monke
 
 
 def test_reclaim_builds_finalizes_when_the_download_reattach_raises(monkeypatch):
-    """0045 (Fable-review fix, MEDIUM-1's raise path): if the re-attach poll RAISES (a transient PVE/network
+    """0045 (the raise path): if the re-attach poll RAISES (a transient PVE/network
     error the real pve.wait would swallow into TIMEOUT, but a fake/future driver could surface), the reclaim
     cannot confirm the download settled — so it does NOT reap and STILL finalizes (never a defer-forever wedge).
     Guards the branch treating an inconclusive re-attach as 'confirmed running' and stranding the build."""
@@ -1650,7 +1650,7 @@ def test_reclaim_builds_reaps_after_a_failed_download_settles_then_finalizes(mon
 
 
 def test_reclaim_builds_finalizes_a_download_whose_node_is_unserved_without_reaping(monkeypatch):
-    """0045 (the reach guard + no-wedge, a Fable-review fix): a guest-free DOWNLOADING build whose DOWNLOAD node
+    """0045 (the reach guard + no-wedge): a guest-free DOWNLOADING build whose DOWNLOAD node
     this daemon doesn't serve (cluster_of is None, so it can't match the build's cluster) is never re-attached on
     a reach-blind cluster-any driver (the #127 review's finding). UNLIKE the vmid branch (where an unserved node
     means a live GUEST we must not orphan, so we defer), a download-stage build has NO guest — deferring would
@@ -1725,8 +1725,8 @@ def test_reclaim_builds_skips_a_build_that_completed_since_the_stale_scan(monkey
     against a concurrent mark_ready. So right before destroying, _reclaim_builds re-asserts the claim
     (`build.claim_stale_for_reclaim`); if it LOSES — a wedged ex-leader completed the build to READY (catalog
     row committed), or it made progress, since the stale scan — the reclaim must NOT destroy (that would delete
-    a finished, catalogued template) and must NOT mark it FAILED. Guards the wrong-destroy both independent
-    Fable reviewers flagged as the top regression of the destroy-first inversion."""
+    a finished, catalogued template) and must NOT mark it FAILED. Guards the wrong-destroy, the top
+    regression of the destroy-first inversion."""
     _win_claim(monkeypatch, won=False)   # the build finished/progressed → claim lost
 
     class _Drv:

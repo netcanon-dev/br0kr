@@ -108,7 +108,7 @@ def test_prm_metadata_points_at_resource_and_as() -> None:
     ("ftp://host/cb", False),                             # non-http(s) scheme
     ("not-a-uri", False),                                 # scheme-less
     ("", False),
-    ("https://ok/cb\r\nX-Injected: pwn", False),          # CRLF → response-header injection attempt (Fable MED)
+    ("https://ok/cb\r\nX-Injected: pwn", False),          # CRLF → response-header injection attempt
     ("https://ok/cb\tX", False),                          # embedded control char (tab)
     ("https://ok/ cb", False),                            # embedded space
 ])

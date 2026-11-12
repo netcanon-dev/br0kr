@@ -840,10 +840,10 @@ def _audit_page(conn: psycopg.Connection[Any], filters: dict[str, Any]) -> dict[
 def _force_fail_replication_action(c: psycopg.Connection[Any], **k: Any) -> dict[str, Any]:
     """Force-fail a wedged replication job, then free its byte reservation.
 
-    That pairing is the documented contract (a Fable HIGH finding). The CAS is committed HERE before the settle
+    That pairing is the documented contract. The CAS is committed HERE before the settle
     so a crash can't settle a still-non-terminal job — mirrors the MCP surface's CAS-then-settle ordering. The
     settle is UNCONDITIONAL (idempotent): on an already_terminal retry it REPAIRS a reservation left ADMITTED by a
-    crash between a prior CAS commit and its settle (Fable LOW).
+    crash between a prior CAS commit and its settle.
     `_action`'s own trailing commit then no-ops."""
     r = replication.force_fail_replication(c, k["replication_id"], k["reason"])
     c.commit()   # commit the (possibly no-op) CAS before settling

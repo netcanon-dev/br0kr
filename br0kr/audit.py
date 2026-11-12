@@ -345,7 +345,7 @@ class DenialLog:
         """The shared reserve→connect→INSERT→release body for BOTH `note` (denials) and `note_refusal`
         (placement refusals). Writes `outcome=self._outcome`. The stored params ALWAYS carry {reason, attempts}
         (the coalesced count), plus — for a refusal — the RESERVING caller's own `params` (lease/template/node
-        ids), NOT a shared per-key buffer (which would race a concurrent same-key event, Fable review).
+        ids), NOT a shared per-key buffer (which would race a concurrent same-key event).
         `connect` is the surface's FAST-FAIL connector (short connect_timeout): a refused ledger
         raises immediately and is swallowed. The throttle RESERVES first (no DB touch), so a coalesced /
         over-ceiling event costs nothing; only a reserved write opens a connection, and `_release` rolls the
@@ -358,7 +358,7 @@ class DenialLog:
             try:
                 # Use the params PASSED to THIS (the reserving) call — NOT a shared per-key buffer: a concurrent
                 # same-key event would otherwise swap the buffer between reserve and write, producing a row
-                # whose identity (actor/token/project) and params come from DIFFERENT callers (Fable review).
+                # whose identity (actor/token/project) and params come from DIFFERENT callers.
                 row = {**(params or {}), "reason": reason, "attempts": attempts}
                 with contextlib.closing(connect()) as conn:
                     conn.execute(_INSERT, (surface, action, actor, actor_token_id, project_id, scope, target,
@@ -392,7 +392,7 @@ class DenialLog:
         outcome='refused' instance). Coalesced per (surface, action, reason, template_id, project_id) — a
         hammering agent gets ~1 row/window with a folded `attempts` count, never a flood. `project_id` is IN
         the key so two tenants refused for the same reason DON'T coalesce into one row that would then mis-
-        attribute one tenant's identity/count to the other (Fable review); the daemon path passes project_id
+        attribute one tenant's identity/count to the other; the daemon path passes project_id
         None. The stored params carry the placement context (lease/template/node ids + reason) so an operator
         sees WHAT was refused and WHY; `target` is the primary id (lease → node → template). Distinct from
         `note`'s key shape + outcome, so the auth and placement channels never alias. NEVER raises."""

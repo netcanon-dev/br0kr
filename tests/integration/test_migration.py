@@ -152,7 +152,7 @@ class _Saga:
 
     def _do_flip(self, conn, lease_id, src, tgt, vmid, target_cluster) -> str:
         self.calls["flip"] += 1
-        self.calls["flip_cluster"] = target_cluster   # record the cluster stamped (S25 residual / Fable)
+        self.calls["flip_cluster"] = target_cluster   # record the cluster stamped (S25 residual)
         self.order.append("flip")
         return self._flip
 
@@ -184,7 +184,7 @@ def test_happy_path_reserves_then_actuates_then_commits(monkeypatch):
     assert saga.calls["link"] == 1 and saga.calls["flip"] == 1 and saga.calls["settle"] == 1
     # The flip stamps the cluster the guest was CONFIRMED on (dest.remote == "clB"), NOT a re-read of the
     # target node's live cluster_id — so a target-node repoint mid-pass can't poison lease.cluster_id (S25
-    # residual / Fable). The guest landed on clB, so the stamped cluster must be clB.
+    # residual). The guest landed on clB, so the stamped cluster must be clB.
     assert saga.calls["flip_cluster"] == "clB"
     assert len(pdm.migrate_calls) == 1
     req = saga.calls["admit"][0]

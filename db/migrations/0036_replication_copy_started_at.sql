@@ -5,7 +5,7 @@
 -- this COPY been running", NOT "how long ago was the job requested": PR-4's decided contract lets an operator
 -- create a REQUESTED job while the engine is OFF (replication_enabled=false), so a job can sit REQUESTED for
 -- days before the engine advances it — and basing the wall cap on created_at would then reclaim+destroy a
--- perfectly healthy clone on its very FIRST copy attempt (Fable: reservation-leak MEDIUM). A REQUESTED job
+-- perfectly healthy clone on its very FIRST copy attempt. A REQUESTED job
 -- holds no guest and no reservation, so its age says nothing about a wedged copy (the same S04/F5a rule that
 -- already keeps REQUESTED out of the idle reclaim).
 --

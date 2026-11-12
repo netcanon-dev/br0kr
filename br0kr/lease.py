@@ -632,7 +632,7 @@ def claim_pending_expired(conn: psycopg.Connection[Any], limit: int = 100) -> li
     A REPLICATION WAITER (``awaiting_replication_id`` set — parked behind a still-live copy that outran the
     caller's ``max_wait_seconds``) gets the DISTINGUISHABLE ``queue_timeout_awaiting_replication`` reason
     (§5.4 honesty) so the agent can tell an ordinary capacity timeout from 'the copy took longer than I was
-    willing to wait' and size ``max_wait_seconds`` above the copy time on retry (Fable LOW)."""
+    willing to wait' and size ``max_wait_seconds`` above the copy time on retry."""
     rows = conn.execute(
         """WITH due AS (
                 SELECT id FROM lease

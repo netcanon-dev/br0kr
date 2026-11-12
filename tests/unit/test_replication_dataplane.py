@@ -130,7 +130,7 @@ def test_mark_ready_flips_job_and_twin_atomically_guarded_both_ways():
     assert "job_state = 'READY'" in sql and "job_state = 'CONVERTING'" in sql and "vmid IS NOT NULL" in sql
     assert "EXISTS (SELECT 1 FROM template_instance" in sql
     assert "instance_state = 'READY'" in sql and "replication_id = (SELECT id FROM j)" in sql
-    # SPLIT-BRAIN averted (Fable MEDIUM): job flipped (j) but the twin EPQ-skipped (i None) → ROLL BACK, never
+    # SPLIT-BRAIN averted: job flipped (j) but the twin EPQ-skipped (i None) → ROLL BACK, never
     # commit a READY job with no READY instance.
     split = _ScriptConn(fetch=[(1, None)])
     assert replication._mark_ready(split, 7) is False
@@ -158,7 +158,7 @@ def test_force_fail_replication_no_teardown_returns_the_orphan_vmid():
     """force_fail_replication: one CTE reads prior + CASes non-terminal->FAILED, returns the possibly-orphaned
     vmid (the fence handle) and destroys NOTHING (the build.force_fail pattern), and FAILs the twin. It stamps
     guest_settled_at ONLY when there is no guest (vmid NULL → immediately prunable); a job WITH a minted vmid
-    stays UN-prunable until the leaked-guest reclaim confirms teardown (Fable — the unprunable-FAILED gap).
+    stays UN-prunable until the leaked-guest reclaim confirms teardown (the unprunable-FAILED gap).
     Idempotent (unknown/terminal -> forced=False). Guards the operator escape hatch."""
     rc = _ScriptConn(fetch=[("COPYING", 9950, True)])
     out = replication.force_fail_replication(rc, 7, "wedged")
@@ -181,15 +181,15 @@ def test_sweep_waiters_rejects_pending_behind_a_failed_job():
     sql = rc.sqls[0]
     assert "state = 'REJECTED'" in sql and "released_reason = 'replication_failed'" in sql
     assert "state = 'PENDING'" in sql and "job_state = 'FAILED'" in sql
-    # a waiter with a still-LIVE sibling covering job (a different reachable pool) is NOT rejected (Fable MED #14)
+    # a waiter with a still-LIVE sibling covering job (a different reachable pool) is NOT rejected
     assert "NOT EXISTS" in sql and "template_replication tr2" in sql and "sn.quarantined_at IS NULL" in sql
 
 
 def test_prune_replications_guards_live_instances_and_fast_fails_waiters():
     """prune RETAINS a settled terminal job whose replica INSTANCE is still live (READY/REPLICATING) — the
-    tenant byte-charge JOINs the job row, which must outlive the instance it attributes (Fable MED #18/#21) —
+    tenant byte-charge JOINs the job row, which must outlive the instance it attributes —
     and FAST-FAILS parked waiters (via sweep_waiters) BEFORE severing their links, so pruning never silently
-    disarms the §5.4 fast-fail (Fable LOW #15). Guards both SQL shapes + the ordering."""
+    disarms the §5.4 fast-fail. Guards both SQL shapes + the ordering."""
     rc = _ScriptConn(rowcount=0)
     replication.prune_replications(rc, 0)
     joined = " ".join(rc.sqls)
@@ -203,7 +203,7 @@ def test_replica_name_keeps_the_job_id_under_truncation():
     """_replica_name must preserve the JOB ID (the adopt identity discriminator) even when a long template id
     would otherwise truncate a trailing suffix — else two jobs of one long-id template share a name and the
     stamp_repl_fence identity guard degrades to marker-alone, letting one job's reclaim adopt+destroy a SIBLING
-    job's live, healthy clone at a recycled vmid (Fable HIGH)."""
+    job's live, healthy clone at a recycled vmid."""
     long_tid = "t" * 80
     mk = lambda jid: replication.ReplicationJob(   # noqa: E731
         id=jid, template_id=long_tid, source_instance_id=None, target_cluster_id="c", target_storage_id="s",
@@ -234,7 +234,7 @@ def test_publish_replication_enabled_writes_only_on_a_change():
 
 def test_stale_reclaim_query_covers_idle_and_wall_capped_on_copy_start():
     """stale_replications must return non-terminal copy jobs that are EITHER idle (updated_at) OR wall-capped —
-    and the wall cap keys on `copy_started_at`, NOT `created_at` (Fable M3): a job that sat REQUESTED for hours
+    and the wall cap keys on `copy_started_at`, NOT `created_at`: a job that sat REQUESTED for hours
     while the engine was OFF must not be reaped on its first copy attempt. Guards the two-limb reclaim predicate."""
     rc = _ScriptConn()
     replication.stale_replications(rc, 7200, 28800)
@@ -248,7 +248,7 @@ def test_stale_reclaim_query_covers_idle_and_wall_capped_on_copy_start():
 def test_touch_freshens_only_a_live_copy_jobs_updated_at():
     """_touch must bump updated_at ONLY for a COPYING/CONVERTING job (guarded), so the idle stale-reclaim
     measures leader-POLLING not copy DURATION — without it a copy slower than the stale window is reaped by its
-    own live leader (Fable HIGH). Guards the poll-touch, called in the TIMEOUT branches of _do_copy/_finalize."""
+    own live leader. Guards the poll-touch, called in the TIMEOUT branches of _do_copy/_finalize."""
     rc = _ScriptConn()
     replication._touch(rc, 7)
     assert "SET updated_at = now()" in rc.sqls[0] and "job_state IN ('COPYING','CONVERTING')" in rc.sqls[0]
@@ -265,7 +265,7 @@ def test_claim_stamps_copy_started_at():
 
 def test_cooldown_excludes_cancelled_jobs():
     """A CANCELLED job (error='cancelled') must NOT arm the cooldown — it never actuated anything, so an operator
-    who requests then cancels can re-request at once (Fable LOW). Guards the cooldown query carve-out."""
+    who requests then cancels can re-request at once. Guards the cooldown query carve-out."""
     rc = _ScriptConn(fetch=[(0,)])
     replication.replication_cooldown_remaining(rc, window_seconds=900, template_id="t", target_cluster_id="clA",
                                                target_storage_id="s")
@@ -274,7 +274,7 @@ def test_cooldown_excludes_cancelled_jobs():
 
 def test_sweep_waiters_excludes_already_present_failures():
     """sweep_waiters must NOT reject a waiter behind an 'already_present' failure — that job failed BECAUSE the
-    slot already materialised, so the promoter admits the waiter next tick (§5.4 do-not-early-reject, Fable MED).
+    slot already materialised, so the promoter admits the waiter next tick (§5.4 do-not-early-reject).
     Guards the reject-at-the-moment-of-success carve-out."""
     rc = _ScriptConn(rowcount=0)
     replication.sweep_waiters(rc)
@@ -284,7 +284,7 @@ def test_sweep_waiters_excludes_already_present_failures():
 def test_read_facts_uses_effective_pve_name():
     """_read_facts must resolve the target pool as COALESCE(ts.pve_name, ts.id) (the 0031 convention) — a
     default-named pool (pve_name NULL, incl. the live FastStorage row) would otherwise read None and fail the
-    copy before cloning (Fable HIGH). Guards the H7 fix."""
+    copy before cloning. Guards the effective-name read."""
     rc = _ScriptConn(fetch=[(9000, "FastStorage")])
     facts = replication._read_facts(rc, _job("COPYING", vmid=9950))
     assert "COALESCE(ts.pve_name, ts.id)" in rc.sqls[0]
@@ -294,7 +294,7 @@ def test_read_facts_uses_effective_pve_name():
 def test_settle_forced_reservation_looks_up_by_the_reserved_key():
     """settle_forced_reservation (the operator force-fail settle seam) must find the reservation by the
     deterministic br0kr-repl key so it frees the byte floor even after a crash/overlap — the force valve must
-    release what it documents (Fable HIGH). Guards the H9 settle seam."""
+    release what it documents. Guards the force-fail settle seam."""
     rc = _ScriptConn(fetch=[None])   # no reservation → clean no-op
     replication.settle_forced_reservation(rc, 7)
     assert "idem_key = %s" in rc.sqls[0] and rc.params[0] == ("br0kr-repl-7",)
@@ -303,7 +303,7 @@ def test_settle_forced_reservation_looks_up_by_the_reserved_key():
 def test_repl_orphan_reclaimable_requires_failed_job_and_matching_vmid():
     """repl_orphan_reclaimable must gate on POSITIVE FAILED-job evidence — the job is FAILED AND its stamped vmid
     equals the guest's — so a live/READY/absent/mismatch job SPARES the guest (§6.6). Guards the sweeper backstop
-    that reclaims a leaked force-failed copy without ever destroying an in-flight one (Fable MED/LOW)."""
+    that reclaims a leaked force-failed copy without ever destroying an in-flight one."""
     rc = _ScriptConn(fetch=[(1,)])
     assert replication.repl_orphan_reclaimable(rc, 9950, 7) is True
     sql = rc.sqls[0]

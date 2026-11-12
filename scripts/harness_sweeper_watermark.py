@@ -16,7 +16,7 @@ LEDGER guard, not an actuation change); the ledger reads (`max_lease_id`, `state
   below_destroyed_no_signal   an absent id STRICTLY BELOW the watermark (a real hole punched in the ledger) IS
                     destroyed when the scan has NO above-watermark absent — the genuine-anomaly reclaim path.
   rollback_spares_below       the SAME below-watermark hole, but with an above-watermark absent also in the
-                    scan (a rollback signal), is now SPARED too (Fable F1: id order != commit order, so a
+                    scan (a rollback signal), is now SPARED too (id order != commit order, so a
                     below-watermark absent can be a live guest) — only the terminal orphan is destroyed.
 
 Env: PGCONN (the throwaway ledger).
@@ -146,7 +146,7 @@ def check_below_destroyed_no_signal() -> bool:
 
 
 def check_rollback_spares_below() -> bool:
-    """THE Fable F1 case, against real PG: the SAME below-watermark hole, but now WITH an above-watermark absent
+    """THE rollback case, against real PG: the SAME below-watermark hole, but now WITH an above-watermark absent
     in the scan (a rollback signal) → the sweep spares BOTH absents (the hole could be a commit-reordered live
     guest), destroying only the terminal orphan."""
     ids, hole, wm = _hole_ledger()
