@@ -1563,6 +1563,12 @@ def force_fail_build(conn: psycopg.Connection[Any], build_id: int, reason: str |
 _MAX_TOKEN_TTL_DAYS = 3650   # a 10-year ceiling — a sane bound, not a security control (revoke is the control)
 
 
+# How long an agent token lives when its creator names no lifetime (review SEC-07). A forgotten token with no
+# expiry was the longest-lived bearer in the system; a never-expiring one now takes an explicit choice (the
+# dashboard's `never_expires`), and OAuth-minted tokens keep their own, shorter, lifetime.
+DEFAULT_TOKEN_DAYS = 90
+
+
 def validate_token(scope: str, label: str, expires_in_days: int | None) -> str | None:
     """Reject a malformed token request before any write. `scope` must be a known tier (mirrors the
     table CHECK and br0kr/auth's VALID_SCOPES — read/consume/provision/operator, so a typo'd tier is a
@@ -1583,7 +1589,7 @@ def validate_token(scope: str, label: str, expires_in_days: int | None) -> str |
 
 def create_token(
     conn: psycopg.Connection[Any], *, project_id: str | None, scope: str, label: str,
-    expires_in_days: int | None = None,
+    expires_in_days: int | None = DEFAULT_TOKEN_DAYS,
 ) -> dict[str, Any]:
     """Mint a token. The caller MUST have run `validate_token` first. Generates a fresh high-entropy secret,
     stores only its hash, and returns the PLAINTEXT secret ONCE in `secret` (the only time it is available —
@@ -1593,8 +1599,9 @@ def create_token(
     of any `project_id` passed (it is infra/cross-tenant, not a tenant). Every TENANT tier
     (read/consume/provision) REQUIRES an existing project — pre-checked so there is no FK abort and no secret
     is generated: reason='project_required' if project_id is missing, 'unknown_project' if it doesn't exist.
-    Returns {token_id, secret, scope, project_id, created, reason} (project_id echoes what was stored — None
-    for an operator token)."""
+    `expires_in_days` defaults to DEFAULT_TOKEN_DAYS; None mints a token that never expires, which a caller must
+    choose explicitly (the dashboard takes `never_expires`). Returns {token_id, secret, scope, project_id,
+    created, reason} (project_id echoes what was stored — None for an operator token)."""
     is_operator = scope == auth.OPERATOR_SCOPE
     effective_project = None if is_operator else project_id
     if not is_operator:

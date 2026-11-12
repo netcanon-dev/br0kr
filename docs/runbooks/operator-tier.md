@@ -38,16 +38,18 @@ POST /api/token/create
 
 Omit `project_id` entirely (or send null). A tenant tier that omits it is refused `project_required`; an
 operator token ignores any `project_id` you pass and is always stored project-less. An optional
-`expires_in_days` mints a self-expiring token (see rotation, below).
+`expires_in_days` sets its lifetime; without it the token expires in 90 days, and only `never_expires: true`
+mints one that never does (see rotation, below).
 
 **B. From Python** (an operator script against the ledger — e.g. during bootstrap):
 
 ```python
 from br0kr import admin, db
 with db.connect_with_retry() as c:
-    bad = admin.validate_token("operator", "ops-oncall", None)   # None = no expiry; or an int for a TTL
+    days = admin.DEFAULT_TOKEN_DAYS   # or another int; None never expires, so pass it only on purpose
+    bad = admin.validate_token("operator", "ops-oncall", days)
     assert bad is None, bad
-    out = admin.create_token(c, project_id=None, scope="operator", label="ops-oncall")
+    out = admin.create_token(c, project_id=None, scope="operator", label="ops-oncall", expires_in_days=days)
     c.commit()   # the admin verbs do NOT self-commit — the caller owns the txn
     print(out["secret"])   # the ONLY time the plaintext is available
 ```
@@ -199,8 +201,9 @@ migration as pre-wired, not proven-live.
   the secret stop resolving **immediately** (a soft delete — the row stays as an audit record). There is no way
   to recover or rotate a secret in place: to rotate, mint a new operator token, cut clients over, then revoke
   the old one.
-- **Prefer a TTL for a human/on-call token.** Pass `expires_in_days` at mint time so a forgotten token
-  self-expires (the ceiling is 3650 days; the TTL is a safety net, not the primary control — revoke is).
+- **Keep a TTL on a human/on-call token.** Every token gets 90 days unless you pass `expires_in_days` or
+  `never_expires`, so a forgotten one self-expires (the ceiling is 3650 days; the TTL is a safety net, not
+  the primary control — revoke is). The token table flags one that never expires.
 - **Audit.** `GET /api/tokens` (dashboard, operator-gated even as a GET — metadata only, never the hash or
   secret) lists every token with its `scope`, `label`, `last_used_at`, and computed `active` flag, so you can
   see which operator tokens exist and which are still in use before revoking.

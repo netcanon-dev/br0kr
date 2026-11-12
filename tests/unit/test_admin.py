@@ -1367,3 +1367,18 @@ def test_exists_refuses_any_other_table_before_running_sql(table):
     with pytest.raises(ValueError, match="allow-list"):
         admin._exists(conn, table, "x")
     assert conn.sqls == []
+
+
+def test_create_token_expires_by_default_and_never_only_when_asked():
+    """create_token with no lifetime mints a token that expires DEFAULT_TOKEN_DAYS (90) from now: the INSERT binds
+    that number of days, not NULL. Only an explicit expires_in_days=None mints one that never expires. Guards the
+    default drifting back to an eternal bearer, the longest-lived credential in the system (review SEC-07)."""
+    assert admin.DEFAULT_TOKEN_DAYS == 90
+    seq = _SeqP(("team-a",), (7,))
+    admin.create_token(seq, project_id="team-a", scope="consume", label="ci")
+    params = _param_of(seq, "INSERT INTO api_token")
+    assert params is not None and params[-2:] == (90, 90)
+    eternal = _SeqP(("team-a",), (8,))
+    admin.create_token(eternal, project_id="team-a", scope="consume", label="ci", expires_in_days=None)
+    params = _param_of(eternal, "INSERT INTO api_token")
+    assert params is not None and params[-2:] == (None, None)

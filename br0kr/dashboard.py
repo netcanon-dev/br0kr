@@ -82,8 +82,11 @@ Endpoints:
     POST /api/project/max-pinned {project_id, max_pinned}     — how many of its live leases may be pinned (0 = off)
     POST /api/template/grant  {project_id, template_id}       — grant a project a private template (token-gated)
     POST /api/template/revoke {project_id, template_id}       — revoke a project's template grant (token-gated)
-    POST /api/token/create {project_id, scope, label, expires_in_days?} — mint an agent token (returns the secret ONCE)
+    POST /api/token/create {project_id, scope, label, expires_in_days? | never_expires?} — mint an agent token
+                          (90 days unless told otherwise; returns the secret ONCE)
     POST /api/token/revoke {token_id}                         — revoke an agent token (token-gated)
+    POST /api/token/expiry {token_id, expires_in_days | never_expires} — re-date a token, or clear its expiry
+                          (one of the two is required: an empty body clears nothing)
     POST /api/operator/create {name, expires_in_days?}        — mint a NAMED dashboard operator (secret ONCE, 0026)
     POST /api/operator/revoke {operator_id}                   — revoke a named dashboard operator (token-gated)
     GET  /api/operators   — named-operator metadata (operator-gated); GET /api/whoami — the caller's own identity
@@ -332,8 +335,8 @@ def _num(body: dict[str, Any], key: str, conv: Callable[[Any], Any]) -> Any:
 
 
 def _opt_int(body: dict[str, Any], key: str) -> int | None:
-    """An OPTIONAL int field: absent / null / blank → None (e.g. a token's 'expires in days', where blank
-    means 'never expires'). A present value is coerced like _num (rejecting bool)."""
+    """An OPTIONAL int field: absent / null / blank → None (e.g. a named operator's 'expires in days', where
+    blank means 'never expires'). A present value is coerced like _num (rejecting bool)."""
     v = body.get(key)
     if v is None or v == "":
         return None
@@ -699,20 +702,44 @@ def _parse_prune_replications(body: dict[str, Any]) -> dict[str, Any]:
     return {"older_than_days": _req_int(body, "older_than_days"), "cluster_id": cid if cid else None}
 
 
+def _expiry_choice(body: dict[str, Any], *, default: int | None) -> int | None:
+    """A token's lifetime in days from a body: `expires_in_days`, or None (never expires) when `never_expires` is
+    true, or `default` when the body says neither. Naming both is `invalid_expiry`, so a client that meant one
+    never silently gets the other. A `default` of None means the body must say which (re-dating a token)."""
+    never = _opt_bool(body, "never_expires", False)
+    days = _opt_int(body, "expires_in_days")
+    if never and days is not None:
+        raise _Reject("invalid_expiry")
+    if never:
+        return None
+    if days is None and default is None:
+        raise _Reject("invalid_expiry")
+    return default if days is None else days
+
+
+def _parse_token_expiry(body: dict[str, Any]) -> dict[str, Any]:
+    """Re-date-a-token body: `token_id`, plus `expires_in_days`, or `never_expires: true` to clear the expiry. An
+    empty body clears nothing: making a token immortal takes the explicit flag (review SEC-07)."""
+    days = _expiry_choice(body, default=None)
+    return {"token_id": _req_int(body, "token_id"), "expires_in_days": days, "never_expires": days is None}
+
+
 def _parse_token_create(body: dict[str, Any]) -> dict[str, Any]:
     """Mint-a-token body: scope (a tier) + label, optional expires_in_days, and project_id — REQUIRED for a
     tenant tier (read/consume/provision) but OMITTED for an 'operator' token, which is project-less (0020).
     project_id is therefore OPTIONAL here; the tenant-project requirement is enforced by the verb
     (create_token → 'project_required' / 'unknown_project'). validate_token enforces the known tier set
     (read/consume/provision/operator) + the label/expiry bounds before any write (a typo'd tier is a crisp
-    400, not an un-resolvable token)."""
+    400, not an un-resolvable token). With neither `expires_in_days` nor `never_expires`, the token gets
+    admin.DEFAULT_TOKEN_DAYS (review SEC-07): a token that never expires takes `never_expires: true`, which the
+    audit trail records with the other params; both at once is `invalid_expiry`."""
     scope, label = _req_str(body, "scope"), _req_str(body, "label")
-    expires_in_days = _opt_int(body, "expires_in_days")
+    expires_in_days = _expiry_choice(body, default=admin.DEFAULT_TOKEN_DAYS)
     reason = admin.validate_token(scope, label, expires_in_days)
     if reason is not None:
         raise _Reject(reason)
     return {"project_id": _opt_str(body, "project_id"), "scope": scope, "label": label,
-            "expires_in_days": expires_in_days}
+            "expires_in_days": expires_in_days, "never_expires": expires_in_days is None}
 
 
 def _parse_operator_create(body: dict[str, Any]) -> dict[str, Any]:
@@ -1036,13 +1063,14 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
     "/api/replication/force-fail": (lambda b: {"replication_id": _req_int(b, "replication_id"),
                                                "reason": _opt_str(b, "reason")},
                                     _force_fail_replication_action),
-    "/api/token/create": (_parse_token_create, lambda c, **k: admin.create_token(c, **k)),
+    # `never_expires` is in the parsed params so the audit row names the choice; the verb takes only the days.
+    "/api/token/create": (_parse_token_create, lambda c, **k: admin.create_token(
+        c, **{key: v for key, v in k.items() if key != "never_expires"})),
     "/api/token/revoke": (lambda b: {"token_id": _req_int(b, "token_id")},
                           lambda c, **k: admin.revoke_token(c, k["token_id"])),
-    # Re-date (or clear) an existing token's expiry — token lifecycle beyond mint-time. expires_in_days
-    # absent/blank -> None -> clears the expiry (never expires); a positive int re-bases it from now.
-    "/api/token/expiry": (lambda b: {"token_id": _req_int(b, "token_id"),
-                                     "expires_in_days": _opt_int(b, "expires_in_days")},
+    # Re-date (or clear) an existing token's expiry — token lifecycle beyond mint-time. expires_in_days re-bases
+    # it from now; never_expires: true clears it; a body naming neither is invalid_expiry (review SEC-07).
+    "/api/token/expiry": (_parse_token_expiry,
                           lambda c, **k: admin.set_token_expiry(c, k["token_id"], k["expires_in_days"])),
     # NAMED dashboard operators (0026): mint/revoke a per-human dashboard credential so the audit records WHO
     # (vs the shared 'dashboard-operator'). Managed ONLY here (never over MCP). The secret is a create RESULT,

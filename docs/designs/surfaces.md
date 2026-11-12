@@ -42,7 +42,7 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   **governance** (`template_allowed` refuses a non-public catalog template the token's project has no grant
   for — `template_forbidden`, phase A3). It is a pure authorization layer ABOVE admission — it adds no scope
   and can only make a request more restricted, so the node/storage/project overprovision floor is untouched. `db/migrations/0008_api_tokens.sql` stores only the
-  hash (revocable, optionally time-boxed; project FK `ON DELETE CASCADE`). The token is a cleartext bearer,
+  hash (revocable, time-boxed: 90 days unless told otherwise since review SEC-07; project FK `ON DELETE CASCADE`). The token is a cleartext bearer,
   so a non-trusted network needs TLS in front (SECURITY.md C12). Proven on real Postgres
   (`scripts/harness_auth.py`).
   The **provision tier** (`br0kr/gateway.set_quota`) lets a token raise/lower its OWN project's quota over

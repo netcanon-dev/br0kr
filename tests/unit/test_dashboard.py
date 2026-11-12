@@ -669,10 +669,11 @@ def test_cancel_migration_is_wired_end_to_end():
 def test_value_editors_are_modal_popouts_not_native_prompts():
     """The single-value editors — a project's template-disk quota and a token's expiry — pop out as centered
     MODAL forms (like every add/edit form since #60), NOT a native `prompt()`. Each opener renders into
-    #form-slot with `paused=true`; a `submit*` reads the field, keeps the 'blank = clear/disable' semantic, and
-    a typo (a non-blank, non-positive-integer) shows an inline error WITHOUT clearing (the guard a bare prompt
-    made too easy to fumble). Regression guard: `prompt(` is gone from the page entirely, so a value editor
-    can't quietly go back to a blocking native dialog. Source/PAGE-needle (the JS lives in a Python string; the
+    #form-slot with `paused=true`; a `submit*` reads the field, and a typo (a non-positive-integer) shows an
+    inline error WITHOUT clearing (the guard a bare prompt made too easy to fumble). Blank disables template
+    downloads; a token's expiry clears only on an explicit Never expires box (review SEC-07), so blank is a typo.
+    Regression guard: `prompt(` is gone from the page entirely, so a value editor can't quietly go back to a
+    blocking native dialog. Source/PAGE-needle (the JS lives in a Python string; the
     syntax half is `node --check`)."""
     page = dashboard.PAGE
     js = _script_block(page)
@@ -687,7 +688,7 @@ def test_value_editors_are_modal_popouts_not_native_prompts():
         # token expiry: same shape
         "function setTokenExpiry(", "async function submitTokenExpiry(", 'id="te-days"',
         'onclick="submitTokenExpiry(', "body.expires_in_days = num",
-        "or leave blank to clear the expiry."):
+        "or tick Never expires."):
         assert needle in page, needle
 
 
@@ -1525,3 +1526,59 @@ def test_inline_handlers_hold_only_page_constants_and_numbers():
         if any(c in rest for c in "+`$"):
             bad.append(f"dynamic text left in {attr}")
     assert not bad, f"inline handlers that could carry server text: {bad}"
+
+
+@pytest.mark.parametrize(("extra", "days"), [({}, 90), ({"expires_in_days": 30}, 30), ({"never_expires": True}, None)],
+                         ids=["default", "days", "never"])
+def test_token_create_body_defaults_to_a_finite_lifetime(extra, days):
+    """POST /api/token/create without a lifetime mints for admin.DEFAULT_TOKEN_DAYS; expires_in_days sets it; only
+    `never_expires: true` mints a token that never expires. Guards a scripted or GUI create that names no lifetime
+    getting an eternal token, which the operator then forgets (review SEC-07)."""
+    body = {"project_id": "team-a", "scope": "consume", "label": "ci", **extra}
+    parsed = dashboard._parse_token_create(body)
+    assert parsed["expires_in_days"] == days
+    assert parsed["never_expires"] is (days is None)   # the audit row names the choice
+
+
+@pytest.mark.parametrize("body", [{"expires_in_days": 30, "never_expires": True}, {"never_expires": "yes"},
+                                  {"expires_in_days": 0, "never_expires": True}],
+                         ids=["both", "not-a-bool", "zero-and-never"])
+def test_token_create_refuses_an_ambiguous_lifetime(body):
+    """Naming a lifetime AND never_expires, or a never_expires that is not a boolean, is refused before any write.
+    Guards a client that meant one getting the other: a 30-day token minted as eternal, or the reverse."""
+    with pytest.raises(dashboard._Reject):
+        dashboard._parse_token_create({"project_id": "team-a", "scope": "consume", "label": "ci", **body})
+
+
+@pytest.mark.parametrize(("body", "days"), [({"expires_in_days": 14}, 14), ({"never_expires": True}, None)],
+                         ids=["redate", "clear"])
+def test_token_expiry_body_names_its_choice(body, days):
+    """POST /api/token/expiry re-dates a token with expires_in_days, and clears its expiry only with
+    `never_expires: true`. Guards the re-date path being the back door to an eternal token."""
+    assert dashboard._parse_token_expiry({"token_id": 3, **body}) == {"token_id": 3, "expires_in_days": days,
+                                                                       "never_expires": days is None}
+
+
+@pytest.mark.parametrize("body", [{}, {"never_expires": False}, {"expires_in_days": 14, "never_expires": True}],
+                         ids=["nothing", "never-false", "both"])
+def test_token_expiry_body_refuses_no_choice_or_both(body):
+    """A re-date body that names neither a lifetime nor never_expires, or names both, is refused. An empty body
+    used to clear the expiry; it now clears nothing. Guards a typo'd or empty request making a token immortal."""
+    with pytest.raises(dashboard._Reject):
+        dashboard._parse_token_expiry({"token_id": 3, **body})
+
+
+def test_the_token_table_flags_a_token_that_never_expires():
+    """The dashboard's token form starts at 90 days and offers an explicit Never expires box, the re-date dialog
+    has the same box, and the token table shows a live token with no expiry as "never expires" in the warn colour
+    rather than a dash (a revoked one keeps the dash). Ticking the box greys the days out, and the re-date dialog
+    refuses both. Guards an eternal token being the silent default in the GUI, the form showing a lifetime it is
+    not about to send, or an eternal token blending into the table (review SEC-07)."""
+    page = dashboard.PAGE
+    assert 'id="tf-exp" type="number" step="1" min="1" value="90"' in page
+    assert 'id="tf-never" type="checkbox"' in page and 'id="te-never" type="checkbox"' in page
+    assert "if($('tf-never').checked) body.never_expires = true;" in page
+    assert "if($('te-never').checked){" in page and "not both." in page
+    assert 'id="tf-never" type="checkbox" onchange="syncNever()"' in page and "d.disabled = b.checked" in page
+    render = page.partition("function renderTokens(")[2].partition("\nfunction ")[0]
+    assert ": (t.active ? '<span style=\"color:var(--warn)\">never expires</span>' : '—')" in render

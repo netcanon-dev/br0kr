@@ -439,7 +439,10 @@ Name the residual, why it's accepted, and what would close it.
   reserve), and every reservation is bound to the token's own project so a token can only spend its OWN
   tenant's quota and can't touch another tenant's lease. The secret is high-entropy random, stored only as
   an unsalted SHA-256 (nothing to brute-force at 256 bits; a ledger dump yields no working credential),
-  revocable (soft-delete) and optionally time-boxed. *Residual / accepted:* (a) the token is a SINGLE
+  revocable (soft-delete) and time-boxed: 90 days unless its creator names a lifetime, and never-expiring only on
+  an explicit `never_expires`, which the audit row names and the token table flags (review SEC-07). A NAMED
+  dashboard operator credential is not yet held to this: it never expires unless given `expires_in_days`.
+  *Residual / accepted:* (a) the token is a SINGLE
   shared secret per credential sent in CLEARTEXT (the HTTP `Authorization` header, or `BR0KR_API_TOKEN`
   env on stdio) — it has no per-request rotation and is replayable if observed, so a gateway reachable
   beyond a trusted LAN MUST sit behind TLS termination (C3); auth is identity + tenant-binding, NOT a

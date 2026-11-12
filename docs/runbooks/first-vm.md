@@ -109,7 +109,8 @@ post /api/token/create '{"scope":"consume","label":"first-agent","project_id":"f
 
 **Proves it:** `{"token_id": 1, "secret": "…", "scope": "consume", "project_id": "first", "created": true, …}`.
 The `secret` is shown once; br0kr keeps only its hash. A `consume` token can lease, renew and release within
-project `first`, and nothing else.
+project `first`, and nothing else. It expires in 90 days; add `"expires_in_days": N` to choose, or
+`"never_expires": true` for one that never does.
 
 ## 6 · Lease the VM
 

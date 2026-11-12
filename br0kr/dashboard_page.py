@@ -1245,7 +1245,8 @@ function renderTokens(toks){
   const rows = toks.map(t => `<tr>
     <td>${t.token_id}</td><td>${esc(t.project_id)}</td><td>${esc(t.scope)}</td><td>${esc(t.label)}</td>
     <td class="pill">${t.last_used_at?tdate(t.last_used_at):'never'}</td>
-    <td class="pill">${t.expires_at?tdate(t.expires_at):'—'}</td>
+    <td class="pill">${t.expires_at ? tdate(t.expires_at)
+      : (t.active ? '<span style="color:var(--warn)">never expires</span>' : '—')}</td>
     <td>${t.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
     <td>${t.active?'<button class="act ghost" onclick="setTokenExpiry('+(+t.token_id)+')">set expiry</button> '
       +'<button class="act danger" onclick="revokeToken('+(+t.token_id)+')">revoke</button>':''}</td>
@@ -1264,16 +1265,27 @@ function openTokenForm(){
     <label class="ff"><span>Project (blank = operator)</span><select id="tf-project">${projOpts}</select></label>
     <label class="ff"><span>Scope (tier)</span><select id="tf-scope">${scopeOpts}</select></label>
     <label class="ff"><span>Label</span><input id="tf-label" type="text" placeholder="e.g. ci-runner"></label>
-    <label class="ff"><span>Expires in days (blank = never)</span><input id="tf-exp" type="number" step="1"></label>
+    <label class="ff"><span>Expires in days</span><input id="tf-exp" type="number" step="1" min="1" value="90"></label>
+    <label class="ff"><span>Never expires</span><input id="tf-never" type="checkbox" onchange="syncNever()"></label>
     <p class="pill">An <b>operator</b> token (blank project) is cross-tenant infra: node cordon + lease
        migration + fleet reads. A powerful bearer secret — treat it like the dashboard operator token.</p>
     <div class="erow"><button class="act" onclick="submitToken()">create</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
     <span id="form-err" class="ferr"></span></div></div>`);
 }
+// the form's 90 matches admin.DEFAULT_TOKEN_DAYS; ticking Never expires greys the days out, so the form never
+// shows a lifetime it is not about to send
+function syncNever(){
+  for(const [box, days] of [['tf-never', 'tf-exp'], ['te-never', 'te-days']]){
+    const b = $(box), d = $(days);
+    if(b && d) d.disabled = b.checked;
+  }
+}
 async function submitToken(){
   const body = {project_id:$('tf-project').value, scope:$('tf-scope').value, label:$('tf-label').value};
-  const exp = $('tf-exp').value; if(exp !== '') body.expires_in_days = parseInt(exp, 10);
+  // a token that never expires is an explicit choice; otherwise the days given, or the server's default
+  if($('tf-never').checked) body.never_expires = true;
+  else { const exp = $('tf-exp').value; if(exp !== '') body.expires_in_days = parseInt(exp, 10); }
   const r = await postJSON('/api/token/create', body);
   if(r.ok && r.data && r.data.created) showSecret(r.data);
   else $('form-err').textContent = why(r);
@@ -1304,19 +1316,22 @@ function revokeToken(id){
 function setTokenExpiry(id){
   if(paused) return; paused = true;        // open a modal instead of a native prompt (one form at a time)
   openDialog(`<div class="form"><h3>Token expiry · #${id}</h3>
-    <label class="ff"><span>Days from now</span><input id="te-days" type="number" step="1" min="1"
-      placeholder="blank = never expires"></label>
-    <p class="pill">Blank clears the expiry (never expires); otherwise re-dates it that many days from now.</p>
+    <label class="ff"><span>Days from now</span><input id="te-days" type="number" step="1" min="1"></label>
+    <label class="ff"><span>Never expires</span><input id="te-never" type="checkbox" onchange="syncNever()"></label>
+    <p class="pill">Re-dates the token that many days from now, or clears its expiry if you tick Never expires.</p>
     <div class="erow"><button class="act" onclick="submitTokenExpiry(${+id})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
     <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitTokenExpiry(id){
   const body = {token_id:id}, t = $('te-days').value.trim();
-  if(t!==''){                              // blank → omit → server CLEARS the expiry (never expires)
+  if($('te-never').checked){              // clearing the expiry is an explicit choice, and only that
+    if(t !== ''){ $('form-err').textContent = 'Give a number of days or tick Never expires, not both.'; return; }
+    body.never_expires = true;
+  } else {
     const num = Number(t);
-    if(!Number.isInteger(num) || num<=0){  // a typo (NaN→null) must NOT silently clear the expiry
-      $('form-err').textContent = 'Enter a positive whole number of days, or leave blank to clear the expiry.';
+    if(t === '' || !Number.isInteger(num) || num<=0){    // blank or a typo must NOT clear the expiry
+      $('form-err').textContent = 'Enter a positive whole number of days, or tick Never expires.';
       return;
     }
     body.expires_in_days = num;

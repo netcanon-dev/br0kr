@@ -43,6 +43,9 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **Agent tokens expire after 90 days unless the creator chooses otherwise.** A never-expiring token, or clearing
+  one's expiry, now takes `never_expires: true` (`/api/token/expiry` with an empty body clears nothing); the
+  token table flags it (SEC-07).
 - **The replication CA key is no longer written where pg-primary mounts.** `gen-replication-certs.sh` writes
   `ca.key` to `certs-ca/` (or a third argument) and refuses a directory inside `certs/` (SEC-06).
 - **The dashboard has a light mode: Theme now offers Light, Dark and Auto.** A dozen hardcoded dark colours kept it

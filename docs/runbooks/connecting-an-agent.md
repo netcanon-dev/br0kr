@@ -31,7 +31,8 @@ Equivalent over the wire (what the panel POSTs), if you'd rather script it:
 
 ```
 POST /api/token/create
-  { "project_id": "team-a", "scope": "consume", "label": "ci-runner" }   # + optional "expires_in_days"
+  { "project_id": "team-a", "scope": "consume", "label": "ci-runner" }   # 90 days; or "expires_in_days": N,
+                                                                         # or "never_expires": true
   → { "token_id": 12, "secret": "<shown once>", "scope": "consume", "project_id": "team-a", "created": true }
 ```
 
