@@ -350,7 +350,8 @@ def test_the_page_meets_the_accessibility_floor():
     assert "function openDialog(html){" in js and "h.id = 'dlg-title'" in js
     assert "slot.setAttribute('aria-describedby', 'dlg-desc')" in js and "err.setAttribute('role', 'alert')" in js
     assert page.count('id="dlg-desc"') >= 3          # the confirmation and the two one-time secrets
-    assert js.count("$('form-slot').innerHTML") == 1          # confirmModal's occupancy check; no direct writer
+    # occupancy checks read it; nothing writes it but openDialog / closeForm
+    assert not re.search(r"\$\('form-slot'\)\.innerHTML\s*=(?!=)", js), "a direct #form-slot writer"
     assert js.count("openDialog(") >= 27
     for panel in ("clusters", "nodes", "networks", "storage", "discovery", "projects", "leases", "queue",
                   "templates", "instances", "replications", "downloads", "migrations", "tokens", "operators",
@@ -550,8 +551,9 @@ def test_discovery_dismissal_routes_are_allowlisted():
 def test_template_instance_panel_is_wired():
     """The Images-tab template-instance panel (0032 physical copies) is wired end-to-end in the PAGE: the
     instances section, the render off DATA.template_instances, and per-row operator actions bind/retire/delete
-    calling the (already-allowlisted) /api/instance/{bind,retire,delete} routes — delete behind a DANGER
-    confirmModal, retire behind a plain confirm. Guards a button renamed away from its handler/endpoint (a dead
+    calling the (already-allowlisted) /api/instance/{bind,retire,delete} routes — delete ("Delete row") and
+    retire behind plain, named confirms: the delete removes the ledger row only, never the guest, so it is not
+    red (review UI-06). Guards a button renamed away from its handler/endpoint (a dead
     control the backtick syntax check wouldn't catch). The write verbs' behaviour is proven in test_admin
     (bind/retire/delete) + the gui-parity harness; the data source (overview.template_instances) in
     test_inventory."""
@@ -563,28 +565,27 @@ def test_template_instance_panel_is_wired():
                    "function retireInstance(", "function deleteInstance(",
                    "'/api/instance/bind'", "'/api/instance/retire'", "'/api/instance/delete'",
                    'onclick="openBindForm(', 'onclick="retireInstance(', 'onclick="deleteInstance(',
-                   "confirmModal('Delete instance ROW",   # delete is DANGER (3rd arg true); retire is plain
+                   "confirmModal('Delete instance ROW",   # a ledger-row delete: named, not red (UI-06)
                    # the §4.4 force-delete flow: on instance_in_use, offer a FORCE re-POST that severs terminal
                    # lease history (mirrors delItem's node/storage force flow).
                    "r.data.reason==='instance_in_use'", "instance_id:inst.instance_id, force:true"):
         assert needle in page, needle
-    # pin the destructive-styling contract by function BODY (a bare "}, true);" needle would match any danger
-    # confirm): delete's callback closes with the danger flag, retire's does not — so flipping either is caught.
+    # pin the styling contract by function BODY: both of deleteInstance's confirms (the row delete and the
+    # nested FORCE re-confirm) and retire's are named and NOT red — none of them touches the guest
     import re as _re
     dele = _re.search(r"function deleteInstance\(.*?\n\}", page, _re.S)
-    # deleteInstance has TWO confirmModals — the outer Delete-ROW and the nested FORCE re-confirm — BOTH danger
-    # (destructive); count==2 so flipping EITHER to non-danger is caught (a bare `in` would pass with one).
-    assert dele and dele.group(0).count("}, true);") == 2, "both deleteInstance confirmModals must be DANGER"
+    assert dele and "}, false, 'Delete row');" in dele.group(0) and "}, false, 'Force delete row');" in dele.group(0)
+    assert "}, true" not in dele.group(0), "a template-instance ROW delete must not be red (UI-06)"
     reti = _re.search(r"function retireInstance\(.*?\n\}", page, _re.S)
-    assert reti and "}, true)" not in reti.group(0), "retireInstance must be a PLAIN confirmModal (no danger flag)"
+    assert reti and "}, false, 'Retire instance');" in reti.group(0), "retireInstance: a plain, named confirm"
 
 
 def test_replication_panel_is_wired():
     """The Images-tab template-replication panel (0034 control plane) is wired end-to-end in the PAGE: the
     replications section, the render off DATA.replications (carried in overview — see test_inventory), the
     replicate modal + cancel + prune-history controls calling /api/replication/{create,cancel,prune}, and the
-    act-as create audited result-aware (audit_replicate / refused_replicate). cancel is behind a DANGER
-    confirmModal. Guards a control renamed away from its handler/endpoint (a dead button the backtick check
+    act-as create audited result-aware (audit_replicate / refused_replicate). cancel is behind a named, not red
+    confirm: it only cancels a job that has not started copying (review UI-06). Guards a control renamed away from its handler/endpoint (a dead button the backtick check
     wouldn't catch); the verb behaviour is proven in test_replication + the replication harness."""
     for path in ("/api/replication/create", "/api/replication/cancel", "/api/replication/prune"):
         assert path in dashboard._ACTIONS
@@ -602,11 +603,11 @@ def test_replication_panel_is_wired():
                    # a rename of either half silently stops the storage <select> re-filtering on cluster change.
                    "function replClusterChanged(", 'onchange="replClusterChanged()"'):
         assert needle in page, needle
-    # cancel is a DANGER confirmModal (3rd arg true) — a copying job's teardown is not this verb's job, so the
-    # operator must confirm; pin it by function BODY so flipping the danger flag is caught.
+    # cancel confirms first but is not red: a REQUESTED job has not started copying, so nothing is torn down;
+    # pin it by function BODY so the label and the flag are both caught
     import re as _re
     canc = _re.search(r"function cancelReplication\(.*?\n\}", page, _re.S)
-    assert canc and "}, true);" in canc.group(0), "cancelReplication must use a DANGER confirmModal (}, true)"
+    assert canc and "}, false, 'Cancel replication');" in canc.group(0), "cancelReplication: named, not red"
 
 
 def test_placement_health_tiles_are_wired():
@@ -626,7 +627,8 @@ def test_placement_health_tiles_are_wired():
 def test_cancel_migration_is_wired_end_to_end():
     """The operator cancel-migration hatch (S07/F6) is wired: the POST /api/migration/cancel route dispatches
     to gateway.cancel_migration, and the migrations panel's client JS carries cancelMigration + a per-row
-    (non-terminal, operator-only) cancel button behind a DANGER confirmModal against that endpoint, surfacing
+    (non-terminal, operator-only) cancel button behind a named confirmModal against that endpoint (not red: the
+    guest stays on the source, untouched), surfacing
     the copy_in_flight refusal. Guards the route or the button being renamed away from its handler (a dead
     button the backtick-parity syntax check wouldn't catch). Source/PAGE-needle."""
     assert "/api/migration/cancel" in dashboard._ACTIONS
@@ -660,13 +662,67 @@ def test_value_editors_are_modal_popouts_not_native_prompts():
         assert needle in page, needle
 
 
+def _confirm_calls_without_label(js: str) -> list[str]:
+    """The confirmModal(...) calls in the page script with fewer than four top-level arguments (message, onOk,
+    danger, okLabel), as the first 60 characters of each. Strings, template literals with ${...} and nested
+    brackets are skipped, so a comma inside them does not count."""
+    out = []
+    i = 0
+    while (i := js.find("confirmModal(", i)) >= 0:
+        start = i + len("confirmModal(")
+        if js[max(0, i - 9):i] == "function ":
+            i = start
+            continue
+        depth, args, j, stack = 0, 1, start, []
+        while j < len(js):
+            c = js[j]
+            top = stack[-1] if stack else None
+            if top in ("'", '"'):
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == top:
+                    stack.pop()
+            elif top == "`":
+                if c == "`":
+                    stack.pop()
+                elif js.startswith("${", j):
+                    stack.append(depth)
+                    j += 2
+                    continue
+            else:
+                if isinstance(top, int) and c == "}" and depth == top:
+                    stack.pop()
+                elif js.startswith("//", j):
+                    j = js.index("\n", j)
+                    continue
+                elif c in "'\"`":
+                    stack.append(c)
+                elif c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif c == "," and depth == 0:
+                    args += 1
+            j += 1
+        if args < 4:
+            out.append(js[i:i + 60])
+        i = j
+    return out
+
+
 def test_destructive_confirmations_are_modal_dialogs_not_native_confirm():
     """The yes/no confirmations (cancel / delete / revoke / remove / clear) pop as styled MODAL dialogs
     (`confirmModal`) in the same #form-slot overlay as the forms — not a native browser confirm — so the whole
     page speaks one visual language. `confirmModal` guards on form-slot occupancy (NOT `paused`) so it can open
     from within bulk-select mode; `closeForm` became lease-select-aware (`paused = leaseSelectMode`) so
     dismissing a confirm opened from bulk-select restores the pause instead of breaking it. A `danger` flag reds
-    the confirm button. Regression guard: at most ONE native `confirm(` survives — `revokeGrant`, which fires
+    the confirm button, whose text names the action (review UI-06: "Release & destroy VM", "Revoke token",
+    "Delete row", never a bare "yes"); red is kept for what cannot be put back, so the instance-ROW delete and
+    the not-started replication cancel are grey and the revokes and config deletes are red (behaviour in
+    test_dashboard_client.py). Regression guard: at most ONE native `confirm(` survives — `revokeGrant`, which fires
     from inside the grant-management modal (a modal-over-modal would fight #form-slot) — so no NEW native confirm
     can creep in. Source/PAGE-needle (the JS lives in a Python string; `node --check` is the syntax half)."""
     page = dashboard.PAGE
@@ -683,8 +739,20 @@ def test_destructive_confirmations_are_modal_dialogs_not_native_confirm():
         # cancelLease is state-aware (confirmModal(msg,...) with a destroy warning for a live lease)
         "will be DESTROYED.", "confirmModal('Delete '", "confirmModal(msg,",
         "confirmModal('Clear the PDM endpoint", "confirmModal('Revoke token ", "confirmModal('Revoke operator ",
-        "confirmModal('Remove trusted source ", "confirmModal('Cancel / release '+ids.length"):
+        "confirmModal('Remove trusted source ", "'Cancel / release ' + n + ' selected lease'",
+        # the button names the action (UI-06)
+        "function confirmModal(message, onOk, danger, okLabel){", "${esc(okLabel || 'Confirm')}", ">go back</button>",
+        "$('cm-no').focus();",                                        # every confirmation starts on going back
+        "'Release & destroy VM'", "'Revoke token'", "'Revoke operator'", "'Delete row'", "'Cordon node'",
+        "'Cancel replication'", "'Delete network'", "'Release ' + n + ' & destroy '"):
         assert needle in page, needle
+    # every call names its action: a fourth argument on each confirmModal(...) call, counted by a small scanner
+    assert _confirm_calls_without_label(js) == [], "a confirmModal call without its button label"
+    # red tracks consequence on the table buttons too
+    assert 'class="act ghost" onclick="deleteInstance(${i})">delete row</button>' in js
+    assert '<button class="act ghost" onclick="cancelReplication(' in js
+    assert '<button class="act danger" onclick="revokeToken(' in js and 'class="act danger" onclick="delItem(' in js
+    assert "danger ghost" not in js            # one red: a ghost button is never red as well
 
 
 def test_post_action_routes_are_an_explicit_allowlist():

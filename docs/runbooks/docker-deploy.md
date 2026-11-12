@@ -154,10 +154,41 @@ errors stay until you close them. Each reason is the server's code followed by w
 - The arrow keys, Home and End move between the tabs. Only the open tab is a Tab stop, so Tab moves on into
   the page.
 - A form or confirmation opens as a named dialog with focus inside it. Tab stays inside the dialog, and Escape
-  closes it and returns focus to the button that opened it. A red confirmation starts on *cancel*.
+  closes it and returns focus to the button that opened it. Every confirmation starts on *go back*.
 - The 5-second refresh does not move your focus. A panel whose numbers changed is redrawn with focus on the
   same control. If that control is gone (its row went away), focus moves to the panel's heading, never to
   another row's button.
+
+**Red means it cannot be put back.** A button or confirmation is red only when the action does one of these:
+- destroys a guest, or may leave one running:
+  - releasing a running or cloning lease, or a reserved one, whose VM may be cloned at any moment;
+  - a bulk cancel that includes one;
+  - force-failing a replication, or a build that has a guest;
+- stops a credential that is in use (revoking a token or an operator);
+- deletes fleet configuration agents depend on (a cluster, node, project, pool, template or logical network);
+- removes a safety fence: clearing a quarantine, or removing a quarantined pair or bridge (*remove anyway*).
+  Clearing a quarantine is one click, inside the dialog that explains the quarantine, and is never where
+  focus starts.
+
+Ledger-only edits are grey: cordon, pin, a mark, a dismissal, a reachability pair or bridge, a trusted source, a
+PDM endpoint, a template-instance *row*, cancelling work that has not started.
+
+What a confirmation says:
+- Its button names the action, such as *Release & destroy VM*, *Revoke token* or *Delete row*.
+- A cancel reads the lease's state when the confirmation opens, not the table's. The table can be seconds old,
+  and minutes old while you tick leases for a bulk cancel. If that read fails, the confirmation says so and is
+  red.
+- A bulk cancel says how many of the selected leases have a VM that will be destroyed, and how many are reserved
+  and may get one first. Its *cancel selected* button is always red, because what it releases nearly always
+  includes a VM.
+- *Save settings* reads the settings again and lists each setting you changed, with its value on the server now
+  and its new value. It then sends only those, so it cannot undo a change another operator made after you opened
+  the page.
+  - A setting someone else changed meanwhile is named and left alone.
+  - A setting you both changed shows the value it had when your page loaded.
+  - If the settings cannot be re-read, nothing is saved.
+- One exception: revoking a template grant, inside the grants dialog, still asks with the browser's own
+  OK / Cancel.
 
 Smoke-test the whole stack end-to-end (no Proxmox needed) with
 [`scripts/run_compose_smoke.sh`](../../scripts/run_compose_smoke.sh): it brings the stack up under a

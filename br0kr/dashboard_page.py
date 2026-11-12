@@ -486,9 +486,11 @@ function why(r, fallback){
 const asResult = (r, data) => (r.ok && (data === null || typeof data !== 'object' || Array.isArray(data)))
   ? {ok:false, status:r.status, data:{error:'bad_response'}} : {ok:r.ok, status:r.status, data};
 // GET a JSON endpoint with the token. Never throws; status 0 means no answer.
-async function fetchJSON(path){
+async function fetchJSON(path, ms){
   let r;
-  try{ r = await fetch(path, {headers:authHeaders(), cache:'no-store'}); }
+  const opts = {headers:authHeaders(), cache:'no-store'};
+  if(ms && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(ms);
+  try{ r = await fetch(path, opts); }
   catch(e){ return {ok:false, status:0, data:null}; }
   let data = null; try{ data = await r.json(); }catch(e){}
   return asResult(r, data);
@@ -532,20 +534,50 @@ async function postJSON(path, body){
     return asResult(r, data);   // callers report why(r), which names a 401/403 token problem
   }catch(e){ return {ok:false, status:0, data:null}; }
 }
-function cancelLease(id){
+// a lease whose release destroys a VM: one that is running or being cloned. A reserved (ADMITTED) one has none
+// yet, but the daemon may start cloning it at any moment, so it is as risky. A migration reservation has no guest.
+const hasVm = l => !!l && !l.is_reservation && (l.state === 'ACTIVE' || l.state === 'PROVISIONING');
+const mayGetVm = l => !!l && !l.is_reservation && l.state === 'ADMITTED';
+// A cancel asks the server about the lease before it asks the operator, so one is prepared at a time: a second
+// click while the first is still reading does nothing, and a confirm that would open over another dialog says so.
+let CANCEL_ASKING = false;
+async function askFirst(read){
+  if(CANCEL_ASKING) return null;
+  CANCEL_ASKING = true;
+  try{ return await read(); } finally{ CANCEL_ASKING = false; }
+}
+const slotBusy = () => {
+  if($('form-slot').innerHTML === '') return false;
+  notify('Another dialog is open: close it, then cancel again.', 'info');
+  return true;
+};
+async function cancelLease(id){
   // state-aware confirm: dropping a queued request vs releasing a live lease (which DESTROYS its VM). A
-  // PENDING lease is NOT in DATA.leases (capacity states only) — it lives in the queue, so check both.
-  const l = ((DATA && DATA.leases) || []).find(x => x.lease_id===id)
+  // PENDING lease is NOT in DATA.leases (capacity states only) — it lives in the queue, so check both. The page
+  // may be seconds old (a queued request admitted, a reserved lease cloning), so ask the lease's state now.
+  const seen = ((DATA && DATA.leases) || []).find(x => x.lease_id===id)
           || (((DATA && DATA.queue && DATA.queue.waiting) || []).some(w => w.lease_id===id) ? {state:'PENDING'} : {});
-  const msg = l.state==='ACTIVE'
-    ? 'Release lease ' + id + '? Its VM (vmid ' + (l.vmid!=null?l.vmid:'?') + ') will be DESTROYED.'
+  const now = await askFirst(() => fetchJSON('/api/lease/status?lease_id=' + id, 5000));
+  if(!now || slotBusy()) return;
+  const fresh = !!(now.ok && now.data && now.data.state);
+  const l = fresh ? {...seen, state: now.data.state, vmid: now.data.vmid} : seen;
+  const vm = hasVm(l), soon = mayGetVm(l), vmid = l.vmid != null ? l.vmid : '?';
+  const msg = l.state==='ACTIVE' ? 'Release lease ' + id + '? Its VM (vmid ' + vmid + ') will be DESTROYED.'
+    : l.state==='PROVISIONING' ? 'Release lease ' + id + '? Its VM is being cloned (vmid ' + vmid + ') and will be '
+      + 'DESTROYED.'
+    : soon ? 'Release lease ' + id + '? It is reserved and has no VM yet, but cloning may start at any moment: a VM '
+      + 'made by the time this runs is DESTROYED.'
     : (l.state==='PENDING' ? 'Remove queued request ' + id + '?' : 'Cancel / release lease ' + id + '?');
-  confirmModal(msg, async () => {
+  // with the state unconfirmed, say so, and treat it as the worst case
+  const unsure = fresh ? '' : ' Its state could not be re-checked (' + why(now) + '), so this is what the page '
+    + 'last saw: a VM it has by now is DESTROYED.';
+  const label = vm ? 'Release & destroy VM' : (l.state==='PENDING' ? 'Remove request' : 'Release lease');
+  confirmModal(msg + unsure, async () => {
     const r = await postJSON('/api/cancel', {lease_id:id});
     if(!r.ok){ notify('Cancel failed: ' + why(r), 'err'); return; }
     if(r.data && r.data.cancelled === false) notify('Lease ' + id + ' had already ended; nothing to cancel.', 'info');
     poll();
-  }, true);
+  }, vm || soon || !fresh, label);
 }
 // Cordon toggle: closes a node to NEW provisioning (existing leases keep running) or re-opens it.
 function toggleCordon(i){
@@ -556,7 +588,7 @@ function toggleCordon(i){
     const r = await postJSON('/api/node/cordon', {node_id:n.node_id, cordoned:to});
     if(r.ok && r.data && r.data.updated) poll();
     else notify('Cordon failed: ' + why(r), 'err');
-  });
+  }, false, to ? 'Cordon node' : 'Uncordon node');
 }
 function pinLease(id){ setPin(id, true); }
 function unpinLease(id){ setPin(id, false); }
@@ -570,7 +602,7 @@ function setPin(id, to){
     // no reason = done, including a lease that was already in that state (a double click, a stale page)
     if(r.ok && r.data && r.data.reason == null) poll();
     else notify((to ? 'Pin' : 'Unpin') + ' failed: ' + why(r), 'err');
-  });
+  }, false, to ? 'Pin lease' : 'Unpin lease');
 }
 function setMaxPinned(i){
   // 0049: how many of this project's live leases may be pinned at once (0 = pinning off).
@@ -658,7 +690,7 @@ const ENT = {
 };
 const editItem = (e,i) => openForm(e, 'edit', DATA[ARR[e]][i]);
 const acts = (e,i) => canEdit ? `<div class="erow"><button class="act ghost" onclick="editItem('${e}',${i})">edit`+
-  `</button><button class="act ghost" onclick="delItem('${e}',${i})">delete</button></div>` : '';
+  `</button><button class="act danger" onclick="delItem('${e}',${i})">delete</button></div>` : '';
 const addBtn = (e,label) => canEdit ?
   `<div class="toolbar"><button class="act" onclick="openForm('${e}','create')">+ add ${label}</button></div>` : '';
 function ffield(f, val, ro, ph){
@@ -708,14 +740,18 @@ function openDialog(html){
   else slot.removeAttribute('aria-describedby');
   const err = $('form-err'); if(err && slot.contains(err)) err.setAttribute('role', 'alert');   // said when set
   // focus lands on the first field that can be edited (else the first field: a token to copy); with none, on the
-  // first button that destroys nothing (cancel, on a red confirm); with no control yet (a lease still loading),
-  // on the heading
+  // button that closes the dialog (an action needs a deliberate move), else the first that is not red; with no
+  // control yet (a lease still loading), on the heading. confirmModal focuses its own "go back".
   const all = focusables(slot), fields = all.filter(x => ['INPUT', 'SELECT', 'TEXTAREA'].includes(x.tagName));
-  const first = fields.find(x => !x.readOnly) || fields[0]
+  const first = fields.find(x => !x.readOnly) || fields[0] || dismissIn(all)
     || all.find(x => !x.className.split(' ').includes('danger')) || all[0];
   if(first) first.focus();
   else if(h){ h.tabIndex = -1; h.focus(); }
 }
+// the open dialog's close / cancel / done button: the one whose handler closes it
+const dismissIn = list => list.find(x => (x.getAttribute('onclick') || '').includes('closeForm()'));
+// a button that has just turned into a forcing second step: focus goes back to the safe answer
+const focusDismiss = () => { const d = dismissIn(focusables($('form-slot'))); if(d) d.focus(); };
 // closeForm dismisses whatever is in #form-slot and puts focus back on the control that opened it. `paused` returns
 // to what lease-select mode needs — stay paused while a bulk-select is active, so a confirm modal opened FROM
 // bulk-select restores the pause instead of breaking it; otherwise unpause + poll (the normal form case —
@@ -741,16 +777,26 @@ document.addEventListener('keydown', e => {
     (e.shiftKey ? all[all.length - 1] : all[0]).focus();
   }
 });
-// A styled yes/no confirmation MODAL — same #form-slot overlay as the forms, so a destructive confirm lands in
-// the same visual language as every other dialog (replaces the native browser dialog). onOk() runs on confirm
-// (it does its own POST + refresh); cancel/Escape just dismiss. `danger` reddens the confirm button. Guarded on
-// form-slot occupancy — NOT on `paused` — so it can also open from within bulk-select mode (paused already true).
-function confirmModal(message, onOk, danger){
+// A styled confirmation MODAL — same #form-slot overlay as the forms, so a destructive confirm lands in the same
+// visual language as every other dialog (replaces the native browser dialog). onOk() runs on confirm (it does its
+// own POST + refresh); "go back"/Escape just dismiss. The confirm button says what it does (okLabel: "Revoke
+// token", "Release & destroy VM"), never a bare "yes". Guarded on form-slot occupancy — NOT on `paused` — so it can
+// also open from within bulk-select mode (paused already true).
+// RED (`danger`, here and on the button that opens it) is kept for what cannot be put back: an action that
+// destroys a guest or may leave one running, stops a credential that is in use, or deletes fleet configuration
+// that agents' requests depend on (a cluster, node, project, pool, template, logical network), or removes a safety
+// fence (clears or drops a quarantine). An edit that only changes the ledger and can be made again (cordon, pin, a
+// mark, a dismissal, a pair or bridge, a source, a PDM endpoint, an instance ROW, cancelling work that has not
+// started, a setting) is not red. Focus always starts on "go back": red or not, a confirmation is a question.
+// Clearing a quarantine is red but one click, inside the dialog that explains the quarantine, and is never the
+// button focus starts on.
+function confirmModal(message, onOk, danger, okLabel){
   if($('form-slot').innerHTML !== '') return;   // a form/modal is already open — one at a time
   paused = true;
   openDialog(`<div class="form"><h3>Confirm</h3><p id="dlg-desc">${esc(message)}</p>`
-    + `<div class="erow"><button class="act${danger?' danger':''}" id="cm-ok">yes</button>`
-    + `<button class="act ghost" id="cm-no">cancel</button></div></div>`);
+    + `<div class="erow"><button class="act${danger?' danger':''}" id="cm-ok">${esc(okLabel || 'Confirm')}</button>`
+    + `<button class="act ghost" id="cm-no">go back</button></div></div>`);
+  $('cm-no').focus();
   $('cm-no').onclick = closeForm;
   $('cm-ok').onclick = () => { closeForm(); onOk(); };   // dismiss first (snappy), then run the action
 }
@@ -785,11 +831,11 @@ function delItem(ename, i){
         const r2 = await postJSON(e.del, {[e.key]: id, force:true});
         if(r2.ok && r2.data && r2.data.deleted) poll();
         else notify('Delete failed: ' + why(r2), 'err');
-      }, true);
+      }, true, 'Force delete ' + e.label);
       return;
     }
     notify('Delete failed: ' + why(r), 'err');
-  }, true);
+  }, true, 'Delete ' + e.label);
 }
 async function clearPdm(i){
   // Unset a cluster's PDM endpoint (the one nullable connection field a blank edit can't clear). The read
@@ -799,7 +845,7 @@ async function clearPdm(i){
     const r = await postJSON('/api/cluster/edit', {cluster_id:c.cluster_id, clear_pdm_endpoint:true});
     if(r.ok && r.data && r.data.updated) poll();
     else notify('Clear failed: ' + why(r), 'err');
-  }, true);
+  }, false, 'Clear endpoint');
 }
 // ── storage placement, content and reachability (0031/0041), from the storage card. Placement binds a pool to its
 //    cluster and the storage name PVE uses; content declares what the pool may hold (a template build or a
@@ -911,8 +957,8 @@ function openStoragePair(i, k){
     : (rn.verified ? 'Verified by a post-clone check.' : 'Declared, not verified yet.');
   openDialog(`<div class="form"><h3>${esc(rn.node_id)} · ${esc(s.storage_id)}</h3>
     <p class="pill">${state}</p>
-    <div class="erow">` + (rn.quarantined ? '<button class="act" id="pair-clear">clear quarantine</button>' : '')
-    + `<button class="act danger" id="pair-remove">remove this node</button>
+    <div class="erow">` + (rn.quarantined ? '<button class="act danger" id="pair-clear">clear quarantine</button>' : '')
+    + `<button class="act ghost" id="pair-remove">remove this node</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
     <span id="form-err" class="ferr"></span></div></div>`);
   if(rn.quarantined) $('pair-clear').onclick = () => clearStorageQuarantine(sid, nid);
@@ -934,7 +980,9 @@ async function removeStorageNode(sid, nid, force){
     // removing a quarantined pair drops its quarantine too: say so, and make the second click the force
     $('form-err').textContent = 'This pair is quarantined. Removing it drops the quarantine as well, so adding '
       + 'the node back later starts it unverified instead of fenced off.';
-    const b = $('pair-remove'); b.textContent = 'remove anyway'; b.onclick = () => removeStorageNode(sid, nid, true);
+    const b = $('pair-remove'); b.textContent = 'remove anyway'; b.className = 'act danger';   // drops a quarantine
+    b.onclick = () => removeStorageNode(sid, nid, true);
+    focusDismiss();
     return;
   }
   $('form-err').textContent = why(r);
@@ -960,7 +1008,7 @@ function renderNetworks(){
     <td>${(ln.nodes || []).length ? ln.nodes.map(m => bridgePill(m.node_id, m)).join(' ')
       : '<span style="color:var(--warn)">no node declares a bridge for it</span>'}</td>
     <td class="num">${ln.template_count}</td>
-    ${canEdit ? `<td><button class="act ghost" onclick="deleteNetwork(${i})">delete</button></td>` : ''}
+    ${canEdit ? `<td><button class="act danger" onclick="deleteNetwork(${i})">delete</button></td>` : ''}
     </tr>`).join('');
   paint('networks', add + `<table><thead><tr><th>Network</th><th>Description</th><th>Bridge per node</th>
     <th class="num">Templates</th>${canEdit ? TH_ACTS : ''}</tr></thead><tbody>${rows}</tbody></table>`);
@@ -991,14 +1039,14 @@ function deleteNetwork(i){
     const r = await postJSON('/api/network/delete', {network_id:ln.network_id});
     if(r.ok && r.data && r.data.deleted) poll();
     else notify('Delete failed: ' + why(r), 'err');
-  }, true);
+  }, true, 'Delete network');
 }
 function openBridgesForm(i){
   if(paused) return; paused = true;
   const n = DATA.nodes[i], nets = (DATA && DATA.networks) || [], ms = netsOf(n.node_id);
   const rows = ms.map((m, k) => `<tr><td>${esc(m.network_id)}</td><td>${esc(m.bridge)}</td><td>${pairState(m)}</td>
-    <td>` + (m.quarantined ? `<button class="act ghost" id="nb-clear-${k}">clear quarantine</button> ` : '')
-    + `<button class="act danger" id="nb-del-${k}">remove</button></td></tr>`).join('');
+    <td>` + (m.quarantined ? `<button class="act danger" id="nb-clear-${k}">clear quarantine</button> ` : '')
+    + `<button class="act ghost" id="nb-del-${k}">remove</button></td></tr>`).join('');
   const table = ms.length ? `<table><thead><tr><th>Network</th><th>Bridge</th><th>State</th>${TH_ACTS}</tr></thead>
     <tbody>${rows}</tbody></table>` : '<div class="empty">no bridges declared on this node</div>';
   const add = nets.length ? `<label class="ff"><span>Logical network</span><select id="nb-net">`
@@ -1047,8 +1095,9 @@ async function netPairAction(nodeId, net, what, k, force){
     // removing a quarantined pair drops its quarantine too: say so, and make the second click the force
     $('form-err').textContent = 'The ' + net + ' bridge on ' + nodeId + ' is quarantined. Removing it drops the '
       + 'quarantine as well, so declaring it again later starts it unverified instead of fenced off.';
-    const b = $('nb-del-' + k); b.textContent = 'remove anyway';
+    const b = $('nb-del-' + k); b.textContent = 'remove anyway'; b.className = 'act danger';   // drops a quarantine
     b.onclick = () => netPairAction(nodeId, net, 'delete', k, true);
+    focusDismiss();
     return;
   }
   $('form-err').textContent = why(r);
@@ -1084,7 +1133,7 @@ function toggleSourceDirty(i){
     const r = await postJSON('/api/template/source-dirty', {template_id:t.template_id, dirty:to});
     if(r.ok && r.data && r.data.updated) poll();
     else notify((to ? 'Mark' : 'Clear') + ' failed: ' + why(r), 'err');
-  });
+  }, false, to ? 'Mark hand-modified' : 'Clear the mark');
 }
 // ── discovery dismissals (0044). The drift report (discover_reachability) reads every node live from Proxmox, so it
 //    runs where the PVE credential lives: an operator MCP client. This dashboard holds no PVE credential: it
@@ -1153,7 +1202,7 @@ function clearDismissal(i){
     const r = await postJSON('/api/discovery/dismissal/clear', {kind:x.kind, node_id:x.node_id, subject:x.subject});
     if(r.ok && r.data && r.data.cleared) loadDismissals();
     else notify('Clear failed: ' + why(r), 'err');
-  });
+  }, false, 'Clear dismissal');
 }
 // ── agent tokens (operator-only; /api/tokens metadata is gated, fetched with the operator token) ──
 // `go === false`: not due this poll (operatorReads) — keep the panel as rendered. Called bare after an action.
@@ -1176,7 +1225,7 @@ function renderTokens(toks){
     <td class="pill">${t.expires_at?tdate(t.expires_at):'—'}</td>
     <td>${t.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
     <td>${t.active?'<button class="act ghost" onclick="setTokenExpiry('+t.token_id+')">set expiry</button> '
-      +'<button class="act ghost" onclick="revokeToken('+t.token_id+')">revoke</button>':''}</td>
+      +'<button class="act danger" onclick="revokeToken('+t.token_id+')">revoke</button>':''}</td>
   </tr>`).join('');
   paint('tokens', add + `<table><thead><tr><th>#</th><th>Project</th><th>Scope</th><th>Label</th>
     <th>Last used</th><th>Expires</th><th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
@@ -1226,7 +1275,7 @@ function revokeToken(id){
     const r = await postJSON('/api/token/revoke', {token_id:id});
     if(r.ok && r.data && r.data.revoked) loadTokens();
     else notify('Revoke failed: ' + why(r), 'err');
-  }, true);
+  }, true, 'Revoke token');
 }
 // Re-date (or clear) an existing token's expiry — lifecycle beyond mint (a typo must NOT silently clear it).
 function setTokenExpiry(id){
@@ -1275,7 +1324,7 @@ function renderOperators(ops){
     <td class="pill">${o.last_used_at?tdate(o.last_used_at):'never'}</td>
     <td class="pill">${o.expires_at?tdate(o.expires_at):'—'}</td>
     <td>${o.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
-    <td>${o.active?'<button class="act ghost" onclick="revokeOperator('+o.operator_id+')">revoke</button>':''}</td>
+    <td>${o.active?'<button class="act danger" onclick="revokeOperator('+o.operator_id+')">revoke</button>':''}</td>
   </tr>`).join('');
   paint('operators', add + `<table><thead><tr><th>#</th><th>Name</th><th>Last used</th><th>Expires</th>
     <th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
@@ -1319,20 +1368,20 @@ function revokeOperator(id){
     const r = await postJSON('/api/operator/revoke', {operator_id:id});
     if(r.ok && r.data && r.data.revoked) loadOperators();
     else notify('Revoke failed: ' + why(r), 'err');
-  }, true);
+  }, true, 'Revoke operator');
 }
 
 // ── operator settings (migration 0021; operator-gated like the token panel; edits the shared ledger row) ──
 async function loadSettings(){
   const sec = $('settings-sec');
-  if(!canEdit){ sec.style.display='none'; $('settings').innerHTML=''; return; }  // clear on lock → reload on unlock
+  if(!canEdit){ sec.style.display='none'; paint('settings', ''); return; }  // clear on lock → reload on unlock
   sec.style.display='';
   // already rendered: don't clobber an in-progress edit on poll. A failed load is NOT "rendered": retry it.
   const el = $('settings');
   if(el.innerHTML.trim() !== '' && !el.querySelector('.load-err')) return;
   const r = await opFetch('/api/settings');
   if(r.ok && Array.isArray(r.data.knobs)){ renderSettings(r.data); renderAttention(); }   // reload_pending
-  else el.innerHTML = loadErr('settings', r.ok ? {status:r.status, data:{error:'bad_response'}} : r);
+  else paint('settings', loadErr('settings', r.ok ? {status:r.status, data:{error:'bad_response'}} : r));
 }
 function renderSettings(s){
   SETTINGS = s;
@@ -1364,7 +1413,7 @@ function renderSettings(s){
   }).join('');
   const pending = s.reload_pending ? '<span class="warn">reload pending</span>' : '';
   const ver = String(s.schema_version||0).padStart(4,'0');
-  $('settings').innerHTML = `<div class="form" style="max-width:600px">`
+  paint('settings', `<div class="form" style="max-width:600px">`
     + `<p class="pill">Ledger schema: migrations applied through <b>${ver}</b>.</p>`
     + `<p class="pill">Overrides the SHARED ledger config, hot-applied without a restart `
     + `(the daemon each tick, the gateway per request). A blank field CLEARS the override so each process `
@@ -1372,7 +1421,7 @@ function renderSettings(s){
     + `env-only.</p>${rows}`
     + `<div class="erow"><button class="act" onclick="submitSettings()">save settings</button>`
     + `<button class="act ghost" onclick="reloadFleet()">reload fleet now</button> ${pending}`
-    + `<span id="set-msg" class="pill"></span></div></div>`;
+    + `<span id="set-msg" class="pill"></span></div></div>`);
 }
 function collectSettings(){
   const patch = {}; let err = null;
@@ -1389,13 +1438,47 @@ function collectSettings(){
   });
   return {patch, err};
 }
+// A save names what it changes and sends only that: the panel loads once, so sending every knob from a page opened
+// an hour ago would put back values another operator has changed since.
+// What the operator edited is what differs from the values the panel was drawn with; the "old" values shown are
+// the server's now, and a setting changed elsewhere meanwhile is named and left alone.
 async function submitSettings(){
   const {patch, err} = collectSettings();
   const msg = $('set-msg');
   if(err){ msg.textContent = err; return; }
-  const r = await postJSON('/api/settings/edit', patch);
-  if(r.ok && r.data && r.data.updated) msg.textContent = 'saved — applies within a tick';
-  else msg.textContent = 'not saved: ' + why(r);
+  // the value an override shows as (a str override is compared as the trimmed text a field would hold)
+  const was = k => (k.override === null || k.override === undefined) ? null
+    : (k.kind === 'str' ? (String(k.override).trim() || null) : k.override);
+  const shown = v => v === null ? 'default' : String(v);
+  const drawn = ((SETTINGS && SETTINGS.knobs) || []);
+  const changed = drawn.filter(k => k.name in patch && patch[k.name] !== was(k));
+  if(!changed.length){ msg.textContent = 'nothing to save: no setting changed'; return; }
+  // the "old" values must be the server's: without a fresh read there is no honest diff, so nothing is sent
+  const r0 = await opFetch('/api/settings');
+  const say = t => { const m = $('set-msg'); if(m) m.textContent = t; };   // gone if the page locked meanwhile
+  if(!canEdit) return;
+  if(!(r0.ok && Array.isArray(r0.data.knobs))){
+    say('not saved: could not re-read the settings (' + why(r0) + ')'); return; }
+  const fresh = r0.data;
+  const live = name => fresh.knobs.find(k => k.name === name) || drawn.find(k => k.name === name);
+  const moved = k => was(live(k.name)) !== was(k);   // changed elsewhere since the panel was drawn
+  const elsewhere = drawn.filter(k => !changed.includes(k) && moved(k));
+  const diff = {};
+  changed.forEach(k => { diff[k.name] = patch[k.name]; });
+  const n = changed.length, s = n === 1 ? '' : 's';
+  const note = elsewhere.length ? ' (' + elsewhere.map(k => k.name).join(', ') + ' changed elsewhere since this page '
+    + 'loaded; left as ' + (elsewhere.length === 1 ? 'it is' : 'they are') + '.)' : '';
+  const line = k => k.name + ': ' + shown(was(live(k.name))) + ' → ' + shown(patch[k.name])
+    + (moved(k) ? ' (was ' + shown(was(k)) + ' when this page loaded)' : '');
+  confirmModal('Save ' + n + ' setting' + s + '? ' + changed.map(line).join('; ') + '.' + note
+    + ' They apply fleet-wide within a tick.', async () => {
+      const r = await postJSON('/api/settings/edit', diff);
+      if(r.ok && r.data && r.data.updated){
+        fresh.knobs.forEach(k => { if(k.name in diff) k.override = diff[k.name]; });
+        renderSettings(fresh);   // every field from the server's values now, the saved ones included
+        say('saved ' + n + ' setting' + s + ' — applies within a tick');
+      } else say('not saved: ' + why(r));
+    }, false, 'Save ' + n + ' setting' + s);
 }
 async function reloadFleet(){
   const r = await postJSON('/api/reload', {});
@@ -1532,7 +1615,7 @@ function renderTemplates(){
     `<button class="act ghost" onclick="openGrantForm(${i})">grants</button>`+
     `<button class="act ghost" onclick="openTemplateNetForm(${i})">network</button>`+ dirtyBtn(t,i) +
     `<button class="act ghost" onclick="editItem('template',${i})">edit</button>`+
-    `<button class="act ghost" onclick="delItem('template',${i})">delete</button></div>` : '';
+    `<button class="act danger" onclick="delItem('template',${i})">delete</button></div>` : '';
   const tnet = t => t.logical_network_id ? esc(t.logical_network_id) : '—';
   const dirty = t => t.source_dirty ? ' <span class="pill" style="color:var(--warn)" '+
     'title="hand-modified in Proxmox: a rebuild from its source is refused">✎ hand-modified</span>' : '';
@@ -1557,7 +1640,7 @@ function renderInstances(){
   const iActs = i => canEdit ? `<div class="erow">`+
     `<button class="act ghost" onclick="openBindForm(${i})">bind</button>`+
     `<button class="act ghost" onclick="retireInstance(${i})">retire</button>`+
-    `<button class="act danger ghost" onclick="deleteInstance(${i})">delete</button></div>` : '';
+    `<button class="act ghost" onclick="deleteInstance(${i})">delete row</button></div>` : '';
   if(!ins.length){ paint('instances', '<div class="empty">no template instances</div>'); return; }
   const rows = ins.map((n,i) => `<tr>
     <td class="num">${n.instance_id}</td><td>${esc(n.template_id)}</td><td class="pill">${esc(n.cluster_id)}</td>
@@ -1621,7 +1704,7 @@ function retireInstance(i){
       const r = await postJSON('/api/instance/retire', {instance_id:inst.instance_id});
       if(r.ok && r.data && r.data.retired) poll();
       else notify('Retire failed: ' + why(r), 'err');
-    });
+    }, false, 'Retire instance');
 }
 function deleteInstance(i){
   const inst = ((DATA && DATA.template_instances) || [])[i]; if(!inst) return;
@@ -1639,11 +1722,11 @@ function deleteInstance(i){
             const r2 = await postJSON('/api/instance/delete', {instance_id:inst.instance_id, force:true});
             if(r2.ok && r2.data && r2.data.deleted) poll();
             else notify('Delete failed: ' + why(r2), 'err');
-          }, true);
+          }, false, 'Force delete row');
         return;
       }
       notify('Delete failed: ' + why(r), 'err');
-    }, true);
+    }, false, 'Delete row');   // the ledger row only: the guest is not touched
 }
 // ── template replications (0034 control plane): the async copy of a template onto another (cluster, storage).
 //    Data rides in overview() (DATA.replications), like the instances panel — the table shows for everyone; the
@@ -1663,9 +1746,9 @@ function renderReplications(){
     <td class="pill">${r.project_id?esc(r.project_id):'—'}</td>
     <td class="pill err">${r.error?esc(r.error.slice(0,80)):''}</td>
     ${canEdit?'<td>'+(r.job_state==='REQUESTED'
-      ?'<button class="act danger ghost" onclick="cancelReplication('+i+')">cancel</button>'
+      ?'<button class="act ghost" onclick="cancelReplication('+i+')">cancel</button>'
       :(['COPYING','CONVERTING','RECLAIMING'].indexOf(r.job_state)>=0
-        ?'<button class="act danger ghost" onclick="forceFailReplication('+i+')">force-fail</button>':'—'))+'</td>':''}
+        ?'<button class="act danger" onclick="forceFailReplication('+i+')">force-fail</button>':'—'))+'</td>':''}
     </tr>`).join('') : `<tr><td colspan="${canEdit?10:9}" class="empty">no replication jobs</td></tr>`;
   const toolbar = canEdit ? `<div class="toolbar"><button class="act" onclick="openReplicateForm()">+ replicate</button>
     <button class="act ghost" onclick="openReplicatePrune()">prune history</button></div>` : '';
@@ -1726,7 +1809,7 @@ function cancelReplication(i){
       const res = await postJSON('/api/replication/cancel', {replication_id:r.replication_id});
       if(res.ok && res.data && res.data.cancelled) poll();
       else notify('Cancel failed: ' + why(res), 'err');
-    }, true);
+    }, false, 'Cancel replication');   // not started copying: nothing to tear down
 }
 function forceFailReplication(i){
   const r = ((DATA && DATA.replications) || [])[i]; if(!r) return;
@@ -1740,7 +1823,7 @@ function forceFailReplication(i){
           +res.data.replication_id+') — clean it up in PVE.', 'warn');
         poll();
       } else notify('Force-fail failed: ' + why(res), 'err');
-    }, true);
+    }, true, 'Force-fail replication');   // may leave its copy guest running
 }
 function openReplicatePrune(){
   if(paused) return; paused = true;
@@ -1856,7 +1939,8 @@ function renderDownloads(){
     <td class="pill" title="${esc(b.url)}">${esc((b.url||'').slice(0,48))}</td>
     <td class="pill err">${b.error?esc(b.error.slice(0,80)):''}</td>
     <td>${(b.state==='READY'||b.state==='FAILED')?'—'
-      :`<button class="act danger ghost" onclick="forceFailBuild(${i})">force-fail</button>`}</td></tr>`).join('')
+      :`<button class="act ${b.vmid==null?'ghost':'danger'}" onclick="forceFailBuild(${i})">force-fail</button>`}</td>
+      </tr>`).join('')
     : '<tr><td colspan="7" class="empty">no build jobs yet</td></tr>';
   paint('downloads',
     limitBanner('build_limit', 'Template build')+
@@ -1871,16 +1955,17 @@ function renderDownloads(){
 }
 function forceFailBuild(i){
   const b = BUILDS[i]; if(!b) return;
-  const warn = b.vmid==null ? ''
+  const warn = b.vmid==null ? ' No guest was created yet.'
     : ' Its guest (vmid '+b.vmid+') is NOT torn down and may still be RUNNING — clean it up by hand '
       +'(fence br0kr-build-'+b.build_id+').';
   confirmModal('Force build '+b.target_template_id+' (#'+b.build_id+', '+b.state+') to FAILED?'+warn
-    +' This frees the disk-quota reserve and stops the reclaim retry loop, but does NOT tear down the guest.',
+    +' This frees the disk-quota reserve and stops the reclaim retry loop'
+    +(b.vmid==null ? '.' : ', but does NOT tear down the guest.'),
     async () => {
       const r = await postJSON('/api/template/build/force-fail', {build_id:b.build_id});
       if(r.ok && r.data && r.data.forced) loadDownloads();
       else notify('Force-fail failed: ' + why(r), 'err');
-    }, true);
+    }, b.vmid != null, 'Force-fail build');   // red when its guest may still be running
 }
 function delSource(i){
   const s = SOURCES[i]; if(!s) return;
@@ -1888,7 +1973,7 @@ function delSource(i){
     const r = await postJSON('/api/template/source/delete', {url_prefix:s.url_prefix});
     if(r.ok && r.data && r.data.deleted) loadDownloads();
     else notify('Remove failed: ' + why(r), 'err');
-  }, true);
+  }, false, 'Remove source');
 }
 function openSourceForm(){
   if(paused) return; paused = true;
@@ -2026,7 +2111,7 @@ function renderMigrations(){
     <td class="pill err">${m.reason?esc(m.reason):''}</td>
     <td class="pill">${tdate(m.updated_at)}</td>
     <td>${(canEdit && !mterminal(m.state))
-      ? `<button class="act danger ghost" onclick="cancelMigration(${i})">cancel</button>` : '—'}</td></tr>`).join('');
+      ? `<button class="act ghost" onclick="cancelMigration(${i})">cancel</button>` : '—'}</td></tr>`).join('');
   paint('migrations', banner + btn + `<table><thead><tr><th class="num">#</th><th>Lease</th><th>State</th>
     <th>Source → Target</th><th>Reason</th><th>Updated</th>${TH_ACTS}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
@@ -2043,7 +2128,7 @@ function cancelMigration(i){
         notify('Copy in flight — not cancelled. The daemon settles it safely (landed→committed, failed→aborted).',
                'info');
       else notify('Cancel failed: ' + why(r), 'err');
-    }, true);
+    }, false, 'Cancel migration');   // the guest stays on the source, untouched
 }
 function openMigrateForm(preLeaseId){
   if(paused) return; paused = true;
@@ -2101,7 +2186,7 @@ function renderLeases(){
   if(canEdit){
     const createBtn = `<button class="act" onclick="openCreateVM()">+ create VM</button>`;
     if(sel){
-      bar = `<div class="toolbar"><button class="act" onclick="cancelSelected()">cancel selected</button> `
+      bar = `<div class="toolbar"><button class="act danger" onclick="cancelSelected()">cancel selected</button> `
         + `<button class="act ghost" onclick="exitLeaseSelect()">done</button>`
         + `<span class="pill"> · tick the leases to cancel, then “cancel selected”</span></div>`;
     } else {
@@ -2117,14 +2202,16 @@ function renderLeases(){
     const store = l.storage_id?esc(l.storage_id)+' '+l.req_disk_gb+'G':'—';
     let opcell;
     if(sel){
-      opcell = l.cancellable ? `<input type="checkbox" class="lsel" value="${l.lease_id}">` : '';
+      opcell = l.cancellable
+        ? `<input type="checkbox" class="lsel" value="${l.lease_id}" aria-label="select lease ${l.lease_id}">` : '';
     } else {
-      const ab = (fn, lbl) => `<button class="act ghost" onclick="${fn}(${l.lease_id})">${lbl}</button> `;
+      const ab = (fn, lbl, red) => `<button class="act ${red ? 'danger' : 'ghost'}" `
+        + `onclick="${fn}(${l.lease_id})">${lbl}</button> `;
       let ops = '';
       if(canEdit && !l.is_reservation) ops += ab('leaseDetail', 'detail');
       if(canEdit && l.renewable)   ops += ab('renewLease', 'renew');
       if(canEdit && l.pinnable)    ops += ab(l.pinned ? 'unpinLease' : 'pinLease', l.pinned ? 'unpin' : 'pin');
-      if(canEdit && l.cancellable) ops += ab('cancelLease', 'cancel');
+      if(canEdit && l.cancellable) ops += ab('cancelLease', 'cancel', hasVm(l) || mayGetVm(l));   // a VM goes
       if(canEdit && l.migratable)  ops += ab('openMigrateForm', 'migrate');
       opcell = ops;
     }
@@ -2152,12 +2239,29 @@ function renderLeases(){
 }
 function enterLeaseSelect(){ if(paused) return; leaseSelectMode = true; paused = true; renderLeases(); }
 function exitLeaseSelect(){ leaseSelectMode = false; paused = false; renderLeases(); poll(); }
-function cancelSelected(){
+async function cancelSelected(){
   // ids are captured from the ticked boxes BEFORE the modal opens (held in the closure), so dismissing the
   // confirm — which restores the bulk-select pause via closeForm — leaves the selection intact on cancel.
   const ids = Array.from(document.querySelectorAll('.lsel:checked')).map(el => parseInt(el.value, 10));
   if(!ids.length){ notify('Tick at least one lease to cancel.', 'info'); return; }
-  confirmModal('Cancel / release '+ids.length+' selected lease(s)?', async () => {
+  // select mode pauses the poll, so the table can be minutes old: count the VMs on the leases as they are now
+  const now = await askFirst(() => fetchJSON('/api/overview', 5000));
+  if(!now || !leaseSelectMode || slotBusy()) return;   // a read already running, select mode left, or a dialog
+  const fresh = !!(now.ok && now.data && Array.isArray(now.data.leases));
+  const rows = (fresh ? now.data.leases : (DATA && DATA.leases)) || [];
+  const at = id => rows.find(x => x.lease_id === id);
+  const n = ids.length, s = n === 1 ? '' : 's';
+  const vms = ids.filter(id => hasVm(at(id))).length, soon = ids.filter(id => mayGetVm(at(id))).length;
+  const has = vms ? vms + ' of ' + n + ' ' + (vms === 1 ? 'has a VM' : 'have VMs') + ' that will be DESTROYED.'
+    : soon ? (n === 1 ? 'It has no VM yet.' : 'None has a VM yet.')
+    : (n === 1 ? 'It has no VM and is not about to get one.' : 'None of them has or is about to get a VM.');
+  const msg = 'Cancel / release ' + n + ' selected lease' + s + '? ' + has + (soon ? ' ' + soon + ' '
+    + (soon === 1 ? 'is' : 'are') + ' reserved and may start cloning at any moment: a VM made by then is DESTROYED.'
+    : '') + (fresh ? '' : ' Their state could not be re-checked (' + why(now) + '), so this is what the page last '
+    + 'saw: a VM any of them has by now is DESTROYED.');
+  const label = vms ? 'Release ' + n + ' & destroy ' + vms + ' VM' + (vms === 1 ? '' : 's')
+    : 'Release ' + n + ' lease' + s;
+  confirmModal(msg, async () => {
     let ok = 0, noop = 0, fail = 0, last = null;
     for(const id of ids){                       // sequential over the PROVEN single verb; each is atomic
       const r = await postJSON('/api/cancel', {lease_id:id});
@@ -2169,7 +2273,7 @@ function cancelSelected(){
     const ended = noop ? ' (' + noop + ' had already ended)' : '';
     if(fail) notify('Cancelled ' + ok + ' of ' + ids.length + ended + '; ' + fail + ' failed: ' + why(last), 'err');
     else notify('Cancelled ' + ok + ' of ' + ids.length + ended + '.', 'ok');
-  }, true);
+  }, vms + soon > 0 || !fresh, label);
 }
 // ── Fleet admission-SLO tile strip (Capacity tab): surfaces the MCP `fleet_stats` read — the current queue
 //    depth + admit-wait/provision-latency percentiles — from the fleet block of /api/overview. A null percentile
@@ -2423,7 +2527,7 @@ function render(d){
     `<button class="act ghost" onclick="toggleCordon(${i})">${n.cordoned?'uncordon':'cordon'}</button>`+
     `<button class="act ghost" onclick="openBridgesForm(${i})">bridges</button>`+
     `<button class="act ghost" onclick="editItem('node',${i})">edit</button>`+
-    `<button class="act ghost" onclick="delItem('node',${i})">delete</button></div>` : '';
+    `<button class="act danger" onclick="delItem('node',${i})">delete</button></div>` : '';
   paint('nodes', addBtn('node','node') + (d.nodes.length ? `<table><thead><tr>
     <th>Node</th><th>Cluster</th><th>PVE node</th><th>Bridges</th><th class="num">CPU</th>
     <th class="num">Mem (GiB)</th><th class="num">Leases</th>${canEdit?TH_ACTS:''}</tr></thead><tbody>`

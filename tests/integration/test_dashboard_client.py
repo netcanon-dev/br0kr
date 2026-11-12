@@ -470,8 +470,8 @@ def test_a_dialog_takes_focus_keeps_tab_inside_and_returns_focus_on_escape(serve
 
 
 def test_a_dialog_focuses_what_is_safe_and_a_replacement_keeps_the_first_opener(served_script: Path) -> None:
-    """A red (danger) confirmation focuses cancel, so Enter cannot destroy anything by accident; a plain one
-    focuses yes. A dialog that replaces another (a result shown after a submit) focuses its own control but
+    """Every confirmation, red or not, starts on "go back", so Enter cannot run the action by accident (review
+    UI-06 round 1). A dialog that replaces another (a result shown after a submit) focuses its own control but
     still returns focus to the button that opened the first one. A dialog with nothing to press keeps Tab
     inside it, with focus on its heading (a lease-status dialog has no button until its first answer). A
     confirmation is described by its question; a form is not described (its hints would be read before every
@@ -480,7 +480,7 @@ def test_a_dialog_focuses_what_is_safe_and_a_replacement_keeps_the_first_opener(
     question."""
     got = _run(served_script, "dialog_initial_focus")
     assert got["danger"] == "cm-no" and got["afterDanger"] is True
-    assert got["plain"] == "cm-ok"
+    assert got["plain"] == "cm-no"
     assert got["first"] == "dlg-a" and got["second"] == "dlg-b" and got["backToFirstOpener"] is True
     assert got["emptyFocus"] == "dlg-title" and got["emptyPrevented"] is True
     assert got["described"] == {"confirm": "dlg-desc", "says": "Renew it?", "form": None}
@@ -510,6 +510,103 @@ def test_a_poll_keeps_keyboard_focus_on_the_panel_control(served_script: Path) -
     assert got["unchanged"] == {"same": True, "connected": True}
     assert got["replaced"] is True and got["inNodes"] is True
     assert got["onclick"] == "editItem('node',0)" and got["focusedWith"] == {"preventScroll": True}
+
+
+def test_red_marks_what_cannot_be_put_back_and_each_confirm_names_its_action(served_script: Path) -> None:
+    """Each confirmation's button says what it does, and only an action that cannot be put back is red: releasing
+    a running or cloning lease ("Release & destroy VM", red, from a red table button) and a reserved one (no VM
+    yet, but cloning may start at any moment: red "Release lease"), but not a queued request ("Remove
+    request"). The lease's state is read when the confirm opens and wins over the table: a request admitted
+    since the page drew it is red, a reserved lease cloned since says the server's vmid, and with the read
+    failing the confirm says so and is red. Deleting a node and revoking a token are red;
+    deleting a template instance ROW, cancelling a replication that has not started, clearing a PDM endpoint and
+    cordoning (named, not red); force-failing a build is red only when its guest may still be running. The
+    dismiss button reads "go back", never a second "cancel" beside "Cancel replication", and focus starts on
+    it for every confirmation (a second Enter cannot run the action). Guards review UI-06:
+    the one action that destroys a VM was a grey button and two ledger-only ones were red, so colour said
+    nothing about consequence, and every confirm ended in a bare "yes"."""
+    got = _run(served_script, "confirm_labels")
+    asked = {name: (a["label"], a["red"]) for name, a in got["asked"].items()}
+    assert asked == {
+        "activeLease": ("Release & destroy VM", True), "admittedLease": ("Release lease", True),
+        "provisioningLease": ("Release & destroy VM", True),
+        "queued": ("Remove request", False), "queuedSinceAdmitted": ("Release lease", True),
+        "admittedSinceCloned": ("Release & destroy VM", True), "unchecked": ("Remove request", True),
+        "cordon": ("Cordon node", False), "deleteNode": ("Delete node", True),
+        "deleteInstanceRow": ("Delete row", False), "cancelReplication": ("Cancel replication", False),
+        "forceFailBuildWithGuest": ("Force-fail build", True), "forceFailBuildNoGuest": ("Force-fail build", False),
+        "clearPdm": ("Clear endpoint", False), "revokeToken": ("Revoke token", True)}
+    assert {a["cancel"] for a in got["asked"].values()} == {"go back"}
+    assert {a["focus"] for a in got["asked"].values()} == {"cm-no"}   # red or not, focus starts on going back
+    says = {name: a["says"] for name, a in got["asked"].items()}
+    assert says["activeLease"] == "Release lease 7? Its VM (vmid 107) will be DESTROYED."
+    assert says["provisioningLease"] == "Release lease 9? Its VM is being cloned (vmid 109) and will be DESTROYED."
+    assert says["admittedLease"].startswith("Release lease 8? It is reserved and has no VM yet, but cloning may start")
+    assert says["admittedSinceCloned"] == "Release lease 8? Its VM (vmid 108) will be DESTROYED."   # the server's vmid
+    assert says["unchecked"].startswith("Remove queued request 99? Its state could not be re-checked (ledger_unreachable")
+    assert says["forceFailBuildNoGuest"].endswith("No guest was created yet. This frees the disk-quota reserve and "
+                                                  "stops the reclaim retry loop.")
+    assert got["buttons"] == {
+        "activeLease": {"red": True, "text": "cancel"}, "admittedLease": {"red": True, "text": "cancel"},
+        "provisioningLease": {"red": True, "text": "cancel"},
+        "deleteNode": {"red": True, "text": "delete"}, "deleteInstanceRow": {"red": False, "text": "delete row"},
+        "cancelReplication": {"red": False, "text": "cancel"},
+        "forceFailBuildWithGuest": {"red": True, "text": "force-fail"},
+        "forceFailBuildNoGuest": {"red": False, "text": "force-fail"}}
+
+
+def test_a_bulk_cancel_says_how_many_vms_it_destroys(served_script: Path) -> None:
+    """The bulk confirm counts VMs on the leases as they are when it opens, not on the table select mode froze:
+    with lease 8 cloned since the table drew, ticking it with a running and a cloning lease asks "3 of 3 have VMs
+    that will be DESTROYED" behind a red "Release 3 & destroy 3 VMs". A reserved lease is named as one that may
+    start cloning (red, with or without a VM beside it); a lease that ended meanwhile is "no VM and not about to
+    get one" (grey); a failed read says the count is the page's last view and is red. Each checkbox is labelled,
+    the bulk button is red, focus starts on "go back", and going back keeps the ticks on the live checkboxes.
+    Guards review UI-06 (the bulk confirm said "Cancel / release 2 selected lease(s)?" whatever they held) and
+    its round-1 finding: a count from the frozen table said "no VM" while the daemon was cloning one."""
+    got = _run(served_script, "bulk_cancel_counts_vms")
+    assert got["labels"] == ["select lease 7", "select lease 8", "select lease 9"] and got["bulkRed"] is True
+    assert got["all"] == {"label": "Release 3 & destroy 3 VMs", "red": True, "focus": "cm-no",
+                          "says": "Cancel / release 3 selected leases? 3 of 3 have VMs that will be DESTROYED."}
+    assert got["kept"] == [True, True, True]
+    assert got["mixed"] == {"label": "Release 2 & destroy 1 VM", "red": True, "focus": "cm-no",
+                            "says": "Cancel / release 2 selected leases? 1 of 2 has a VM that will be DESTROYED. "
+                                    "1 is reserved and may start cloning at any moment: a VM made by then is "
+                                    "DESTROYED."}
+    assert got["reserved"] == {"label": "Release 1 lease", "red": True, "focus": "cm-no",
+                               "says": "Cancel / release 1 selected lease? It has no VM yet. 1 is reserved and may "
+                                       "start cloning at any moment: a VM made by then is DESTROYED."}
+    assert got["ended"] == {"label": "Release 1 lease", "red": False, "focus": "cm-no",
+                            "says": "Cancel / release 1 selected lease? It has no VM and is not about to get one."}
+    assert got["unchecked"]["red"] is True
+    assert "could not be re-checked (ledger_unreachable" in got["unchecked"]["says"]
+    assert got["stillSelecting"] is True
+
+
+def test_a_settings_save_confirms_the_change_and_sends_only_it(served_script: Path) -> None:
+    """With nothing edited, save says so and asks nothing. After setting log_level, clearing an override and
+    retyping tick_seconds as "045" (the same number), and setting audit_retention_days to 900 after another
+    operator moved it from 500 to 800, save reads the settings again and asks "Save 3 settings? log_level:
+    default → DEBUG; clone_content_enforcement: true → default; audit_retention_days: 800 → 900 (was 500 when
+    this page loaded)", naming tick_seconds as changed elsewhere (to 60) and leaving it alone; on yes it posts
+    ONLY the three edited keys, then redraws every field from the server's values (tick_seconds shows 60). A
+    refused save says why and keeps the panel's values; without a fresh read nothing is asked or sent. Guards review UI-06 (a fleet-wide hot-applied change went out
+    with no confirm and no diff) and the lost update it hid: the panel loads once, so a save that sent every knob
+    put back values another operator had changed since the page was opened."""
+    got = _run(served_script, "settings_diff")
+    assert got["unchanged"] == {"msg": "nothing to save: no setting changed", "dialog": False}
+    assert got["asked"] == {"label": "Save 3 settings", "red": False,
+                            "says": "Save 3 settings? log_level: default → DEBUG; clone_content_enforcement: true → "
+                                    "default; audit_retention_days: 800 → 900 (was 500 when this page loaded). "
+                                    "(tick_seconds changed elsewhere since this page loaded; left as it is.) "
+                                    "They apply fleet-wide within a tick."}
+    assert got["saved"]["posts"] == [{"path": "/api/settings/edit", "body": {
+        "log_level": "DEBUG", "clone_content_enforcement": None, "audit_retention_days": 900}}]
+    assert got["saved"]["msg"] == "saved 3 settings — applies within a tick"
+    assert got["saved"]["after"] == {"log": "DEBUG", "cce": "", "tick": "60", "audit": "900"}
+    assert got["refused"]["msg"].startswith("not saved: below_min") and got["refused"]["kept"] == "DEBUG"
+    assert got["unread"]["msg"].startswith("not saved: could not re-read the settings (ledger_unreachable")
+    assert got["unread"]["dialog"] is False and got["unread"]["posts"] == []
 
 
 def test_the_tabs_follow_the_aria_tabs_pattern(served_script: Path) -> None:
@@ -635,6 +732,9 @@ def test_removing_a_quarantined_storage_pair_takes_a_second_explicit_click(serve
     removal silently, or never offering it."""
     got = _run(served_script, "parity_storage_pair")
     assert "drops the quarantine" in got["refused"]["err"] and got["refused"]["button"] == "remove anyway"
+    assert got["refused"]["red"] is True        # the click that drops a quarantine is red (UI-06)
+    assert got["refused"]["focus"] == "cancel"   # and focus is on the safe answer, not on it
+    assert got["focus"] == {"opened": "cancel", "clearRed": True}
     assert got["removePosts"] == [
         {"path": "/api/storage/node/remove", "body": {"storage_id": "fast", "node_id": "n1"}},
         {"path": "/api/storage/node/remove", "body": {"storage_id": "fast", "node_id": "n1", "force": True}}]
@@ -705,6 +805,9 @@ def test_node_bridges_are_set_cleared_and_removed_from_the_node_table(served_scr
                             {"path": "/api/network/node/delete", "body": pair},
                             {"path": "/api/network/node/delete", "body": {**pair, "force": True}}]
     assert "drops the quarantine" in got["refused"]["err"] and got["refused"]["button"] == "remove anyway"
+    assert got["refused"]["red"] is True        # the click that drops a quarantine is red (UI-06)
+    assert got["refused"]["focus"] == "close"   # and focus is on the safe answer, not on it
+    assert got["clearRed"] is True              # clearing a quarantine removes a fence: red (UI-06)
     assert got["refused"]["open"] != "" and got["slot"] == ""
 
 

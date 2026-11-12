@@ -175,7 +175,20 @@ const document = {
   hidden: false,
   getElementById(id) { if (!els.has(id)) els.set(id, new El('div', id)); return els.get(id); },
   createElement(tag) { return new El(tag); },
-  querySelectorAll() { return []; },
+  // '.name' or '.name:checked' over every element in the page (what the bulk lease select reads)
+  querySelectorAll(sel) {
+    const m = /^[.]([a-z0-9_-]+)(:checked)?$/.exec(sel);
+    if (!m) return [];
+    const seen = new Set(), out = [];
+    for (const el of els.values()) {
+      for (const k of [el, ...el.all()]) {
+        if (seen.has(k) || !k.isConnected) continue;
+        seen.add(k);
+        if (k.className.split(' ').includes(m[1]) && (!m[2] || k.checked)) out.push(k);
+      }
+    }
+    return out;
+  },
   addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
   execCommand() {},
   body: new El('body'),
@@ -305,6 +318,32 @@ const PARITY = () => ok({ ...OVERVIEW,
     nodes: [{ node_id: 'n1', bridge: 'vmbr0', verified: false, quarantined: true }] }],
   templates: [{ template_id: 't1', cluster_id: 'c1', vmid: 9000, name: 'debian', public: true, replicable: true,
     source_dirty: false, logical_network_id: 'lan' }] });
+// UI-06 fixtures: a running lease (its VM is destroyed on release), a reserved one (no guest yet, but cloning may
+// start at any moment), one being cloned, a queued request, a template instance row and a replication that has not
+// started, all in one overview (a migration reservation is never cancellable, so it has no row action here)
+const LEASE = (id, state, vmid, extra) => ({ lease_id: id, state, vmid, project_id: 'p1', node_id: 'n1',
+  cluster_id: 'c1', storage_id: null, req_cpu: 1, req_mem_mb: 512, req_disk_gb: null, age_seconds: 5,
+  expires_in_seconds: 600, cancellable: true, renewable: true, pinnable: false, pinned: false, migratable: false,
+  is_reservation: false, ...(extra || {}) });
+const CONSEQUENCES = (states = {}) => ({ ...OVERVIEW,
+  leases: [LEASE(7, 'ACTIVE', 107), LEASE(8, states[8] || 'ADMITTED', states[8] === 'ACTIVE' ? 108 : null),
+    LEASE(9, 'PROVISIONING', 109)].filter(l => !(states.gone || []).includes(l.lease_id)),
+  queue: { depth: 1, truncated: false, shown: 1, waiting: [{ position: 1, lease_id: 99, project_id: 'p1',
+    req_cpu: 1, req_mem_mb: 512, age_seconds: 3 }] },
+  template_instances: [{ instance_id: 3, template_id: 't1', cluster_id: 'c1', node_id: 'n1', storage_id: null,
+    vmid: 9000, size_gb: 8, instance_state: 'READY', origin: 'built', bound: true }],
+  replications: [{ replication_id: 4, template_id: 't1', target_cluster_id: 'c1', target_storage_id: 's1',
+    mechanism: 'clone', size_gb: 8, job_state: 'REQUESTED', project_id: null, error: null }] });
+// /api/lease/status: what the server says about a lease NOW, which a scenario sets apart from the table the page
+// drew (LIVE_STATE[id] = {state, vmid}); a lease it does not name answers as drawn, and 99 is a queued request
+let LIVE_STATE = {};
+const leaseStatus = path => {
+  const id = Number(String(path).split('lease_id=')[1]);
+  if (LIVE_STATE[id]) return ok({ lease_id: id, exists: true, ...LIVE_STATE[id] });
+  const l = CONSEQUENCES().leases.find(x => x.lease_id === id);
+  if (l) return ok({ lease_id: id, exists: true, state: l.state, vmid: l.vmid });
+  return id === 99 ? ok({ lease_id: 99, exists: true, state: 'PENDING', vmid: null }) : ok({ exists: false });
+};
 const posts = n => calls.slice(n).filter(c => c.method === 'POST').map(c => ({ path: c.path, body: c.body }));
 const pressSave = async () => {
   const m = /<button class="act" onclick="([^"]*)">/.exec($('form-slot').innerHTML);
@@ -338,14 +377,17 @@ const SCENARIOS = {
     const card = $('storage').innerHTML;
     run('openStoragePair(0, 0)');
     const modal = $('form-slot').innerHTML, n = calls.length;
+    const focus = { opened: document.activeElement.textContent,
+      clearRed: $('pair-clear').className.split(' ').includes('danger') };
     await click('pair-clear');
     const cleared = { posts: posts(n), slot: $('form-slot').innerHTML, toasts: toasts() };
     run('openStoragePair(0, 0)');
     const m = calls.length;
     await click('pair-remove');
-    const refused = { err: $('form-err').textContent, button: $('pair-remove').textContent };
+    const refused = { err: $('form-err').textContent, button: $('pair-remove').textContent,
+      red: $('pair-remove').className.split(' ').includes('danger'), focus: document.activeElement.textContent };
     await click('pair-remove');
-    return { card, modal, cleared, refused, removePosts: posts(m), slot: $('form-slot').innerHTML };
+    return { card, modal, focus, cleared, refused, removePosts: posts(m), slot: $('form-slot').innerHTML };
   },
   async parity_storage_content() {
     await boot({ token: 't', routes: { '/api/overview': PARITY(),
@@ -426,12 +468,14 @@ const SCENARIOS = {
     await click('nb-save');
     const saved = toasts();
     run('openBridgesForm(0)');
+    const clearRed = $('nb-clear-0').className.split(' ').includes('danger');
     await click('nb-clear-0');
     run('openBridgesForm(0)');
     await click('nb-del-0');
-    const refused = { err: $('form-err').textContent, button: $('nb-del-0').textContent, open: $('form-slot').innerHTML };
+    const refused = { err: $('form-err').textContent, button: $('nb-del-0').textContent, open: $('form-slot').innerHTML,
+      red: $('nb-del-0').className.split(' ').includes('danger'), focus: document.activeElement.textContent };
     await click('nb-del-0');
-    return { table, panel, modal, saved, refused, posts: posts(n), slot: $('form-slot').innerHTML };
+    return { table, panel, modal, saved, clearRed, refused, posts: posts(n), slot: $('form-slot').innerHTML };
   },
   async parity_networks_panel() {
     await boot({ token: 't', routes: { '/api/overview': PARITY(),
@@ -675,6 +719,121 @@ const SCENARIOS = {
     return { flipped, removed, detached, back: { onclick: a.getAttribute('onclick'), fresh: a !== create,
       inTokens: $('tokens').contains(a) } };
   },
+  async confirm_labels() {
+    await boot({ token: 't', tab: 'images', routes: { '/api/overview': ok(CONSEQUENCES()),
+      '/api/lease/status': leaseStatus,
+      '/api/template/builds': ok({ builds: [
+        { build_id: 1, target_template_id: 'debian-1', state: 'BUILDING', cluster_id: 'c1', vmid: 501,
+          url: 'https://images.example/d.qcow2', error: null, updated_at: '2026-11-12T08:00:00+00:00' },
+        { build_id: 2, target_template_id: 'debian-2', state: 'DOWNLOADING', cluster_id: 'c1', vmid: null,
+          url: 'https://images.example/e.qcow2', error: null, updated_at: '2026-11-12T08:00:00+00:00' }] }) } });
+    const red = b => b.className.split(' ').includes('danger');
+    const ask = async code => {
+      await run(code); await settle();
+      const b = $('cm-ok'), got = { label: b.textContent, red: red(b), cancel: $('cm-no').textContent,
+        focus: document.activeElement.id, says: $('dlg-desc').textContent };
+      await press('Escape');
+      return got;
+    };
+    const asked = {};
+    for (const [name, code] of [['activeLease', 'cancelLease(7)'], ['admittedLease', 'cancelLease(8)'],
+      ['provisioningLease', 'cancelLease(9)'], ['queued', 'cancelLease(99)'], ['cordon', 'toggleCordon(0)'], ['deleteNode', "delItem('node',0)"],
+      ['deleteInstanceRow', 'deleteInstance(0)'], ['cancelReplication', 'cancelReplication(0)'],
+      ['forceFailBuildWithGuest', 'forceFailBuild(0)'], ['forceFailBuildNoGuest', 'forceFailBuild(1)'],
+      ['clearPdm', 'clearPdm(0)'], ['revokeToken', 'revokeToken(1)']]) asked[name] = await ask(code);
+    // the table is seconds old: the server's word wins over what the page drew
+    LIVE_STATE = { 99: { state: 'ADMITTED', vmid: null }, 8: { state: 'ACTIVE', vmid: 108 } };
+    asked.queuedSinceAdmitted = await ask('cancelLease(99)');
+    asked.admittedSinceCloned = await ask('cancelLease(8)');
+    LIVE_STATE = {};
+    routes['/api/lease/status'] = fail(503, 'ledger_unreachable');   // no answer: the worst case, said so
+    asked.unchecked = await ask('cancelLease(99)');
+    const buttons = {};
+    for (const [name, panel, onclick] of [['activeLease', 'leases', 'cancelLease(7)'],
+      ['admittedLease', 'leases', 'cancelLease(8)'], ['provisioningLease', 'leases', 'cancelLease(9)'],
+      ['deleteNode', 'nodes', "delItem('node',0)"],
+      ['deleteInstanceRow', 'instances', 'deleteInstance(0)'], ['cancelReplication', 'replications', 'cancelReplication(0)'],
+      ['forceFailBuildWithGuest', 'downloads', 'forceFailBuild(0)'], ['forceFailBuildNoGuest', 'downloads', 'forceFailBuild(1)']]) {
+      const b = buttonIn(panel, onclick);
+      buttons[name] = { red: red(b), text: b.textContent };
+    }
+    return { asked, buttons };
+  },
+  async bulk_cancel_counts_vms() {
+    await boot({ token: 't', routes: { '/api/overview': ok(CONSEQUENCES()) } });
+    run('enterLeaseSelect()');
+    const boxes = $('leases').querySelectorAll('input');
+    const labels = boxes.map(b => b.getAttribute('aria-label'));
+    const bulkRed = buttonIn('leases', 'cancelSelected()').className.split(' ').includes('danger');
+    const tick = ids => boxes.forEach(b => { b.checked = ids.includes(Number(b.value)); });
+    const ask = async () => {
+      await run('cancelSelected()'); await settle();
+      const b = $('cm-ok'), got = { label: b.textContent, red: b.className.split(' ').includes('danger'),
+        says: $('dlg-desc').textContent, focus: document.activeElement.id };
+      await press('Escape');
+      return got;
+    };
+    // the table is frozen while selecting; by now lease 8 has been cloned and is running
+    routes['/api/overview'] = ok(CONSEQUENCES({ 8: 'ACTIVE' }));
+    tick([7, 8, 9]);
+    const all = await ask();
+    const kept = boxes.map(b => b.isConnected && b.checked);
+    routes['/api/overview'] = ok(CONSEQUENCES());
+    tick([7, 8]);
+    const mixed = await ask();
+    tick([8]);
+    const reserved = await ask();
+    routes['/api/overview'] = ok(CONSEQUENCES({ gone: [8] }));   // it ended meanwhile: no VM, none to come
+    const ended = await ask();
+    routes['/api/overview'] = fail(503, 'ledger_unreachable');
+    const unchecked = await ask();
+    return { labels, bulkRed, all, kept, mixed, reserved, ended, unchecked, stillSelecting: run('leaseSelectMode') };
+  },
+  async settings_diff() {
+    const knobs = [
+      { name: 'log_level', kind: 'str', choices: ['DEBUG', 'INFO'], default: 'INFO', override: null,
+        env: 'BR0KR_LOG_LEVEL', gateway: false },
+      { name: 'clone_content_enforcement', kind: 'bool', default: false, override: true, env: null, gateway: false },
+      { name: 'tick_seconds', kind: 'int', default: 30, override: 45, env: null, gateway: false },
+      { name: 'audit_retention_days', kind: 'int', default: 90, override: 500, env: null, gateway: false }];
+    let reads = 0;
+    // by the time of the save another operator has set tick_seconds to 60 and audit_retention_days to 800
+    const moved = { tick_seconds: 60, audit_retention_days: 800 };
+    const elsewhere = () => knobs.map(k => (k.name in moved ? { ...k, override: moved[k.name] } : { ...k }));
+    await boot({ token: 't', tab: 'security', routes: {
+      // the first read draws the panel; by the time of the save another operator has set tick_seconds to 60
+      '/api/settings': () => ok({ knobs: reads++ ? elsewhere() : knobs.map(k => ({ ...k })), schema_version: 50,
+        reload_pending: false }),
+      '/api/settings/edit': ok({ updated: true }) } });
+    run('submitSettings()');
+    const unchanged = { msg: $('set-msg').textContent, dialog: $('form-slot').innerHTML !== '' };
+    $('set-log_level').value = 'DEBUG';
+    $('set-clone_content_enforcement').value = '';     // back to the default
+    $('set-tick_seconds').value = '045';               // the same number, spelt differently: not a change
+    $('set-audit_retention_days').value = '900';       // edited here AND changed elsewhere: this edit wins, said so
+    const n = calls.length;
+    await run('submitSettings()'); await settle();
+    const b = $('cm-ok');
+    const asked = { label: b.textContent, red: b.className.split(' ').includes('danger'),
+      says: $('dlg-desc').textContent };
+    await confirmYes();
+    const saved = { posts: posts(n), msg: $('set-msg').textContent,
+      after: { log: $('set-log_level').value, cce: $('set-clone_content_enforcement').value,
+        tick: $('set-tick_seconds').value, audit: $('set-audit_retention_days').value } };
+    // a refused save says why and keeps what the panel believes
+    routes['/api/settings/edit'] = fail(400, 'below_min:tick_seconds');
+    $('set-log_level').value = 'INFO';
+    await run('submitSettings()'); await settle();
+    await confirmYes();
+    const refused = { msg: $('set-msg').textContent,
+      kept: run("SETTINGS.knobs.find(k => k.name === 'log_level').override") };
+    // without the server's current values there is no honest diff: nothing is asked or sent
+    routes['/api/settings'] = fail(503, 'ledger_unreachable');
+    const m2 = calls.length;
+    await run('submitSettings()'); await settle();
+    const unread = { msg: $('set-msg').textContent, dialog: $('form-slot').innerHTML !== '', posts: posts(m2) };
+    return { unchanged, asked, saved, refused, unread };
+  },
   async tabs_keyboard() {
     await boot({});
     const TABS = ['capacity', 'tenancy', 'images', 'security'];
@@ -761,7 +920,7 @@ const SCENARIOS = {
   async cancel_noop() {
     await boot({ token: 't', routes: {
       '/api/cancel': { status: 200, body: { lease_id: 5, cancelled: false, outcome: 'noop' } } } });
-    run('cancelLease(5)');
+    await run('cancelLease(5)'); await settle();   // it reads the lease's state first
     await confirmYes();
     return { toasts: toasts() };
   },

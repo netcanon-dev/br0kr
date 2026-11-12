@@ -43,6 +43,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **Red now means "cannot be put back", and each confirm names its action.** Releasing a running VM was grey and
+  row-only deletes red; a bulk cancel counts its VMs, and a settings save shows the diff and sends only it (UI-06).
 - **One runner for the ledger harnesses: `bash scripts/run_harness.sh <name>... | --ci | --all`.** Copied wrappers
   pinned shared ports; each run now owns a container on an ephemeral port, each harness a fresh database, and
   CI runs all of them weekly; `pytest -m harness` too, only with `BR0KR_THROWAWAY_PG=1` (`test_harness_runner.py`).
