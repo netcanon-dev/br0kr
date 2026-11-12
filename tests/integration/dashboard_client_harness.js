@@ -445,6 +445,25 @@ const SCENARIOS = {
     await boot({ routes: { '/api/overview': { status: 0 } } });
     return { status: $('status').textContent, clusters: $('clusters').innerHTML };
   },
+  async token_field_survives_polls() {
+    await boot({});                              // open reads, operator actions on, no token yet
+    const field = $('tok');
+    field.value = 'half-typ';                    // an operator is typing when the next polls land
+    const writes = [];
+    const actions = $('actions');
+    const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(actions), 'innerHTML').set;
+    Object.defineProperty(actions, 'innerHTML', { configurable: true, get() { return this._html; },
+      set(v) { writes.push(String(v)); set.call(this, v); } });
+    await run('poll()'); await settle();
+    await run('poll()'); await settle();
+    const typed = { value: $('tok').value, writes: writes.length };
+    field.value = 't'; run('unlock()'); await settle();
+    const unlocked = $('actions').innerHTML, before = writes.length;
+    await run('poll()'); await settle();
+    const pollWritesUnlocked = writes.length - before;
+    run('lock()'); await settle();
+    return { typed, unlocked, pollWritesUnlocked, locked: $('actions').innerHTML, after: $('tok').value };
+  },
   async read_token_required() {
     await boot({ routes: { '/api/overview': fail(401, 'unauthorized') } });
     return { status: $('status').textContent, actions: $('actions').innerHTML };

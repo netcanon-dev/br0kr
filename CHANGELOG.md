@@ -77,6 +77,8 @@ resolve in this repository.
   at most once per interval; the tick ends at its next step, so the overlap is one step, not one tick (tens of min).
 - **The documented sync-standby alert paged forever on an async ledger.** It keyed on `standbys_sync == 0`, always
   true for the bundled pair; it now keys on new `br0kr_ledger_sync_required` (`synchronous_standby_names` set).
+- **The dashboard's 5 s poll wiped a token half typed into the token field** (open-reads servers): it rewrote the
+  header each poll. It now redraws only on change (`test_a_poll_never_rewrites_the_token_field_or_the_lock_button`).
 
 ## [0.1.0] — 2026-11-11
 

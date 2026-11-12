@@ -438,6 +438,17 @@ def test_a_token_that_is_not_an_operator_token_unlocks_nothing_with_open_reads(s
     assert any("The token was refused (unauthorized)." in t["text"] for t in got["toasts"])
 
 
+def test_a_poll_never_rewrites_the_token_field_or_the_lock_button(served_script: Path) -> None:
+    """On a server with open reads and operator actions on, two polls with a token half typed into the field
+    leave it there: the header is not rewritten when what it shows is unchanged. Once unlocked, a poll does not
+    rewrite the lock button either; lock still draws a fresh, empty field. Guards the 5-second poll wiping the
+    token an operator was typing (and moving keyboard focus off the field), reported in the UI-04 review."""
+    got = _run(served_script, "token_field_survives_polls")
+    assert got["typed"] == {"value": "half-typ", "writes": 0}
+    assert "actions unlocked" in got["unlocked"] and got["pollWritesUnlocked"] == 0
+    assert 'id="tok"' in got["locked"] and got["after"] == ""
+
+
 def test_a_read_token_on_a_read_gated_server_keeps_the_reads(served_script: Path) -> None:
     """On a read-gated server, a viewer's read token is not an operator token (whoami says unauthorized) but is
     valid for reads: the page keeps it, polls the overview, shows 'reads unlocked', and sends no operator read.

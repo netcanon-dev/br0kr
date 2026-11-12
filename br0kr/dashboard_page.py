@@ -288,16 +288,24 @@ function setTab(name){
   if(DATA && canEdit && operatorOk() && !paused) operatorReads(true);
 }
 // ── the token field: shown when writes need a token (operator actions) OR reads do (BR0KR_DASHBOARD_READ_TOKEN).
-//    One field holds one token; the operator token unlocks both writes and reads (operator ⊇ viewer). ──
+//    One field holds one token; the operator token unlocks both writes and reads (operator ⊇ viewer).
+//    Every poll calls this, so it writes the header only when what it shows changes: rewriting the field every
+//    5 s wiped a token half typed into it and moved keyboard focus off the field or the lock button. ──
+let ACTIONS_DRAWN = null;
 function renderActions(){
   const el = $('actions');
-  if(!ACTIONS && !READ_AUTH){ el.innerHTML = '<span class="pill">read-only</span>'; return; }
-  const state = operatorOk() ? 'actions unlocked'
-    : (WHO.tok === tok() && WHO.verdict) ? 'reads unlocked' : 'checking the token…';
-  if(tok()) el.innerHTML = '<span class="ok">'+state+'</span>'+
-    '<button class="act ghost" onclick="lock()">lock</button>';
-  else el.innerHTML = '<input id="tok" type="password" placeholder="'+(ACTIONS ? 'operator token' : 'read token')+
+  let html;
+  if(!ACTIONS && !READ_AUTH) html = '<span class="pill">read-only</span>';
+  else if(tok()){
+    const state = operatorOk() ? 'actions unlocked'
+      : (WHO.tok === tok() && WHO.verdict) ? 'reads unlocked' : 'checking the token…';
+    html = '<span class="ok">'+state+'</span><button class="act ghost" onclick="lock()">lock</button>';
+  }
+  else html = '<input id="tok" type="password" placeholder="'+(ACTIONS ? 'operator token' : 'read token')+
     '" size="12"><button class="act" onclick="unlock()">unlock</button>';
+  if(html === ACTIONS_DRAWN) return;
+  ACTIONS_DRAWN = html;
+  el.innerHTML = html;
 }
 // unlock/lock re-poll immediately so a gated read loads (or clears) without waiting a full refresh cycle; a page
 // stopped for a token (needsToken) starts polling again here.
