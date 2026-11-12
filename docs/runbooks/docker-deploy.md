@@ -305,7 +305,7 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
     ```bash
     curl -sS -X POST http://<host>:8051/api/cluster/create \
       -H "Authorization: Bearer $BR0KR_DASHBOARD_TOKEN" -H 'Content-Type: application/json' \
-      -d '{"cluster_id":"lab1","pve_host":"192.168.1.10","token_id":"br0kr@pve!prod","token_secret_env":"PVE_TOKEN_SECRET"}'
+      -d '{"cluster_id":"lab1","pve_host":"192.0.2.10","token_id":"br0kr@pve!prod","token_secret_env":"PVE_TOKEN_SECRET"}'
     # 200  {"cluster_id":"lab1","created":true,"reason":null}        # created
     # 200  {"cluster_id":"lab1","created":false,"reason":"cluster_exists"}   # id already present (no-op)
     # 400  {"error":"invalid_pve_host"}          # a field failed validation (reason IS the code)

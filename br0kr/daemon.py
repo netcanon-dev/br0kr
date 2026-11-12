@@ -1954,7 +1954,7 @@ def main() -> None:
       BR0KR_VM_FULL_CLONE "0" → faster/lighter LINKED clones (needs a clone-capable storage); default full.
       BR0KR_VM_CLONE_STORAGE  RETIRED (0033): logged and ignored; the clone pool is resolved per lease.
       BR0KR_CI_USER       default cloud-init login user when the agent doesn't supply ci_user (default br0kr).
-      BR0KR_GUEST_IP_PREFIX  optional IPv4 prefix (e.g. "192.168.1.") to prefer the LAN address over a
+      BR0KR_GUEST_IP_PREFIX  optional IPv4 prefix (e.g. "192.0.2.") to prefer the LAN address over a
                           virtual/bridge one when reading the guest agent.
       BR0KR_IP_DISCOVER_LIMIT  max ACTIVE cloud-init leases to poll for an IP per tick (default 16).
       BR0KR_BUILD_LIMIT   max operator template DOWNLOADS to actuate per tick (default 0 = DISABLED;

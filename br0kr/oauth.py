@@ -59,7 +59,7 @@ _PKCE_MIN, _PKCE_MAX = 43, 128
 
 # ── configuration (env) ──────────────────────────────────────────────────────────────────────────────
 def issuer() -> str:
-    """The canonical public HTTPS base URL clients reach this deployment at, e.g. `https://192.168.1.50`
+    """The canonical public HTTPS base URL clients reach this deployment at, e.g. `https://192.0.2.50`
     (direct Caddy TLS) or `https://br0kr.example.com` (behind a reverse-proxy / tunnel). LOAD-BEARING: every
     discovery document + endpoint URL is built from it, and it MUST match how the connector addresses the
     server (scheme + host) or the client rejects the flow. No trailing slash.

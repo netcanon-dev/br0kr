@@ -8,13 +8,15 @@ They guard the *policy*, not the bytes; the checker guards the bytes.
 
 The CI harness tests at the bottom guard the wiring of the real-Postgres harness job the same way:
 pure file reads, so they run everywhere, while the job itself is the only place the harnesses run.
-The mypy test pins the strict flags the engine has earned, so they cannot quietly flip back, and the
-CHANGELOG tests keep a release's version and its notes in step."""
+The mypy test pins the strict flags the engine has earned, so they cannot quietly flip back, the
+CHANGELOG tests keep a release's version and its notes in step, and the address tests keep private LAN
+addresses out of every tracked file but the fixtures (CONTRIBUTING's identifier rule)."""
 from __future__ import annotations
 
 import importlib.util
 import io
 import re
+import subprocess
 import tarfile
 import tomllib
 from pathlib import Path
@@ -230,3 +232,61 @@ def test_unreleased_changelog_entries_stay_short():
             entries[-1].append(line)
     too_long = [e[0][:70] for e in entries if len(e) > 3 or any(len(line) > 120 for line in e)]
     assert not too_long, f"[Unreleased] entries over three lines or 120 columns: {too_long}"
+
+
+# RFC 1918: 10/8, 172.16/12, 192.168/16. An octet may be written as a placeholder (`10.0.0.x`, `10.x`), and a
+# three-part CIDR (`10.0.0/24`) counts; a range named as `192.168/16` is not an address. The look-behind keeps
+# `3.10.0.1` and `110.0.0.1` from matching.
+_OCTET = r"(?:\d{1,3}|[a-zA-Z*](?!\w))"
+_PRIVATE_V4 = re.compile(
+    rf"(?<![\d.])(?:10\.{_OCTET}\.{_OCTET}\.{_OCTET}|10\.\d{{1,3}}\.\d{{1,3}}/\d|10\.[a-zA-Z*](?!\w)"
+    rf"|172\.(?:1[6-9]|2\d|3[01])\.{_OCTET}\.{_OCTET}|192\.168\.)")
+# Where made-up private addresses may stay: the fixtures (tests/, the harnesses), the frozen review trail, the
+# applied migrations (never edited once applied), and CHANGELOG.md, whose [Unreleased] section is checked below.
+_ADDRESS_EXEMPT = ("tests/", "scripts/harness_", "docs/reviews/", "db/migrations/", "CHANGELOG.md")
+
+
+def _tracked_text_files() -> list[Path]:
+    """Every tracked text file (git ls-files), or, without a git work tree (the dev-VM gate ships a plain copy),
+    every file under the root outside dot-directories other than .github. Binary files are left out."""
+    try:
+        out = subprocess.run(["git", "-C", str(_ROOT), "ls-files", "-z"], capture_output=True, check=True).stdout
+        paths = [_ROOT / rel for rel in out.decode("utf-8").split("\0") if rel]
+    except (OSError, subprocess.CalledProcessError):
+        paths = [p for p in _ROOT.rglob("*")
+                 if not any(part.startswith(".") and part != ".github" for part in p.relative_to(_ROOT).parts[:-1])]
+    return [p for p in paths if p.is_file() and b"\0" not in p.read_bytes()[:8192]]
+
+
+def test_the_private_address_pattern_catches_what_it_should():
+    """The RFC 1918 pattern matches addresses, placeholders and CIDRs in the three private ranges, and nothing
+    else: not the documentation ranges, not a range named as `192.168/16`, not a version number. Guards a later
+    edit of the pattern silently letting the loose forms back in, or flagging an ordinary number."""
+    hits = ["10.0.0.5", "ip=10.0.0.5/24", "10.x", "10.0.0.x", "10.1.x.x", "10.0.0.0/8", "10.0.0/24", "172.16.0.1",
+            "172.20.x.y", "172.31.255.255", "192.168.1.1", "192.168.x.x", "root@192.168.1.10", "(10.2.3.4)"]
+    misses = ["192.0.2.10", "198.51.100.7", "203.0.113.99", "`10/8`", "`172.16/12`", "`192.168/16`", "110.0.0.1",
+              "1.10.0.0.1", "172.160.1.1", "172.15.0.1", "Python 3.10.x", "v1.10.0.0", "100.64.0.10", "10.0",
+              "secs: int = 10", "ttl 10.5 s"]
+    assert [s for s in hits if not _PRIVATE_V4.search(s)] == []
+    assert [s for s in misses if _PRIVATE_V4.search(s)] == []
+
+
+def test_no_private_address_outside_the_fixtures():
+    """No private (RFC 1918) IPv4 address appears in any tracked file outside the fixtures: docs, docstrings,
+    comments, tool descriptions, operator scripts, compose files, the top-level Markdown and the CHANGELOG's
+    [Unreleased] section use 192.0.2.0/24 and the other documentation ranges. Guards a deployment's real LAN
+    address leaking into a public page through an example copied from a fleet (review DOCS-06); a new
+    directory is covered by default. The fixtures may keep made-up RFC 1918 addresses (CONTRIBUTING)."""
+    files = [p for p in _tracked_text_files()
+             if not p.relative_to(_ROOT).as_posix().startswith(_ADDRESS_EXEMPT)]
+    scanned = {p.relative_to(_ROOT).as_posix() for p in files}
+    assert {"docs/runbooks/vm-access.md", "br0kr/cloudinit.py", "README.md"} <= scanned, "the scan saw nothing"
+    hits = []
+    for path in files:
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if _PRIVATE_V4.search(line):
+                hits.append(f"{path.relative_to(_ROOT).as_posix()}:{n}")
+    for n, line in enumerate(_changelog_sections()[0][1].splitlines(), 1):
+        if _PRIVATE_V4.search(line):
+            hits.append(f"CHANGELOG.md [Unreleased] line {n}")
+    assert not hits, f"private addresses outside the fixtures (use 192.0.2.x, 198.51.100.x, 203.0.113.x): {hits}"

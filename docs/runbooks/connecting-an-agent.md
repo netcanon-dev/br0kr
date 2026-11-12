@@ -53,7 +53,7 @@ The gateway runs in one of two transport modes (`BR0KR_MCP_TRANSPORT`). Choose b
 **HTTP (the shared service — recommended):**
 
 ```bash
-claude mcp add --transport http br0kr https://broker.lan/mcp \
+claude mcp add --transport http br0kr https://br0kr.example.com/mcp \
   --header "Authorization: Bearer <agent-token>"
 ```
 
@@ -84,7 +84,7 @@ prefers a config file:
 { "mcpServers": {
     "br0kr": {
       "type": "http",
-      "url": "https://broker.lan/mcp",
+      "url": "https://br0kr.example.com/mcp",
       "headers": { "Authorization": "Bearer <agent-token>" }
 } } }
 ```

@@ -11,7 +11,7 @@ the fence — AND separately proves the unfenced-clone (marker) reclaim. Safe by
   * Cleans up both throwaway guests at the end (and on failure), then verifies they are gone.
 
 Env:
-  PVE_HOST          Proxmox host/IP (e.g. 192.168.1.10)
+  PVE_HOST          Proxmox host/IP (e.g. 192.0.2.10)
   PVE_NODE          node name (e.g. pve1)
   PVE_TOKEN_ID      an EPHEMERAL API token id  (user@realm!tokenname)   — revoke it after the run
   PVE_TOKEN_SECRET  the ephemeral token secret  (piped in, never committed/printed)

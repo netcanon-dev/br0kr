@@ -67,7 +67,14 @@ uv pip compile requirements.txt --universal --generate-hashes --python-version 3
 No real hostname, domain, LAN address, token or personal identifier belongs in
 the tree, a fixture, a commit message or a PR description. Use the
 documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
-`2001:db8::/32`) and `example.com` / `.invalid` names. The `PII guard` check
+`2001:db8::/32`) and `example.com` / `.invalid` names. One exception to the
+documentation ranges: test and harness fixtures may use made-up private (RFC 1918)
+addresses where the code under test needs one that looks like a LAN; never a real
+one. Everything else (docs, docstrings, comments, operator scripts) may not, and
+`tests/unit/test_repo_hygiene.py` checks every tracked file outside `tests/`,
+`scripts/harness_*`, the frozen reviews, the applied migrations and the released
+CHANGELOG. Generic Proxmox node names (`pve`, `pve1`, `pve2`, …) are not
+identifiers; a name specific to one deployment is. The `PII guard` check
 (`.github/workflows/pii-guard.yml`) scans every PR's files and commit metadata
 and must pass.
 

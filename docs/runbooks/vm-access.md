@@ -130,7 +130,7 @@ takes effect; `tests/unit/test_env_contract.py` keeps that true.
 | `BR0KR_VM_TEMPLATE` | **single-node legacy default:** the vmid to clone when a lease names no catalog template. **Unset = off** (create-blank shell). On a fleet with more than one node or cluster such a lease is HELD (`env_template_wrong_cluster`) instead of cloning a vmid that may not exist where it lands. | unset |
 | `BR0KR_VM_FULL_CLONE` | `0` = faster/lighter **linked** clones (needs a clone-capable storage); else full. A knob. | `1` (full) |
 | `BR0KR_CI_USER` | default cloud-init login user when the agent omits `ci_user` | `br0kr` |
-| `BR0KR_GUEST_IP_PREFIX` | prefer this IPv4 prefix (e.g. `192.168.1.`) over a virtual/bridge address. A knob. | unset |
+| `BR0KR_GUEST_IP_PREFIX` | prefer this IPv4 prefix (e.g. `192.0.2.`) over a virtual/bridge address. A knob. | unset |
 | `BR0KR_IP_DISCOVER_LIMIT` | max ACTIVE cloud-init leases polled for an IP per tick | `16` |
 
 The clone's disk pool is resolved per lease by the placement gate (the retired `BR0KR_VM_CLONE_STORAGE` is
@@ -157,9 +157,9 @@ no poll loop of its own:
 
 ```jsonc
 // wait_for_lease(7)
-{ "ok": true, "lease_id": 7, "state": "ACTIVE", "ip_address": "192.168.1.214", "ci_user": "runner",
+{ "ok": true, "lease_id": 7, "state": "ACTIVE", "ip_address": "192.0.2.214", "ci_user": "runner",
   "vmid": 9901, "node_id": "pve1", "exists": true, "reached": true, "waited_s": 24.0 }
-// agent:  ssh runner@192.168.1.214   (with its own private key)
+// agent:  ssh runner@192.0.2.214   (with its own private key)
 ```
 
 `ip_address` is `null` until the guest boots and cloud-init starts the agent (poll a few times); it stays

@@ -35,7 +35,7 @@ stack up with the `oauth` profile:
 ```bash
 # .env — the shim's issuer defaults to https://<BR0KR_TLS_SITE>, so this must be how the connector addresses
 # the host (unless you set BR0KR_PUBLIC_URL for a tunnel — see the callout below):
-BR0KR_TLS_SITE=192.168.1.50          # your host's LAN name/IP (or a real domain for a public cert)
+BR0KR_TLS_SITE=192.0.2.50            # your host's LAN name/IP (or a real domain for a public cert)
 # optional: BR0KR_OAUTH_CODE_TTL / BR0KR_OAUTH_TOKEN_TTL_DAYS (see .env.example)
 # Record the stack so every later command sees it (docker-deploy.md §3): the TLS override + the oauth
 # profile, plus any profile you already run (e.g. dashboard,oauth).
@@ -50,11 +50,12 @@ Do not pass `--profile` by hand once `COMPOSE_PROFILES` is in `.env`: a `--profi
 orphans.
 
 > 🌐 **Is your br0kr on a private LAN IP?** Then this alone is **not enough for Claude Desktop / claude.ai.**
-> That connector runs its OAuth discovery from **Anthropic's cloud**, which **cannot reach a private IP**
-> (`192.168.x.x`, `10.x`, …) — you'll get *"Couldn't register with br0kr's sign-in service."* You need a
-> **public** front (a tunnel), which sets **`BR0KR_PUBLIC_URL`** to a public https URL and decouples it from
-> your LAN origin. Follow **[public-tunnel.md](public-tunnel.md)** (a named Cloudflare Tunnel), then come
-> back to step 2 using your public URL. (A `claude` CLI on the LAN with a static bearer needs none of this.)
+> That connector runs its OAuth discovery from **Anthropic's cloud**, which **cannot reach a private IP** (an
+> RFC 1918 address in `10/8`, `172.16/12` or `192.168/16`) — you'll get *"Couldn't register with br0kr's
+> sign-in service."* You need a **public** front (a tunnel), which sets **`BR0KR_PUBLIC_URL`** to a public
+> https URL and decouples it from your LAN origin. Follow **[public-tunnel.md](public-tunnel.md)** (a named
+> Cloudflare Tunnel), then come back to step 2 using your public URL. (A `claude` CLI on the LAN with a static
+> bearer needs none of this.)
 
 `deploy.sh` version-gates Compose (the plain-port un-publish needs ≥ 2.24, via `tls-up.sh --check`) and the
 TLS override layers Caddy + the `oauth` service. Without `oauth` in `COMPOSE_PROFILES` you get TLS with no

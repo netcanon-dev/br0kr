@@ -11,9 +11,9 @@
 # EXIT (success or failure), and the vmid is re-verified gone. Nothing is committed; no secret touches stdout.
 #
 # Config (env). REQUIRED, site-specific (no defaults: a wrong guess would actuate the wrong host):
-#   PVE_HOST/PVE_NODE      Proxmox host + node            (e.g. 192.168.1.10 / pve1)
-#   PVE_SSH                ssh target for node root       (e.g. root@192.168.1.10)
-#   RUNNER_SSH             ssh target for the runner      (e.g. runner@192.168.1.30)
+#   PVE_HOST/PVE_NODE      Proxmox host + node            (e.g. 192.0.2.10 / pve1)
+#   PVE_SSH                ssh target for node root       (e.g. root@192.0.2.10)
+#   RUNNER_SSH             ssh target for the runner      (e.g. runner@192.0.2.30)
 #   BUILD_STORAGE          storage with import+images content
 # Optional (defaults in parentheses):
 #   SSH_KEY               optional -i identity file       (unset -> ssh config decides)

@@ -21,7 +21,7 @@ INSERT/reclaim) is already proven on real Postgres by scripts/harness_imgbuild.p
 DRIVER half those tests mock, in the EXACT order reconciler.build_template issues it.
 
 Env:
-  PVE_HOST           Proxmox host/IP (e.g. 192.168.1.10)
+  PVE_HOST           Proxmox host/IP (e.g. 192.0.2.10)
   PVE_NODE           node name (e.g. pve1)
   PVE_TOKEN_ID       an EPHEMERAL API token id  (user@realm!tokenname)   — the wrapper revokes it after
   PVE_TOKEN_SECRET   the ephemeral token secret  (piped in host-to-host, never committed/printed)

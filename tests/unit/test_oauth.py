@@ -69,8 +69,8 @@ def test_issuer_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     for v in ("BR0KR_OAUTH_ISSUER", "BR0KR_PUBLIC_URL", "BR0KR_TLS_SITE"):
         monkeypatch.delenv(v, raising=False)
     assert oauth.issuer() == ""                                    # nothing set → empty (main() then refuses)
-    monkeypatch.setenv("BR0KR_TLS_SITE", "192.168.1.232/")        # trailing slash must be trimmed (branch 3)
-    assert oauth.issuer() == "https://192.168.1.232"             # derived from the direct-TLS site, slash trimmed
+    monkeypatch.setenv("BR0KR_TLS_SITE", "192.0.2.50/")           # trailing slash must be trimmed (branch 3)
+    assert oauth.issuer() == "https://192.0.2.50"                # derived from the direct-TLS site, slash trimmed
     monkeypatch.setenv("BR0KR_PUBLIC_URL", "https://br0kr.example.com/")
     assert oauth.issuer() == "https://br0kr.example.com"          # tunnel URL wins; trailing slash trimmed
     monkeypatch.setenv("BR0KR_OAUTH_ISSUER", "https://override.example")

@@ -10,8 +10,9 @@ reaches `https://<BR0KR_TLS_SITE>/mcp` directly. But the **Claude Desktop / clau
 is different — it authenticates via **OAuth** (see [oauth-connector.md](oauth-connector.md)), and the OAuth
 **discovery + dynamic client registration run from ANTHROPIC'S CLOUD**, not from your machine (the connector
 redirect URI is `https://claude.ai/api/mcp/auth_callback`). The cloud **cannot reach a private LAN IP**
-(`192.168.x.x`, `10.x`, …), so pointing the connector at `https://192.168.1.50/mcp` fails at the very
-first step with *"Couldn't register with br0kr's sign-in service."*
+(an RFC 1918 address in `10/8`, `172.16/12` or `192.168/16`), so pointing the connector at your LAN address
+(`https://192.0.2.50/mcp`, say) fails at the very first step with *"Couldn't register with br0kr's sign-in
+service."*
 
 The fix is a stable **public** front. A tunnel gives you one **without opening an inbound port**: the
 tunnel agent dials **out** to the provider and the provider terminates public TLS, so no firewall/NAT change

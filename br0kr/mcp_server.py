@@ -400,7 +400,7 @@ def request_lease(
     "ssh-ed25519 AAAA... you@host"). The broker injects it via cloud-init; you keep the private key. ci_user
     sets the login username (the operator's default, usually br0kr, if omitted: lease_status then reports
     ci_user as null); ip_config sets a static Proxmox ipconfig0 (e.g.
-    "ip=10.0.0.5/24,gw=10.0.0.1") instead of the DHCP default. Once the guest boots, call lease_status to get
+    "ip=192.0.2.5/24,gw=192.0.2.1") instead of the DHCP default. Once the guest boots, call lease_status to get
     its ip_address and ci_user, then ssh in. A malformed key/user/ip is refused (reason ssh_pubkey_malformed,
     cloud_init_requires_pubkey, …). Omit ssh_pubkey for a bare reserved/fenced VM with no injected login.
 

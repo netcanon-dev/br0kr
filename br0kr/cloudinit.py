@@ -96,7 +96,7 @@ def validate_ip_config(ip_config: str) -> str | None:
     """Return a rejection reason if `ip_config` is not a safe Proxmox `ipconfig0` value, else None.
 
     A valid value is a comma-separated `k=v` list over the ip/gw/ip6/gw6 keys (e.g. 'ip=dhcp' or
-    'ip=10.0.0.5/24,gw=10.0.0.1'). The charset is bounded so the value can never contain a space, newline,
+    'ip=192.0.2.5/24,gw=192.0.2.1'). The charset is bounded so the value can never contain a space, newline,
     or semicolon that would break out of the field; every key must be recognised (a typo'd key would be
     silently ignored by Proxmox, leaving the guest unreachable). The IP/gw VALUES themselves are passed to
     Proxmox as-is (it is the authority on their syntax) — we only guard structure + charset here."""
@@ -166,7 +166,7 @@ def pick_guest_ip(interfaces: Any, *, prefer_prefix: str | None = None) -> str |
     The result is a list of interfaces, each with an `ip-addresses` list of `{ip-address, ip-address-type}`.
     We take the first USABLE IPv4 (`_usable_ipv4`: skips loopback + link-local) across all interfaces, in
     the order the agent returned them — which is typically the primary NIC first. `prefer_prefix` (e.g.
-    '192.168.1.') lets a caller bias toward the real LAN subnet over a virtual/bridge address (a docker0 /
+    '192.0.2.') lets a caller bias toward the real LAN subnet over a virtual/bridge address (a docker0 /
     cni interface): any usable IPv4 starting with it wins over one that doesn't. Defensive against missing/
     malformed keys (a flaky agent payload yields None, never a raise)."""
     if not isinstance(interfaces, list):
