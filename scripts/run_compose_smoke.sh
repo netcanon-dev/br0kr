@@ -333,6 +333,28 @@ check legacy_trust_rule_retired_on_restart \
   "$({ [ "$planted" = 0 ] && [ "$retired$streaming" = "00" ] && [ "$after" = 0 ]; } && echo 0 || echo 1)" \
   "${plant_detail}after restart: ${after_detail}scram rules loaded $([ "$retired" = 0 ] && echo yes || echo NO), standby streaming $([ "$streaming" = 0 ] && echo yes || echo NO)"
 
+# A cloned standby whose slot the primary no longer has re-clones itself on its next start (review REL-06): stop
+# pg-standby, drop its slot, start it. docker/standby-recovery.sh finds the slot missing on the same cluster and
+# removes the sentinel, the entrypoint wipes and clones (creating the slot again) and it streams on an active slot.
+"${DC[@]}" stop pg-standby >/dev/null 2>&1
+dropped=1
+for _ in $(seq 1 10); do   # the old walsender can hold the slot active for a moment after the stop
+  [ "$(psql_n pg-primary "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'br0kr_standby' AND NOT active")" = 1 ] \
+    && psql_n pg-primary "SELECT pg_drop_replication_slot('br0kr_standby')" >/dev/null && { dropped=0; break; }
+  sleep 1
+done
+"${DC[@]}" start pg-standby >/dev/null 2>&1
+recloned=1
+for _ in $(seq 1 60); do
+  [ "$(psql_n pg-primary "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'br0kr_standby' AND active")" = 1 ] \
+    && [ "$(psql_n pg-primary "SELECT state FROM pg_stat_replication")" = streaming ] && { recloned=0; break; }
+  sleep 3
+done
+said="$("${DC[@]}" logs pg-standby 2>&1 | grep -c "RE-CLONING: slot br0kr_standby is missing")"
+check standby_reclones_itself_when_its_slot_is_gone \
+  "$({ [ "$dropped$recloned" = 00 ] && [ "${said:-0}" -ge 1 ]; } && echo 0 || echo 1)" \
+  "slot dropped $([ "$dropped" = 0 ] && echo yes || echo NO), re-cloned + streaming on an active slot $([ "$recloned" = 0 ] && echo yes || echo NO), logged ${said:-0}"
+
 echo "--------------------------------------------------------"
 fail=0; for r in "${results[@]}"; do [ "$r" -ne 0 ] && fail=1; done
 echo "$([ "$fail" -eq 0 ] && echo GO || echo NO-GO)"

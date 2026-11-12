@@ -10,6 +10,10 @@
 # an interrupted clone re-clones rather than starting on a half-clone, and a promoted standby is not
 # re-cloned). See docs/runbooks/docker-deploy.md section 9.
 #
+# Before starting, docker/standby-recovery.sh checks a cloned standby against the primary (review REL-06): a lost
+# or missing slot means it can never resume. Here BR0KR_STANDBY_AUTO_RECLONE defaults to 0, so it only says so
+# loudly (a re-clone over the mesh moves the whole ledger again); set it to 1 to re-clone automatically.
+#
 # NOTE: keep the ${VAR:?...} messages and comments ASCII and apostrophe-free. An apostrophe inside a
 # :? message makes the container bash pair it with a later one and silently swallow the lines between.
 set -e
@@ -26,6 +30,9 @@ export PGPASSWORD="$REPLICATION_PASSWORD"
 export PGSSLMODE="$SSLMODE"
 export PGSSLROOTCERT="/certs/ca.crt"
 
+PGHOST="$PRIMARY_HOST" PGPORT="$PRIMARY_PORT" PGUSER="$RUSER" \
+  bash "$(dirname "$0")/standby-recovery.sh" pg-standby-remote "$SLOT" >/dev/null || true
+
 if [ ! -f "$PGDATA/.br0kr-clone-complete" ]; then
   echo "pg-standby-remote: cloning from ${PRIMARY_HOST}:${PRIMARY_PORT} over TLS (sslmode=${SSLMODE}) as ${RUSER}"
   until pg_isready -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$RUSER" -q; do
@@ -33,9 +40,16 @@ if [ ! -f "$PGDATA/.br0kr-clone-complete" ]; then
     sleep 2
   done
   rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
+  # The primary DR init creates the slot; after a re-clone dropped a lost one it is missing, and -C creates it
+  # (only on a positive missing answer: if the question fails, so would the clone).
+  create_slot=""
+  if slot_row="$(PGHOST="$PRIMARY_HOST" PGPORT="$PRIMARY_PORT" PGUSER="$RUSER" \
+      PGCONNECT_TIMEOUT=5 timeout 20 psql -w "replication=true" -tA -c "READ_REPLICATION_SLOT $SLOT" 2>/dev/null)"; then
+    case "$slot_row" in physical\|*) ;; *) create_slot="-C"; echo "pg-standby-remote: slot $SLOT is missing - the clone creates it" ;; esac
+  fi
   # gosu preserves the env (PGPASSWORD/PGSSLMODE/PGSSLROOTCERT) for the postgres-user backup.
   gosu postgres pg_basebackup -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$RUSER" \
-    -D "$PGDATA" -Fp -Xs -R -w --slot="$SLOT"
+    -D "$PGDATA" -Fp -Xs -R -w $create_slot --slot="$SLOT"
   # pg_basebackup -R does NOT persist the password (or our sslmode), and the walreceiver needs both
   # to RECONNECT after any restart. We persist the password in a postgres-owned .pgpass (0600) and
   # reference it from primary_conninfo via passfile= — so the password is NEVER inline in the

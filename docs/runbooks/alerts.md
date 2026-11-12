@@ -254,7 +254,10 @@ nothing.
 
 **Means.** The primary recycled WAL a standby still needed (`wal_status='lost'`). That standby cannot resume.
 
-**Fix.** Re-clone it, and recreate its replication slot, which stays invalidated: a restart does not help.
+**Fix.** For the bundled standby, restart it (`docker compose restart pg-standby`): with
+`BR0KR_STANDBY_AUTO_RECLONE=1`, the default, its entrypoint finds the slot lost, drops it and clones the standby
+again with a new one (review REL-06; its log says `RE-CLONING`). Anywhere else (auto re-clone off, the stretched DR
+standby, an operator-run cluster) re-clone it and recreate the slot by hand:
 [day2-operations.md](day2-operations.md#re-clone-a-dead-standby) has the commands.
 
 ### Br0krLedgerStandbyStalled

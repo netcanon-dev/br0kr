@@ -154,9 +154,13 @@ services:
       # the old trust rule keeps streaming too, and a rotated password takes effect when this container is
       # recreated. It is the password every broker process already holds in PGCONN.
       PGPASSWORD: ${PGPASSWORD:?set PGPASSWORD in .env}
+      # A cloned standby whose slot the primary lost (or no longer has) is cloned again on its next start (review
+      # REL-06, docker/standby-recovery.sh); never one whose primary may lack its data. 0 turns it off.
+      BR0KR_STANDBY_AUTO_RECLONE: ${BR0KR_STANDBY_AUTO_RECLONE:-1}
     volumes:
       - pg-standby-data:/var/lib/postgresql/data
       - ./docker/pg-standby-entrypoint.sh:/pg-standby-entrypoint.sh:ro
+      - ./docker/standby-recovery.sh:/standby-recovery.sh:ro
       # The standby's own pg_hba.conf, cloned from an older primary, can hold the same trust rule (review SEC-05).
       - ./docker/retire-trust-replication.sh:/retire-trust-replication.sh:ro
     depends_on:

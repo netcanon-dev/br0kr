@@ -176,6 +176,28 @@ def test_the_internet_facing_containers_have_no_route_to_the_ledger():
     assert re.search(r"^networks:\n  ledger: \{\}\n  edge: \{\}$", base_text, re.M)
 
 
+def test_both_standbys_check_they_can_resume_before_starting():
+    """Both standby entrypoints run docker/standby-recovery.sh (mounted on both) BEFORE their clone block, so a
+    lost or missing slot removes the sentinel in time for that start to clone again; both clone blocks create the
+    slot (-C) only when the primary says it is missing; auto re-clone defaults to on for the bundled same-host
+    standby and off for the remote DR one (whose re-clone moves the whole ledger over the mesh). Guards review
+    REL-06: a standby whose slot was lost stayed stuck until someone removed its volume, and a re-clone after the
+    lost slot was dropped would fail on a slot that no longer exists."""
+    bundled = _services((_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))["pg-standby"]
+    remote = _services((_ROOT / "docker-compose.standby.yml").read_text(encoding="utf-8"))["pg-standby-remote"]
+    for svc, default in ((bundled, "1"), (remote, "0")):
+        assert "./docker/standby-recovery.sh:/standby-recovery.sh:ro" in svc
+        assert f"BR0KR_STANDBY_AUTO_RECLONE: ${{BR0KR_STANDBY_AUTO_RECLONE:-{default}}}" in svc
+    for name in ("pg-standby-entrypoint.sh", "pg-standby-remote-entrypoint.sh"):
+        script = (_ROOT / "docker" / name).read_text(encoding="utf-8")
+        check = script.find('bash "$(dirname "$0")/standby-recovery.sh"')
+        clone = script.find('if [ ! -f "$PGDATA/.br0kr-clone-complete" ]; then')
+        ask = script.find("READ_REPLICATION_SLOT")
+        backup = script.find("gosu postgres pg_basebackup")
+        assert 0 <= check < clone < ask < backup, name
+        assert "-w $create_slot --slot=" in script, name
+
+
 def test_the_bundled_standby_replicates_with_a_password():
     """The bundled pg-primary starts through docker/pg-primary-entrypoint.sh, and both it and the bundled standby's
     entrypoint run docker/retire-trust-replication.sh (mounted on both: a standby cloned from an older primary has

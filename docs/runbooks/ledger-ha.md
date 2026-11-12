@@ -173,7 +173,7 @@ visible without pretending to be a replica. Known residual: a `pg_receivewal` ar
 | `br0kr_ledger_standbys_sync` | of those, how many are SYNCHRONOUS — losing one **blocks commits**, not just DR |
 | `br0kr_ledger_sync_required` | `1` = the primary's `synchronous_standby_names` is set, so commits WAIT for a sync standby; `0` = async |
 | `br0kr_ledger_slots_inactive` | slots with **no consumer** — the dead-standby signal |
-| `br0kr_ledger_slots_lost` | `wal_status='lost'`: WAL already recycled, the standby needs a **re-clone**, not a restart |
+| `br0kr_ledger_slots_lost` | `wal_status='lost'`: WAL already recycled, the standby needs a **re-clone** (the bundled one does that itself on its next start) |
 | `br0kr_ledger_slot_retained_wal_bytes{slot}` | WAL the primary is holding for that slot; the disk-pressure side |
 | `br0kr_ledger_replay_lag_bytes` | worst standby lag, measured from the primary's current WAL position |
 
@@ -190,7 +190,7 @@ the same class of mistake as logging the failure at `debug`.
 |---|---|---|
 | `Br0krLedgerStandbyGone` (the 45-hour incident) | `br0kr_ledger_replication_configured == 1 and br0kr_ledger_slots_inactive > 0` | 10m, `keep_firing_for: 15m` |
 | `Br0krLedgerPostureUnknown` | `br0kr_ledger_replication_readable == 0` | 10m |
-| `Br0krLedgerSlotLost` (re-clone, don't restart) | `br0kr_ledger_slots_lost > 0` | 0m |
+| `Br0krLedgerSlotLost` (re-clone; restarting the bundled standby does it) | `br0kr_ledger_slots_lost > 0` | 0m |
 | `Br0krLedgerStandbyStalled` (streaming, replaying nothing) | `br0kr_ledger_replay_lag_bytes > 1073741824` | 15m |
 | `Br0krLedgerSyncStandbyLost` (commits wait) | `br0kr_ledger_sync_required == 1 and br0kr_ledger_standbys_sync == 0` | 1m |
 
@@ -206,8 +206,8 @@ count alone would page on it forever.
 > ledger that flaps in and out of readability would therefore flap straight through the incident. The
 > `readable == 0` rule covers the gap and `keep_firing_for` stops the flap.
 
-`Br0krLedgerSlotLost`'s remedy differs from the others — re-clone, don't restart (see
-[alerts.md](alerts.md#br0krledgerslotlost)).
+`Br0krLedgerSlotLost`'s remedy differs from the others: a re-clone. A restart of the bundled standby performs it
+(review REL-06); anything else is re-cloned by hand (see [alerts.md](alerts.md#br0krledgerslotlost)).
 
 **On an external / managed Postgres, grant `pg_monitor` first.** `pg_stat_replication` does not refuse
 a least-privilege role — it returns the rows with every column but `pid` set to **NULL**. br0kr detects

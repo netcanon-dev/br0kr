@@ -134,7 +134,8 @@ groups:
           summary: br0kr cannot read the ledger's replication posture.
           runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerpostureunknown
 
-      # Unrecoverable in place: the WAL is gone and the standby needs a re-clone.
+      # Unrecoverable in place: the WAL is gone and the standby needs a re-clone (the bundled standby re-clones
+      # itself on its next start, review REL-06; the runbook covers the rest).
       - alert: Br0krLedgerSlotLost
         expr: br0kr_ledger_slots_lost > 0
         labels:

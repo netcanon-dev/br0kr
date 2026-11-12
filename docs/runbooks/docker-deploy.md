@@ -188,8 +188,9 @@ refuse `latest` and a name with no tag.
   (`br0kr_standby`, created on the primary), so it can stop/restart/lag and then resume without a
   re-clone. `max_slot_wal_keep_size=2GB` (on the primary) bounds how much WAL the slot pins, so a
   standby that is gone for a long time can't fill the primary's disk — but if it stays down past that
-  window the slot is invalidated and the standby must be re-cloned, with the slot recreated
-  ([day2-operations.md](day2-operations.md#re-clone-a-dead-standby)).
+  window the slot is invalidated and the standby must be re-cloned with a new slot. It does that itself on its
+  next start (`BR0KR_STANDBY_AUTO_RECLONE=1`, the default; `docker/standby-recovery.sh`, review REL-06), and never
+  over a primary that may lack its data ([day2-operations.md](day2-operations.md#re-clone-a-dead-standby)).
 - **The broker re-homes itself.** `PGCONN` lists *both* hosts with `target_session_attrs=read-write`,
   so libpq connects to whichever is currently the **primary**. Every broker process opens its ledger
   connections through `br0kr/db.py`: the daemon through `connect_with_retry`, which rides through the brief

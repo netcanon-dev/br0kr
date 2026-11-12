@@ -28,9 +28,13 @@ services:
       REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?must match the primary's REPLICATION_PASSWORD}
       REPLICATION_SSLMODE: ${REPLICATION_SSLMODE:-verify-full}
       REPLICATION_SLOT: ${REPLICATION_SLOT:-br0kr_standby_dr}
+      # 1 re-clones a standby whose slot the primary lost or no longer has, on its next start (review REL-06);
+      # off by default here, because that moves the whole ledger over the mesh again. Either way it is logged.
+      BR0KR_STANDBY_AUTO_RECLONE: ${BR0KR_STANDBY_AUTO_RECLONE:-0}
     volumes:
       - pg-standby-remote-data:/var/lib/postgresql/data
       - ./docker/pg-standby-remote-entrypoint.sh:/pg-standby-remote-entrypoint.sh:ro
+      - ./docker/standby-recovery.sh:/standby-recovery.sh:ro
       - ./certs/ca.crt:/certs/ca.crt:ro   # the CA that signed the primary's server cert (verify-full)
     # No host port published while it is a STANDBY (a replica needs no inbound). To FAIL OVER to it you
     # must FIRST publish its port on the host mesh interface (like docker-compose.primary-remote.yml

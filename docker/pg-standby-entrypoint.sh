@@ -9,12 +9,20 @@
 # The sentinel is also why a PROMOTED standby (operator-driven failover removes standby.signal) is
 # NOT re-cloned on restart: it still carries the sentinel from its original clone.
 #
+# A cloned standby whose slot the primary lost or no longer has can never resume, so before starting,
+# docker/standby-recovery.sh checks it against the primary and, with BR0KR_STANDBY_AUTO_RECLONE=1 (the
+# default here), removes the sentinel so it is cloned again below (review REL-06). It never wipes a
+# promoted standby, or one whose primary may lack its data (another cluster, another timeline, or behind it).
+#
 # The replication shape is the one the failover harness proves (scripts/harness_ha_failover.py): streaming
 # replication on the compose network with `-R` to wire the standby config, plus a named replication SLOT
 # (br0kr_standby, created on the primary) so a stopped/lagging standby can resume. Here it is scram, not the
 # harness's trust: the clone and the WAL stream authenticate as the cluster superuser with PGPASSWORD from the
 # environment (review SEC-05), on the `ledger` compose network only. See docs/runbooks/docker-deploy.md.
 set -e
+
+PGHOST=pg-primary PGPORT=5432 PGUSER="${POSTGRES_USER:-postgres}" \
+  bash "$(dirname "$0")/standby-recovery.sh" pg-standby br0kr_standby >/dev/null || true
 
 if [ ! -f "$PGDATA/.br0kr-clone-complete" ]; then
   echo "pg-standby: no completed clone — cloning from pg-primary via pg_basebackup"
@@ -29,8 +37,15 @@ if [ ! -f "$PGDATA/.br0kr-clone-complete" ]; then
   # the persistent slot the primary created (so WAL is retained across standby downtime); -Xs streams
   # WAL during the backup; -w never prompts: the password comes from PGPASSWORD (scram, review SEC-05).
   rm -rf "${PGDATA:?}"/* "${PGDATA:?}"/.[!.]* 2>/dev/null || true
+  # pg-primary-init.sh creates the slot at initdb; after a re-clone dropped a lost one (or someone dropped it),
+  # it is missing, and -C creates it. Only on a positive "missing" answer: if the question fails, so would the clone.
+  create_slot=""
+  if slot="$(PGHOST=pg-primary PGPORT=5432 PGUSER="${POSTGRES_USER:-postgres}" \
+      PGCONNECT_TIMEOUT=5 timeout 20 psql -w "replication=true" -tA -c "READ_REPLICATION_SLOT br0kr_standby" 2>/dev/null)"; then
+    case "$slot" in physical\|*) ;; *) create_slot="-C"; echo "pg-standby: slot br0kr_standby is missing - the clone creates it" ;; esac
+  fi
   gosu postgres pg_basebackup -h pg-primary -p 5432 -U "${POSTGRES_USER:-postgres}" \
-    -D "$PGDATA" -Fp -Xs -R -w --slot=br0kr_standby
+    -D "$PGDATA" -Fp -Xs -R -w $create_slot --slot=br0kr_standby
   # -R copies the password libpq took from PGPASSWORD into primary_conninfo, and a password there wins over the
   # environment: the standby would keep the old one after the ledger password is rotated. Write the conninfo
   # without it, so the WAL stream always authenticates with the PGPASSWORD this container was started with.

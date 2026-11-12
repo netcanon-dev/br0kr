@@ -232,8 +232,29 @@ exactly the containers whose environment changed.
 
 ## Re-clone a dead standby
 
-A standby whose WAL the primary has recycled cannot catch up (`Br0krLedgerSlotLost`), and a restart does not help.
-Throw its data away, recreate its replication slot (the old one stays invalidated), and clone it again:
+A standby whose WAL the primary has recycled cannot catch up (`Br0krLedgerSlotLost`), nor can one whose slot is gone.
+**The bundled standby does this itself** on its next start (review REL-06): its entrypoint asks the primary, and
+when the slot is lost or missing and the primary provably holds everything the standby has (the same cluster and
+timeline, at or past the standby's WAL position), it drops a lost slot, wipes the standby and clones it again with a
+new slot, logging one `RE-CLONING` line. Restart it to trigger that (`docker compose restart pg-standby`). The wipe
+comes before the new copy exists: should the primary fail during that clone, there is no standby to fall back to.
+Set `BR0KR_STANDBY_AUTO_RECLONE=0` in `.env` to keep it to the log line.
+
+It never clones over **a primary that may lack the standby's data**: a different cluster (pg-primary re-initialised,
+for example its volume removed), another timeline (a promotion or a restore since), or a primary behind the standby
+(restored from an older backup). The standby may then hold the only copy of the newest ledger. Its log says
+`REFUSING TO RE-CLONE` and why, and it starts unchanged, still readable but no longer streaming. (A standby stopped
+uncleanly just after following a promotion can be refused too: that is the safe side, and the remedy is the
+same.) Decide first: if its data is the ledger you want, dump it
+and restore that into the new primary ([Restore the ledger from a dump](#restore-the-ledger-from-a-dump)), then
+re-clone it. `-T` keeps the binary dump off a terminal; name your database if it is not the user's name:
+
+```bash
+docker compose exec -T pg-standby sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "${POSTGRES_DB:-$POSTGRES_USER}"' > standby.dump
+```
+
+By hand (auto re-clone off, the DR standby, or after that decision): throw its data away, recreate its replication
+slot (the old one stays invalidated), and clone it again:
 
 ```bash
 docker compose rm -sf pg-standby                 # stop AND remove it: a stopped container still holds its volume

@@ -65,6 +65,8 @@ resolve in this repository.
   more release, then goes (review UX-03).
 
 ### Fixed
+- **A standby whose replication slot is lost or gone re-clones itself on its next start** (REL-06), only when the
+  primary provably holds all its data; otherwise it refuses and keeps them. `BR0KR_STANDBY_AUTO_RECLONE` (bundled 1).
 - **A leader that loses its ledger session stops mid-tick, not after it** (REL-05). The heartbeat re-checks leadership
   at most once per interval; the tick ends at its next step, so the overlap is one step, not one tick (tens of min).
 - **The documented sync-standby alert paged forever on an async ledger.** It keyed on `standbys_sync == 0`, always
