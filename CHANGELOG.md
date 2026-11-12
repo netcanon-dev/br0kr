@@ -43,6 +43,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The replication CA key is no longer written where pg-primary mounts.** `gen-replication-certs.sh` writes
+  `ca.key` to `certs-ca/` (or a third argument) and refuses a directory inside `certs/` (SEC-06).
 - **The dashboard has a light mode: Theme now offers Light, Dark and Auto.** A dozen hardcoded dark colours kept it
   off; every colour is now a spec token and the buttons use the spec's AA pairings (UI-07, docker-deploy.md).
 - **Red now means "cannot be put back", and each confirm names its action.** Releasing a running VM was grey and

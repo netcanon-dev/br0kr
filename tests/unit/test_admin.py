@@ -1333,3 +1333,37 @@ def test_list_discovery_dismissals_shapes_the_roster_and_offers_every_dismissabl
     assert out["kinds"]["unknown_pool"] == "pve_name" and out["kinds"]["declared_missing_bridge"] == \
         "logical_network_id"
     assert len(c.sqls) == 1 and "ORDER BY dismissed_at DESC" in c.sqls[0]
+
+
+class _RecordingConn:
+    """A connection that records every SQL text it is asked to run and returns no row."""
+
+    def __init__(self) -> None:
+        self.sqls: list[str] = []
+
+    def execute(self, sql: str, _params: tuple = ()) -> _RecordingConn:
+        self.sqls.append(sql)
+        return self
+
+    def fetchone(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("table", ["cluster", "project", "template"])
+def test_exists_queries_an_allow_listed_table(table):
+    """_exists() runs one SELECT against each table on its allow-list. Guards the allow-list shrinking below the
+    tables the operator verbs check (a cluster, project or template id) and breaking those verbs."""
+    conn = _RecordingConn()
+    assert admin._exists(conn, table, "x") is False
+    assert conn.sqls == [f"SELECT 1 FROM {table} WHERE id = %s"]
+
+
+@pytest.mark.parametrize("table", ["lease", "api_token", "cluster; DROP TABLE lease", "cluster WHERE 1=1 --"])
+def test_exists_refuses_any_other_table_before_running_sql(table):
+    """_exists() raises ValueError for a table outside its allow-list and runs no SQL. Its table name goes into the
+    SQL text (a name cannot be a bound parameter), so a caller passing a computed or user-supplied name would
+    otherwise be an injection; the allow-list makes the old "fixed literal" comment a check (review SEC-06)."""
+    conn = _RecordingConn()
+    with pytest.raises(ValueError, match="allow-list"):
+        admin._exists(conn, table, "x")
+    assert conn.sqls == []

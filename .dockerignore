@@ -7,6 +7,8 @@
 *.env
 !*.env.example
 certs/
+certs-ca/
+**/*.key
 docker-compose*.yml
 docker/
 .gitignore

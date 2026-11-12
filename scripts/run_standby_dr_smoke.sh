@@ -52,7 +52,7 @@ cleanup() {
   echo "--- teardown ---"
   "${DC[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "$ENVFILE" "$NETFILE"
-  [ "$CREATED_CERTS" = "1" ] && rm -rf "$CERTS"
+  [ "$CREATED_CERTS" = "1" ] && rm -rf "$CERTS" "$CERTS-ca"
 }
 trap cleanup EXIT INT TERM
 
@@ -60,12 +60,13 @@ psql_p() { "${DC[@]}" exec -T pg-primary       psql -U broker -d broker -tAc "$1
 psql_s() { "${DC[@]}" exec -T pg-standby-remote psql -U broker -d broker -tAc "$1" 2>/dev/null | tr -d '[:space:]'; }
 
 echo "=== br0kr stretched-DR replication smoke (project=$PROJECT) ==="
-if [ -e "$CERTS" ]; then
-  echo "ABORT: $CERTS already exists — move it aside (this smoke generates + deletes throwaway certs there)"
+if [ -e "$CERTS" ] || [ -e "$CERTS-ca" ]; then
+  echo "ABORT: $CERTS or $CERTS-ca already exists — move it aside (this smoke generates + deletes throwaway certs there)"
   exit 2
 fi
 echo "--- mint throwaway certs (SAN=pg-primary) ---"
-bash docker/gen-replication-certs.sh pg-primary "$CERTS" && CREATED_CERTS=1 || { echo "cert gen failed"; exit 2; }
+CREATED_CERTS=1   # set first: neither dir existed, so a half-finished mint is still ours to delete
+bash docker/gen-replication-certs.sh pg-primary "$CERTS" || { echo "cert gen failed"; exit 2; }
 
 echo "--- up: pg-primary [DR/TLS] + pg-standby-remote ---"
 "${DC[@]}" up -d pg-primary pg-standby-remote

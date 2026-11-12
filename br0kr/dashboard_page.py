@@ -1247,8 +1247,8 @@ function renderTokens(toks){
     <td class="pill">${t.last_used_at?tdate(t.last_used_at):'never'}</td>
     <td class="pill">${t.expires_at?tdate(t.expires_at):'—'}</td>
     <td>${t.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
-    <td>${t.active?'<button class="act ghost" onclick="setTokenExpiry('+t.token_id+')">set expiry</button> '
-      +'<button class="act danger" onclick="revokeToken('+t.token_id+')">revoke</button>':''}</td>
+    <td>${t.active?'<button class="act ghost" onclick="setTokenExpiry('+(+t.token_id)+')">set expiry</button> '
+      +'<button class="act danger" onclick="revokeToken('+(+t.token_id)+')">revoke</button>':''}</td>
   </tr>`).join('');
   paint('tokens', add + `<table><thead><tr><th>#</th><th>Project</th><th>Scope</th><th>Label</th>
     <th>Last used</th><th>Expires</th><th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
@@ -1307,7 +1307,7 @@ function setTokenExpiry(id){
     <label class="ff"><span>Days from now</span><input id="te-days" type="number" step="1" min="1"
       placeholder="blank = never expires"></label>
     <p class="pill">Blank clears the expiry (never expires); otherwise re-dates it that many days from now.</p>
-    <div class="erow"><button class="act" onclick="submitTokenExpiry(${id})">save</button>
+    <div class="erow"><button class="act" onclick="submitTokenExpiry(${+id})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
     <span id="form-err" class="ferr"></span></div></div>`);
 }
@@ -1347,7 +1347,7 @@ function renderOperators(ops){
     <td class="pill">${o.last_used_at?tdate(o.last_used_at):'never'}</td>
     <td class="pill">${o.expires_at?tdate(o.expires_at):'—'}</td>
     <td>${o.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
-    <td>${o.active?'<button class="act danger" onclick="revokeOperator('+o.operator_id+')">revoke</button>':''}</td>
+    <td>${o.active?'<button class="act danger" onclick="revokeOperator('+(+o.operator_id)+')">revoke</button>':''}</td>
   </tr>`).join('');
   paint('operators', add + `<table><thead><tr><th>#</th><th>Name</th><th>Last used</th><th>Expires</th>
     <th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
@@ -1416,16 +1416,16 @@ function renderSettings(s){
     let input;
     if(k.kind === 'bool'){
       const cur = set ? (k.override ? 'true' : 'false') : '';
-      input = `<select id="set-${k.name}">` + ['','true','false'].map(o =>
+      input = `<select id="set-${esc(k.name)}">` + ['','true','false'].map(o =>
         `<option value="${o}"${o===cur?' selected':''}>${o===''?'(default)':o}</option>`).join('') + `</select>`;
     } else if(k.choices){                    // an enum str knob (log_level) → a dropdown, blank = default
       const cur = set ? String(k.override) : '';
       const opt = o => `<option value="${esc(o)}"${o===cur?' selected':''}>`
                      + `${o===''?'(default '+dflt+')':esc(o)}</option>`;
-      input = `<select id="set-${k.name}">` + [''].concat(k.choices).map(opt).join('') + `</select>`;
+      input = `<select id="set-${esc(k.name)}">` + [''].concat(k.choices).map(opt).join('') + `</select>`;
     } else {
       const type = k.kind==='int' ? 'number' : 'text';
-      input = `<input id="set-${k.name}" type="${type}" step="1" value="${set?esc(String(k.override)):''}"`
+      input = `<input id="set-${esc(k.name)}" type="${type}" step="1" value="${set?esc(String(k.override)):''}"`
             + ` placeholder="(default ${dflt})">`;
     }
     const src = set ? '<span class="ok">ledger</span>' : '<span class="pill">env/default</span>';
@@ -1700,7 +1700,7 @@ function openBindForm(i){
     <label class="ff"><span>Storage pool</span><select id="ib-storage">${stOpts}</select></label>
     <label class="ff"><span>Size (GB)</span><input id="ib-size" type="number" step="1" min="1"
       value="${inst.size_gb!=null?esc(inst.size_gb):''}" placeholder="the template copy's disk footprint"></label>
-    <div class="erow"><button class="act" onclick="submitBind(${inst.instance_id})">bind</button>
+    <div class="erow"><button class="act" onclick="submitBind(${+inst.instance_id})">bind</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
     <span id="form-err" class="ferr"></span></div></div>`);
 }
@@ -2229,7 +2229,7 @@ function renderLeases(){
         ? `<input type="checkbox" class="lsel" value="${l.lease_id}" aria-label="select lease ${l.lease_id}">` : '';
     } else {
       const ab = (fn, lbl, red) => `<button class="act ${red ? 'danger' : 'ghost'}" `
-        + `onclick="${fn}(${l.lease_id})">${lbl}</button> `;
+        + `onclick="${fn}(${+l.lease_id})">${lbl}</button> `;
       let ops = '';
       if(canEdit && !l.is_reservation) ops += ab('leaseDetail', 'detail');
       if(canEdit && l.renewable)   ops += ab('renewLease', 'renew');
@@ -2633,7 +2633,7 @@ function render(d){
         <td class="num">${w.req_cpu}</td><td class="num">${gib(w.req_mem_mb)}</td>
         <td class="pill">${store(w)}</td>
         <td class="num">${Math.round(w.age_seconds)}s</td><td class="num">${left(w)}</td>
-        ${canEdit?'<td><button class="act ghost" onclick="cancelLease('+w.lease_id+')">cancel</button></td>':''}
+        ${canEdit?'<td><button class="act ghost" onclick="cancelLease('+(+w.lease_id)+')">cancel</button></td>':''}
       </tr>`).join('') + '</tbody></table>';
     if(q.truncated) qh += `<div class="empty">showing first ${q.shown} of ${q.depth}</div>`;
   }
@@ -2815,7 +2815,7 @@ function setPsActions(id, data){
   const a = $('ps-actions'); if(!a) return;
   const live = !!(data && ['PENDING','ADMITTED','PROVISIONING','ACTIVE'].includes(data.state));
   let btns = '';
-  if(canEdit && live) btns += `<button class="act ghost" onclick="renewLease(${id})">renew</button> `;
+  if(canEdit && live) btns += `<button class="act ghost" onclick="renewLease(${+id})">renew</button> `;
   btns += `<button class="act ghost" onclick="closeForm()">close</button>`;
   paint('ps-actions', btns);
 }

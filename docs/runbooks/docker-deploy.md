@@ -591,7 +591,8 @@ whichever is primary after an operator-fenced promotion — no broker change.
 
 ```bash
 # 1. Mint a CA + server cert whose CN/SAN is THIS host's mesh address (must match what B connects to):
-bash docker/gen-replication-certs.sh 100.64.0.10        # → ./certs/{ca.crt,server.crt,server.key}
+bash docker/gen-replication-certs.sh 100.64.0.10        # → ./certs/{ca.crt,server.crt,server.key} + ./certs-ca/ca.key
+#    ./certs is what pg-primary mounts; ./certs-ca holds the CA's private key, which nothing mounts: keep it offline.
 
 # 2. In .env, enable DR mode (see the .env.example "Stretched DR" block):
 #    REPLICATION_PASSWORD=…           # a strong secret, shared with host B

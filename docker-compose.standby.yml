@@ -3,6 +3,7 @@
 # with docker-compose.yml. See docs/runbooks/docker-deploy.md §9.
 #
 #   # on the PRIMARY host: bash docker/gen-replication-certs.sh <primary-mesh-host>  → ./certs/ca.crt
+#   #   (the CA's private key goes to ./certs-ca there and never leaves that host)
 #   # copy ./certs/ca.crt to THIS host's ./certs/ca.crt, then:
 #   cp .env.standby.example .env.standby   # set PRIMARY_HOST + REPLICATION_PASSWORD (match the primary)
 #   docker compose -f docker-compose.standby.yml --env-file .env.standby up -d

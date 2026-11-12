@@ -1108,7 +1108,7 @@ def _op_connect() -> psycopg.Connection[Any]:
 # Security headers emitted on EVERY response — via the handler's end_headers() override, so they cover the
 # page, JSON, the CSV/JSON export, AND the stdlib error pages (review S16). The dashboard is a trusted-net
 # operator surface whose blast radius is the unlocked operator token in sessionStorage, so we lock the browser
-# down: nosniff (no MIME sniffing of a JSON body into script), DENY framing (no clickjacking), a strict CSP
+# down: nosniff (no MIME sniffing of a JSON body into script), DENY framing (no clickjacking), a restrictive CSP
 # (default-src 'none'; inline script/style for the self-contained PAGE plus 'self' for the vendored
 # same-origin /assets/* files (br0kr/ui_assets.py) — no third-party origin can ever load — plus connect-src
 # 'self' for its fetch() to /api/*; img-src 'self' data: is defensive headroom, the page has no image today;

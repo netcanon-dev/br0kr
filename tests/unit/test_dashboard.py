@@ -1098,7 +1098,7 @@ def test_authorize_handles_a_non_ascii_header_without_crashing():
 
 
 def test_write_emits_security_headers_and_404_carries_no_reflected_path():
-    """Every response carries the S16 hardening headers (nosniff / X-Frame-Options:DENY / a strict CSP with
+    """Every response carries the S16 hardening headers (nosniff / X-Frame-Options:DENY / a restrictive CSP with
     default-src 'none' + connect-src 'self' / no-referrer) so a JSON body can't be MIME-sniffed into script and
     the operator UI can't be framed; the 404 helper emits a bare {"error":"not_found"} with NO reflected request
     path. Guards a browser executing a sniffed response, clickjacking the unlocked token, or the 404 echoing
@@ -1485,3 +1485,43 @@ def test_network_bridge_delete_takes_a_strict_force_flag(monkeypatch):
     for fuzzy in ("true", 1):
         with pytest.raises(dashboard._Reject):
             parse({"node_id": "n1", "logical_network_id": "lan", "force": fuzzy})
+
+
+# What an inline event handler may hold. A quoted slot ('${x}') holds only a constant the page chose itself (an
+# entity or form name, a mode, a tab and section id, the page-minted idempotency key). A bare slot holds a number:
+# a .map() index, or any other value coerced with + at the sink (${+id}, or '+(+id)+' in a join). The one callee
+# slot is fn, a handler name the page picks from literals.
+_HANDLER_CONSTS = {"e", "ename", "mode", "idem", "it.tab", "it.sec", "it.ack"}
+_HANDLER_INDEXES = {"i", "k", "gi"}
+
+
+def test_inline_handlers_hold_only_page_constants_and_numbers():
+    """Every inline event handler is a double-quoted `on*="…"` attribute (no single-quoted or unquoted one, no
+    `setAttribute('on…')`, no `javascript:` URL), its quoted slots hold only page constants, and its bare and joined
+    slots only indexes or `+`-coerced numbers, with nothing else dynamic left. The page's CSP must allow
+    `'unsafe-inline'` for these handlers, so it does not stop an injected one; what does is that server text never
+    reaches one and is passed through esc() everywhere else (SECURITY.md C15). Guards a new handler carrying a
+    project or template name, which esc() would not make safe inside a JavaScript string (it leaves the single
+    quote alone), in any of the forms a name-only check would miss."""
+    page = dashboard.PAGE
+    # an HTML attribute that is not double-quoted (a JS property such as el.onkeydown = … assigns a function)
+    assert not re.findall(r'(?<![\w.-])on[a-z]+\s*=\s*(?!["=])', page), "a handler that is not double-quoted"
+    assert not re.search(r"setAttribute\(\s*['\"]on", page) and "javascript:" not in page
+    attrs = re.findall(r'(?<![\w-])on[a-z]+="([^"]*)"', page)
+    assert len(attrs) > 50, "the handler scan found nothing"
+    bad = []
+    for attr in attrs:
+        rest = attr
+        bad += [f"quoted {n!r} in {attr}" for n in re.findall(r"'\$\{([^}]*)\}'", rest) if n not in _HANDLER_CONSTS]
+        rest = re.sub(r"'\$\{[^}]*\}'", "''", rest)
+        for n in re.findall(r"\$\{([^}]*)\}", rest):
+            if not (n in _HANDLER_INDEXES or re.fullmatch(r"\+[\w.]+", n) or (n == "fn" and rest.startswith("${fn}("))):
+                bad.append(f"bare {n!r} in {attr}")
+        rest = re.sub(r"\$\{[^}]*\}", "0", rest)
+        for n in re.findall(r"'\+(.+?)\+'", rest):
+            if not (n in _HANDLER_INDEXES or re.fullmatch(r"\(\+[\w.]+\)", n)):
+                bad.append(f"joined {n!r} in {attr}")
+        rest = re.sub(r"'\+.+?\+'", "0", rest)
+        if any(c in rest for c in "+`$"):
+            bad.append(f"dynamic text left in {attr}")
+    assert not bad, f"inline handlers that could carry server text: {bad}"

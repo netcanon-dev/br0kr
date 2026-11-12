@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 
@@ -314,8 +314,17 @@ def validate_cluster(pve_host: str, token_id: str, token_secret_env: str,
 # A project_template GRANT (0014, phase A3) is disposable policy, NOT a lease dependency: it ON DELETE
 # CASCADEs with its project or template (grant_template/revoke_template manage it), so a project/template
 # delete also silently drops that pair's grants — never blocking the delete and never touching a lease.
-def _exists(conn: psycopg.Connection[Any], table: str, id_: str) -> bool:
-    # table is a fixed literal from this module (never user input), so the f-string is injection-safe.
+# The tables _exists() may name. Its table goes into the SQL text (a name cannot be a bound parameter), so only
+# a name from this set may reach it: the type says so to mypy, and the check below says so at run time.
+_ExistsTable = Literal["cluster", "project", "template"]
+_EXISTS_TABLES: frozenset[str] = frozenset({"cluster", "project", "template"})
+
+
+def _exists(conn: psycopg.Connection[Any], table: _ExistsTable, id_: str) -> bool:
+    """True if a row with this id exists in `table`. Raises ValueError, before any SQL runs, for a table outside
+    the allow-list, so a future caller passing a computed name cannot turn the f-string into an injection."""
+    if table not in _EXISTS_TABLES:
+        raise ValueError(f"_exists: table {table!r} is not in the allow-list")
     return conn.execute(f"SELECT 1 FROM {table} WHERE id = %s", (id_,)).fetchone() is not None
 
 

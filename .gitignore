@@ -15,6 +15,7 @@ keys.txt
 # TLS replication material for the stretched DR standby (operator-generated, host-only): the dir
 # holds private keys (also matched by *.key) — never commit it.
 certs/
+certs-ca/
 **/age/keys.txt
 secrets.yaml
 secrets.yml

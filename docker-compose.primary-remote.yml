@@ -1,7 +1,7 @@
 # Layer onto docker-compose.yml on the PRIMARY host to enable authenticated, TLS-encrypted
 # replication for a STRETCHED (remote) standby — see docs/runbooks/docker-deploy.md §9.
 #
-#   bash docker/gen-replication-certs.sh <this-host's-mesh-IP-or-name>     # once, into ./certs
+#   bash docker/gen-replication-certs.sh <this-host's-mesh-IP-or-name>     # once: ./certs, CA key in ./certs-ca
 #   # in .env: set REPLICATION_PASSWORD, narrow REPLICATION_CIDR, set PRIMARY_BIND=<mesh IP>
 #   docker compose -f docker-compose.yml -f docker-compose.primary-remote.yml up -d \
 #     pg-primary migrate gateway daemon          # NOT pg-standby (that one is same-host only)
