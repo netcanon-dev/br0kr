@@ -56,20 +56,25 @@ PAGE = """<!doctype html>
   .qdepth{font-size:22px;font-weight:700} .qdepth.zero{color:var(--mut)}
   .act{font:inherit;font-size:11px;background:var(--accent);color:#0b0f14;border:0;border-radius:4px;
        padding:3px 9px;cursor:pointer;margin-top:8px} .act.ghost{background:#30363d;color:var(--ink)}
-  .act.danger{background:var(--bad);color:#fff}
+  /* dark text on the danger red, as on the accent buttons: white on the theme's red is ~3.3:1, under AA */
+  .act.danger{background:var(--bad);color:#0b0f14}
   td .act,.erow .act{margin-top:0}
   #actions{margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px}
   #actions input{background:#0b0f14;border:1px solid var(--line);color:var(--ink);border-radius:4px;padding:3px 6px}
   .ok{color:var(--ok)}
+  /* words for a screen reader only: what a glyph or a colour says to everyone else */
+  .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);
+    white-space:nowrap;border:0}
   /* client-side tab nav: 4 groups share ONE page; a tab toggles which .tabpanel is displayed (no server route,
      one poll loop). Sticky so it stays reachable after the header scrolls away; the modal (z 1000) sits above. */
-  nav#tabnav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 24px;border-bottom:1px solid var(--line);
-    position:sticky;top:0;background:var(--bg);z-index:100}
+  nav#tabnav{padding:8px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);
+    z-index:100}
+  nav#tabnav>[role=tablist]{display:flex;flex-wrap:wrap;gap:4px}
   nav#tabnav button{font:inherit;font-size:11px;letter-spacing:.5px;text-transform:uppercase;background:transparent;
     color:var(--mut);border:1px solid transparent;border-radius:6px;padding:6px 14px;cursor:pointer}
   nav#tabnav button:hover{color:var(--ink)}
   nav#tabnav button.active{background:var(--card);color:var(--accent);border-color:var(--line)}
-  .warn{font-size:10px;color:var(--bad);border:1px solid var(--bad);border-radius:3px;padding:0 4px;margin-left:5px}
+  .warn{font-size:11px;color:var(--bad);border:1px solid var(--bad);border-radius:3px;padding:0 4px;margin-left:5px}
   .banner{background:#2a1e12;border:1px solid var(--warn);color:#f0c674;border-radius:6px;
           padding:8px 12px;margin:0 0 12px;font-size:12px} .banner b{color:var(--warn)}
   .qf{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:5px 0;font-size:12px}
@@ -107,8 +112,8 @@ PAGE = """<!doctype html>
   .att.bad{border-color:var(--bad);color:var(--bad)} .att.warn{border-color:var(--warn);color:var(--warn)}
   .att-x{font:inherit;font-size:12px;background:transparent;color:var(--mut);border:0;cursor:pointer;
     margin-left:-4px;padding:0 4px}
-  nav#tabnav .badge:not(:empty){margin-left:6px;font-size:10px;border-radius:999px;padding:0 6px;
-    background:var(--bad);color:#fff}
+  nav#tabnav .badge:not(:empty){margin-left:6px;font-size:11px;border-radius:999px;padding:0 6px;
+    background:var(--bad);color:#0b0f14}
   nav#tabnav #badge-tenancy:not(:empty){background:var(--accent);color:#0b0f14}
 </style>
 <link rel="stylesheet" href="/assets/v0.2.1/netcanon-ui.css">
@@ -120,18 +125,21 @@ PAGE = """<!doctype html>
   <span id="actions"></span><span id="whoami" class="pill"></span><span id="status">connecting…</span>
   <details id="theme-menu"><summary>Theme</summary><nc-theme-picker compact></nc-theme-picker></details>
 </header>
-<nav id="tabnav">
-  <button data-tab="capacity" onclick="setTab('capacity')">Capacity</button>
-  <button data-tab="tenancy" onclick="setTab('tenancy')">Tenancy<span class="badge" id="badge-tenancy"
+<nav id="tabnav" aria-label="sections"><div role="tablist" aria-label="dashboard sections">
+  <button role="tab" id="tab-capacity" aria-controls="panel-capacity" data-tab="capacity"
+    onclick="setTab('capacity')">Capacity</button>
+  <button role="tab" id="tab-tenancy" aria-controls="panel-tenancy" data-tab="tenancy"
+    onclick="setTab('tenancy')">Tenancy<span class="badge" id="badge-tenancy"
     title="requests waiting in the admission queue"></span></button>
-  <button data-tab="images" onclick="setTab('images')">Images<span class="badge" id="badge-images"
+  <button role="tab" id="tab-images" aria-controls="panel-images" data-tab="images"
+    onclick="setTab('images')">Images<span class="badge" id="badge-images"
     title="failed template builds and replications"></span></button>
-  <button data-tab="security" onclick="setTab('security')">Security &amp; Ops</button>
-</nav>
+  <button role="tab" id="tab-security" aria-controls="panel-security" data-tab="security"
+    onclick="setTab('security')">Security &amp; Ops</button>
+</div></nav>
 <main>
   <div id="attention" role="region" aria-label="needs attention" hidden></div>
-  <div id="form-slot"></div>
-  <div class="tabpanel" data-tab="capacity">
+  <div class="tabpanel" role="tabpanel" id="panel-capacity" aria-labelledby="tab-capacity" data-tab="capacity">
   <section id="fleet-sec"><h2>Fleet — admission SLOs</h2><div id="fleet-err"></div><div class="cards" id="fleet"></div>
     <h2>Ledger — DR posture</h2><div id="ledger-err"></div><div class="cards" id="ledger"></div></section>
   <section id="clusters-sec"><h2>Clusters</h2><div class="cards" id="clusters"></div></section>
@@ -141,12 +149,12 @@ PAGE = """<!doctype html>
   <section id="discovery-sec" style="display:none"><h2>Discovery dismissals (operator)</h2>
     <div id="discovery"></div></section>
   </div>
-  <div class="tabpanel" data-tab="tenancy">
+  <div class="tabpanel" role="tabpanel" id="panel-tenancy" aria-labelledby="tab-tenancy" data-tab="tenancy">
   <section id="projects-sec"><h2>Projects (tenant allowances)</h2><div class="cards" id="projects"></div></section>
   <section id="leases-sec"><h2>Active leases</h2><div id="leases"></div></section>
   <section id="queue-sec"><h2>Admission queue</h2><div id="queue"></div></section>
   </div>
-  <div class="tabpanel" data-tab="images">
+  <div class="tabpanel" role="tabpanel" id="panel-images" aria-labelledby="tab-images" data-tab="images">
   <section id="templates-sec"><h2>OS templates (catalog)</h2><div id="templates"></div></section>
   <section id="instances-sec"><h2>Template instances (physical copies)</h2><div id="instances"></div></section>
   <section id="replications-sec"><h2>Template replications</h2><div id="replications"></div></section>
@@ -154,7 +162,7 @@ PAGE = """<!doctype html>
     <div id="downloads"></div></section>
   <section id="migrations-sec"><h2>Cross-cluster migrations</h2><div id="migrations"></div></section>
   </div>
-  <div class="tabpanel" data-tab="security">
+  <div class="tabpanel" role="tabpanel" id="panel-security" aria-labelledby="tab-security" data-tab="security">
   <div id="sec-hint" class="empty">Unlock with an operator token (top-right) to manage agent tokens, dashboard
     operators, settings, and the audit log.</div>
   <section id="tokens-sec" style="display:none"><h2>Agent tokens (per-project credentials)</h2>
@@ -164,35 +172,80 @@ PAGE = """<!doctype html>
   <section id="settings-sec" style="display:none"><h2>Settings (operator)</h2><div id="settings"></div></section>
   <section id="audit-sec" style="display:none"><h2>Audit log (operator)</h2>
     <div class="auditbar" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0">
-      <select id="af-surface">
+      <select id="af-surface" aria-label="surface">
         <option value="">any surface</option>
         <option value="dashboard">dashboard</option>
         <option value="mcp">mcp</option>
       </select>
-      <select id="af-outcome" title="applied writes vs denied auth attempts vs refused admissions">
+      <select id="af-outcome" aria-label="outcome" title="applied writes vs denied auth attempts vs refused admissions">
         <option value="">any outcome</option>
         <option value="denied">denied only</option>
         <option value="refused">refused only</option>
         <option value="applied">applied only</option>
       </select>
-      <input id="af-action" placeholder="action contains…" size="14">
-      <input id="af-target" placeholder="target…" size="7">
-      <input id="af-project" placeholder="project…" size="8">
-      <input id="af-token" placeholder="token #" size="6">
-      <input id="af-since" type="date" title="from (inclusive)">
-      <input id="af-until" type="date" title="to (inclusive)">
+      <input id="af-action" aria-label="action contains" placeholder="action contains…" size="14">
+      <input id="af-target" aria-label="target" placeholder="target…" size="7">
+      <input id="af-project" aria-label="project" placeholder="project…" size="8">
+      <input id="af-token" aria-label="token number" placeholder="token #" size="6">
+      <input id="af-since" aria-label="from date (inclusive)" type="date" title="from (inclusive)">
+      <input id="af-until" aria-label="to date (inclusive)" type="date" title="to (inclusive)">
       <button class="act ghost" onclick="clearAuditFilters()">clear</button>
       <button class="act ghost" onclick="exportAudit('csv')">export CSV</button>
       <button class="act ghost" onclick="exportAudit('json')">export JSON</button>
     </div>
     <div id="audit"></div><div id="audit-more"></div></section>
   </div>
+  <!-- the dialog sits after the sections: a fixed overlay, and its heading follows theirs -->
+  <div id="form-slot" role="dialog" aria-modal="true" aria-labelledby="dlg-title" hidden></div>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
 <script>
 const REFRESH_MS = 5000;
 const $ = id => document.getElementById(id);
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// the header of a row-actions column: no visible text, a name for a screen reader
+const TH_ACTS = '<th><span class="sr">actions</span></th>';
+// a status glyph with its meaning in words: a tooltip for the mouse, hidden text for a screen reader (the words
+// are constants, never server data)
+const glyph = (sym, words, attrs) => `<span ${attrs} title="${words}"><span aria-hidden="true">${sym}</span>`
+  + `<span class="sr">${words}</span></span>`;
+// ── panels. Every poll redraws every panel; paint() leaves one alone when its markup has not changed. When a
+//    redraw does replace the control that has keyboard focus, focus moves to that control in the new markup: the
+//    same kind, handler and label (the n-th of several); else the same handler (cordon became uncordon); else,
+//    the control being gone (its row went away), the panel's heading. Never a neighbouring row's button: a
+//    lease's renew acts on one press. The opener an open dialog will return focus to is carried over the same
+//    way. So the 5-second refresh never throws focus back to the top of the page. ──
+const PAINTED = new WeakMap();
+const handlerKey = x => x.tagName + '|' + (x.getAttribute('onclick') || '');
+const focusKey = x => handlerKey(x) + '|' + (x.getAttribute('aria-label') || x.textContent);
+// where control `x` sits inside `el`, to find it again after a redraw
+function mark(el, x){
+  const same = [...el.querySelectorAll(x.tagName)].filter(y => focusKey(y) === focusKey(x));
+  return {tag: x.tagName, full: focusKey(x), handler: handlerKey(x), nth: same.indexOf(x)};
+}
+function find(el, m){
+  const pick = (list, i) => list[Math.min(Math.max(i, 0), list.length - 1)];
+  const same = [...el.querySelectorAll(m.tag)];
+  const to = pick(same.filter(y => focusKey(y) === m.full), m.nth)
+    || pick(same.filter(y => handlerKey(y) === m.handler), m.nth);
+  if(to) return to;
+  // gone: the heading of the panel's section (or of the dialog), focusable by script only; it arms nothing
+  const s = el.closest('section, [role=dialog]'), h = s && s.querySelector('h2, h3');
+  if(h) h.tabIndex = -1;
+  return h;
+}
+function paint(id, html){
+  const el = $(id);
+  if(!el || PAINTED.get(el) === html) return;
+  const inside = x => x && x !== el && el.contains(x);
+  const a = document.activeElement;
+  const fa = inside(a) ? mark(el, a) : null, fo = inside(OPENER) ? mark(el, OPENER) : null;
+  el.innerHTML = html;
+  PAINTED.set(el, html);
+  if(fo) OPENER = find(el, fo) || OPENER;
+  const to = fa && find(el, fa);
+  if(to) to.focus({preventScroll: true});
+}
 const gib = mb => (mb/1024).toFixed(mb < 1024*10 ? 1 : 0);
 const cls = p => p < 70 ? 'var(--ok)' : (p < 90 ? 'var(--warn)' : 'var(--bad)');
 // Format a duration in seconds for the fleet SLO tiles: null (no samples / empty queue) → an em-dash, NOT 0.
@@ -281,12 +334,26 @@ if(!TABS.includes(TAB)) TAB = 'capacity';   // fall back if an old/unknown value
 function setTab(name){
   if(!TABS.includes(name)) name = 'capacity';
   TAB = name; try{ localStorage.setItem('br0kr_tab', name); }catch(e){}
-  document.querySelectorAll('.tabpanel').forEach(p => { p.style.display = (p.dataset.tab === name) ? '' : 'none'; });
-  document.querySelectorAll('#tabnav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  TABS.forEach(t => {   // the WAI-ARIA tabs pattern: only the selected tab sits in the Tab order
+    const on = t === name, b = $('tab-' + t);
+    $('panel-' + t).style.display = on ? '' : 'none';
+    b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); b.tabIndex = on ? 0 : -1;
+  });
   // the newly opened tab's operator panels load now; operatorOk() checks the token itself, since canEdit is only
   // re-derived on render and a page stopped for a token renders no more
   if(DATA && canEdit && operatorOk() && !paused) operatorReads(true);
 }
+// Arrow keys, Home and End move between the tabs and open the one they land on (automatic activation).
+$('tabnav').addEventListener('keydown', e => {
+  if(e.altKey || e.ctrlKey || e.metaKey) return;   // Alt+Arrow is the browser's back / forward
+  const i = TABS.indexOf(TAB);
+  const to = {ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: TABS.length - 1}[e.key];
+  if(to === undefined) return;
+  e.preventDefault();
+  const name = TABS[(to + TABS.length) % TABS.length];
+  setTab(name);
+  $('tab-' + name).focus();
+});
 // ── the token field: shown when writes need a token (operator actions) OR reads do (BR0KR_DASHBOARD_READ_TOKEN).
 //    One field holds one token; the operator token unlocks both writes and reads (operator ⊇ viewer).
 //    Every poll calls this, so it writes the header only when what it shows changes: rewriting the field every
@@ -301,11 +368,15 @@ function renderActions(){
       : (WHO.tok === tok() && WHO.verdict) ? 'reads unlocked' : 'checking the token…';
     html = '<span class="ok">'+state+'</span><button class="act ghost" onclick="lock()">lock</button>';
   }
-  else html = '<input id="tok" type="password" placeholder="'+(ACTIONS ? 'operator token' : 'read token')+
-    '" size="12"><button class="act" onclick="unlock()">unlock</button>';
+  else {
+    const what = ACTIONS ? 'operator token' : 'read token';
+    html = '<input id="tok" type="password" aria-label="'+what+'" placeholder="'+what+'" size="12">'+
+      '<button class="act" onclick="unlock()">unlock</button>';
+  }
   if(html === ACTIONS_DRAWN) return;
   ACTIONS_DRAWN = html;
   el.innerHTML = html;
+  const f = $('tok'); if(f) f.onkeydown = e => { if(e.key === 'Enter') unlock(); };   // Enter unlocks too
 }
 // unlock/lock re-poll immediately so a gated read loads (or clears) without waiting a full refresh cycle; a page
 // stopped for a token (needsToken) starts polling again here.
@@ -505,14 +576,14 @@ function setMaxPinned(i){
   // 0049: how many of this project's live leases may be pinned at once (0 = pinning off).
   if(paused) return; paused = true;                        // one form at a time (suppresses the poll re-render)
   const p = DATA.projects[i];
-  $('form-slot').innerHTML = `<div class="form"><h3>Pin limit · ${esc(p.project_id)}</h3>
+  openDialog(`<div class="form"><h3>Pin limit · ${esc(p.project_id)}</h3>
     <label class="ff"><span>Pinned leases</span><input id="mp-n" type="number" step="1" min="0"
       value="${esc(String(p.max_pinned||0))}"></label>
     <p class="pill">How many of its live leases may be pinned: never reclaimed for a missed heartbeat. 0 turns
       pinning off; lowering it unpins nothing.</p>
     <div class="erow"><button class="act" onclick="submitMaxPinned(${i})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitMaxPinned(i){
   const p = DATA.projects[i], t = $('mp-n').value.trim(), num = Number(t);
@@ -529,13 +600,13 @@ function setTemplateDisk(i){
   if(paused) return; paused = true;                        // one form at a time (suppresses the poll re-render)
   const p = DATA.projects[i];
   const cur = p.max_template_disk_gb!=null ? String(p.max_template_disk_gb) : '';
-  $('form-slot').innerHTML = `<div class="form"><h3>Template-disk quota · ${esc(p.project_id)}</h3>
+  openDialog(`<div class="form"><h3>Template-disk quota · ${esc(p.project_id)}</h3>
     <label class="ff"><span>Quota (GB)</span><input id="td-gb" type="number" step="1" min="1"
       value="${esc(cur)}" placeholder="blank = disable downloads"></label>
     <p class="pill">Blank disables template downloads for this tenant; otherwise a positive whole number of GB.</p>
     <div class="erow"><button class="act" onclick="submitTemplateDisk(${i})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitTemplateDisk(i){
   const p = DATA.projects[i], body = {project_id:p.project_id}, t = $('td-gb').value.trim();
@@ -612,17 +683,64 @@ function openForm(ename, mode, item){
     const blank = (val==null || val==='') && f[0]!==e.key;
     return ffield(f, val, mode==='edit'&&f[0]===e.key, (mode==='edit'&&blank)?'leave blank to keep':'');
   }).join('');
-  $('form-slot').innerHTML = `<div class="form"><h3>${title}</h3>${rows}`+
+  openDialog(`<div class="form"><h3>${title}</h3>${rows}`+
     `<div class="erow"><button class="act" onclick="submitForm('${ename}','${mode}')">save</button>`+
     `<button class="act ghost" onclick="closeForm()">cancel</button>`+
-    `<span id="form-err" class="ferr"></span></div></div>`;
+    `<span id="form-err" class="ferr"></span></div></div>`);
 }
-// closeForm dismisses whatever is in #form-slot. `paused` returns to what lease-select mode needs — stay paused
-// while a bulk-select is active, so a confirm modal opened FROM bulk-select restores the pause instead of
-// breaking it; otherwise unpause + poll (the normal form case — lease-select is off, so paused becomes false).
-function closeForm(){ $('form-slot').innerHTML = ''; paused = leaseSelectMode; if(!paused) poll(); }
-// Escape closes an open form modal — guarded on a rendered form, so lease-select mode (also paused) is unaffected.
-document.addEventListener('keydown', e => { if(e.key === 'Escape' && $('form-slot').innerHTML !== '') closeForm(); });
+// ── dialogs. Every form and confirmation opens in #form-slot (role=dialog, aria-modal) through openDialog(), which
+//    names the dialog after its heading, moves keyboard focus into it and remembers the control that opened it. A
+//    dialog that replaces another (a confirm after a form, a result after a submit) keeps the first opener. ──
+let OPENER = null;
+// the controls Tab reaches inside an element, in page order
+const focusables = el => [...el.querySelectorAll('button, input, select, textarea, a[href]')]
+  .filter(x => !x.disabled && x.getClientRects().length > 0);
+function openDialog(html){
+  const slot = $('form-slot');
+  if(slot.innerHTML === '') OPENER = document.activeElement;
+  slot.innerHTML = html;
+  slot.hidden = false;
+  const h = slot.querySelector('h3'); if(h) h.id = 'dlg-title';
+  // the line a dialog marks id="dlg-desc" (a confirmation's question, a one-time secret's warning) is read with its
+  // name; a form's hints are not, so they are not read out before every field
+  const d = $('dlg-desc');
+  if(d && slot.contains(d)) slot.setAttribute('aria-describedby', 'dlg-desc');
+  else slot.removeAttribute('aria-describedby');
+  const err = $('form-err'); if(err && slot.contains(err)) err.setAttribute('role', 'alert');   // said when set
+  // focus lands on the first field that can be edited (else the first field: a token to copy); with none, on the
+  // first button that destroys nothing (cancel, on a red confirm); with no control yet (a lease still loading),
+  // on the heading
+  const all = focusables(slot), fields = all.filter(x => ['INPUT', 'SELECT', 'TEXTAREA'].includes(x.tagName));
+  const first = fields.find(x => !x.readOnly) || fields[0]
+    || all.find(x => !x.className.split(' ').includes('danger')) || all[0];
+  if(first) first.focus();
+  else if(h){ h.tabIndex = -1; h.focus(); }
+}
+// closeForm dismisses whatever is in #form-slot and puts focus back on the control that opened it. `paused` returns
+// to what lease-select mode needs — stay paused while a bulk-select is active, so a confirm modal opened FROM
+// bulk-select restores the pause instead of breaking it; otherwise unpause + poll (the normal form case —
+// lease-select is off, so paused becomes false).
+function closeForm(){
+  const slot = $('form-slot');
+  slot.innerHTML = ''; slot.hidden = true;
+  const o = OPENER; OPENER = null;
+  if(o && o !== document.body && o.isConnected) o.focus();
+  paused = leaseSelectMode; if(!paused) poll();
+}
+// Escape closes an open dialog and Tab / Shift+Tab cycle inside it — guarded on a rendered dialog, so lease-select
+// mode (also paused) is unaffected.
+document.addEventListener('keydown', e => {
+  const slot = $('form-slot');
+  if(slot.innerHTML === '') return;
+  if(e.key === 'Escape'){ closeForm(); return; }
+  if(e.key !== 'Tab') return;
+  const all = focusables(slot), i = all.indexOf(document.activeElement);
+  if(!all.length){ e.preventDefault(); return; }
+  if(e.shiftKey ? i <= 0 : (i < 0 || i === all.length - 1)){
+    e.preventDefault();
+    (e.shiftKey ? all[all.length - 1] : all[0]).focus();
+  }
+});
 // A styled yes/no confirmation MODAL — same #form-slot overlay as the forms, so a destructive confirm lands in
 // the same visual language as every other dialog (replaces the native browser dialog). onOk() runs on confirm
 // (it does its own POST + refresh); cancel/Escape just dismiss. `danger` reddens the confirm button. Guarded on
@@ -630,9 +748,9 @@ document.addEventListener('keydown', e => { if(e.key === 'Escape' && $('form-slo
 function confirmModal(message, onOk, danger){
   if($('form-slot').innerHTML !== '') return;   // a form/modal is already open — one at a time
   paused = true;
-  $('form-slot').innerHTML = `<div class="form"><h3>Confirm</h3><p>${esc(message)}</p>`
+  openDialog(`<div class="form"><h3>Confirm</h3><p id="dlg-desc">${esc(message)}</p>`
     + `<div class="erow"><button class="act${danger?' danger':''}" id="cm-ok">yes</button>`
-    + `<button class="act ghost" id="cm-no">cancel</button></div></div>`;
+    + `<button class="act ghost" id="cm-no">cancel</button></div></div>`);
   $('cm-no').onclick = closeForm;
   $('cm-ok').onclick = () => { closeForm(); onOk(); };   // dismiss first (snappy), then run the action
 }
@@ -695,8 +813,8 @@ const contentChoices = s => CONTENT_TYPES.concat((s.content_types || []).filter(
 const pairWord = p => p.quarantined ? 'quarantined' : (p.verified ? 'verified' : 'not verified yet');
 const pairState = p => p.quarantined
   ? '<span style="color:var(--bad)" title="a post-clone check failed: fenced off until cleared">quarantined</span>'
-  : (p.verified ? '<span style="color:var(--ok)" title="verified by a post-clone check">✓</span>'
-                : '<span style="color:var(--warn)" title="declared, not verified yet">?</span>');
+  : (p.verified ? glyph('✓', 'verified by a post-clone check', 'style="color:var(--ok)"')
+                : glyph('?', 'declared, not verified yet', 'style="color:var(--warn)"'));
 let placementArmed = null;   // moving a pool that has reachable nodes to another cluster takes a second save
                              // for THAT cluster (the one the warning named)
 function openPlacementForm(i){
@@ -704,7 +822,7 @@ function openPlacementForm(i){
   const s = DATA.storage[i];
   const opts = (DATA.clusters || []).map(c => `<option value="${esc(c.cluster_id)}"`
     + `${c.cluster_id === s.cluster_id ? ' selected' : ''}>${esc(c.cluster_id)}</option>`).join('');
-  $('form-slot').innerHTML = `<div class="form"><h3>Placement · ${esc(s.storage_id)}</h3>
+  openDialog(`<div class="form"><h3>Placement · ${esc(s.storage_id)}</h3>
     <label class="ff"><span>Cluster</span><select id="sp-cluster">`
     + (s.cluster_id ? '' : '<option value="">pick a cluster</option>') + opts + `</select></label>
     <label class="ff"><span>PVE storage name</span><input id="sp-pve" type="text" value="${esc(s.pve_name || '')}"
@@ -713,7 +831,7 @@ function openPlacementForm(i){
       content types are set separately on the card.</p>
     <div class="erow"><button class="act" onclick="submitPlacement(${i})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitPlacement(i){
   const s = DATA.storage[i], cluster = $('sp-cluster').value, pve = $('sp-pve').value.trim();
@@ -741,11 +859,11 @@ function openContentForm(i){
     ? 'Undeclared today: clones (while clone content enforcement is on), template builds and rebuilds onto this '
       + 'pool are refused until it is declared.'
     : 'Saving replaces the declared list.';
-  $('form-slot').innerHTML = `<div class="form"><h3>Content types · ${esc(s.storage_id)}</h3>${boxes}
+  openDialog(`<div class="form"><h3>Content types · ${esc(s.storage_id)}</h3>${boxes}
     <p class="pill">${now} A build or rebuild needs import and images; a clone needs images.</p>
     <div class="erow"><button class="act" onclick="submitContent(${i})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitContent(i){
   const s = DATA.storage[i], picked = contentChoices(s).filter((t, k) => $('sc-' + k).checked);
@@ -766,14 +884,14 @@ function openStorageNodeAdd(i){
   if(!cand.length){
     notify('Every node in cluster ' + s.cluster_id + ' already reaches ' + s.storage_id + '.'); return; }
   paused = true;
-  $('form-slot').innerHTML = `<div class="form"><h3>Add a reachable node · ${esc(s.storage_id)}</h3>
+  openDialog(`<div class="form"><h3>Add a reachable node · ${esc(s.storage_id)}</h3>
     <label class="ff"><span>Node</span><select id="sn-node">`
     + cand.map(n => `<option value="${esc(n.node_id)}">${esc(n.node_id)}</option>`).join('') + `</select></label>
     <p class="pill">Declares that this node physically reaches the pool, so the broker may clone onto it from there.
       The pair stays unverified until a clone over it passes the post-clone check.</p>
     <div class="erow"><button class="act" onclick="submitStorageNodeAdd(${i})">add</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitStorageNodeAdd(i){
   const s = DATA.storage[i], node = $('sn-node').value;
@@ -791,12 +909,12 @@ function openStoragePair(i, k){
   const state = rn.quarantined ? 'Quarantined: a post-clone check failed, so the broker does not clone onto this '
       + 'pool from this node. Clear it once the node reaches the pool again.'
     : (rn.verified ? 'Verified by a post-clone check.' : 'Declared, not verified yet.');
-  $('form-slot').innerHTML = `<div class="form"><h3>${esc(rn.node_id)} · ${esc(s.storage_id)}</h3>
+  openDialog(`<div class="form"><h3>${esc(rn.node_id)} · ${esc(s.storage_id)}</h3>
     <p class="pill">${state}</p>
     <div class="erow">` + (rn.quarantined ? '<button class="act" id="pair-clear">clear quarantine</button>' : '')
     + `<button class="act danger" id="pair-remove">remove this node</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
   if(rn.quarantined) $('pair-clear').onclick = () => clearStorageQuarantine(sid, nid);
   $('pair-remove').onclick = () => removeStorageNode(sid, nid, false);
 }
@@ -833,8 +951,8 @@ function renderNetworks(){
   const add = canEdit ? '<div class="toolbar"><button class="act" onclick="openNetworkForm()">+ add logical '
     + 'network</button></div>' : '';
   if(!nets.length){
-    $('networks').innerHTML = add + '<div class="empty">no logical networks: a cross-node clone of a template '
-      + 'needs its net0 on one</div>';
+    paint('networks', add + '<div class="empty">no logical networks: a cross-node clone of a template '
+      + 'needs its net0 on one</div>');
     return;
   }
   const rows = nets.map((ln, i) => `<tr><td>${esc(ln.network_id)}</td>
@@ -844,19 +962,19 @@ function renderNetworks(){
     <td class="num">${ln.template_count}</td>
     ${canEdit ? `<td><button class="act ghost" onclick="deleteNetwork(${i})">delete</button></td>` : ''}
     </tr>`).join('');
-  $('networks').innerHTML = add + `<table><thead><tr><th>Network</th><th>Description</th><th>Bridge per node</th>
-    <th class="num">Templates</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>`;
+  paint('networks', add + `<table><thead><tr><th>Network</th><th>Description</th><th>Bridge per node</th>
+    <th class="num">Templates</th>${canEdit ? TH_ACTS : ''}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 function openNetworkForm(){
   if(paused) return; paused = true;
-  $('form-slot').innerHTML = `<div class="form"><h3>Add logical network</h3>
+  openDialog(`<div class="form"><h3>Add logical network</h3>
     <label class="ff"><span>Network id</span><input id="ln-id" type="text" placeholder="e.g. lan"></label>
     <label class="ff"><span>Description (optional)</span><input id="ln-desc" type="text"></label>
     <p class="pill">A fleet-wide name for one L2 network. Then set the bridge each node uses for it (Nodes,
       bridges) and point templates at it (OS templates, network).</p>
     <div class="erow"><button class="act" onclick="submitNetwork()">add</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitNetwork(){
   const d = $('ln-desc').value.trim();
@@ -881,7 +999,7 @@ function openBridgesForm(i){
   const rows = ms.map((m, k) => `<tr><td>${esc(m.network_id)}</td><td>${esc(m.bridge)}</td><td>${pairState(m)}</td>
     <td>` + (m.quarantined ? `<button class="act ghost" id="nb-clear-${k}">clear quarantine</button> ` : '')
     + `<button class="act danger" id="nb-del-${k}">remove</button></td></tr>`).join('');
-  const table = ms.length ? `<table><thead><tr><th>Network</th><th>Bridge</th><th>State</th><th></th></tr></thead>
+  const table = ms.length ? `<table><thead><tr><th>Network</th><th>Bridge</th><th>State</th>${TH_ACTS}</tr></thead>
     <tbody>${rows}</tbody></table>` : '<div class="empty">no bridges declared on this node</div>';
   const add = nets.length ? `<label class="ff"><span>Logical network</span><select id="nb-net">`
       + nets.map(ln => `<option value="${esc(ln.network_id)}">${esc(ln.network_id)}</option>`).join('')
@@ -893,9 +1011,9 @@ function openBridgesForm(i){
       network behind it: check that out of band first.</p>
     <div class="erow"><button class="act" id="nb-save">save bridge</button>`
     : '<p class="pill">No logical networks yet: add one in the Logical networks panel first.</p><div class="erow">';
-  $('form-slot').innerHTML = `<div class="form"><h3>Bridges · ${esc(n.node_id)}</h3>${table}${add}
+  openDialog(`<div class="form"><h3>Bridges · ${esc(n.node_id)}</h3>${table}${add}
     <button class="act ghost" onclick="closeForm()">close</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
   ms.forEach((m, k) => {
     if(m.quarantined) $('nb-clear-' + k).onclick = () => netPairAction(n.node_id, m.network_id, 'clear', k);
     $('nb-del-' + k).onclick = () => netPairAction(n.node_id, m.network_id, 'delete', k, false);
@@ -942,13 +1060,13 @@ function openTemplateNetForm(i){
   const opts = '<option value="">none (a cross-node clone is refused)</option>' + nets.map(ln =>
     `<option value="${esc(ln.network_id)}"${ln.network_id === t.logical_network_id ? ' selected' : ''}>`
     + `${esc(ln.network_id)}</option>`).join('');
-  $('form-slot').innerHTML = `<div class="form"><h3>Network · ${esc(t.template_id)}</h3>
+  openDialog(`<div class="form"><h3>Network · ${esc(t.template_id)}</h3>
     <label class="ff"><span>net0 logical network</span><select id="tn-net">${opts}</select></label>
     <p class="pill">The network this template net0 is on. A clone onto another node is rewired to that node
       bridge for this network, so a node without one cannot take it.</p>
     <div class="erow"><button class="act" onclick="submitTemplateNet(${i})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitTemplateNet(i){
   const t = DATA.templates[i], net = $('tn-net').value;
@@ -976,13 +1094,13 @@ let DISMISS = null;
 async function loadDismissals(go){
   const sec = $('discovery-sec');
   if(!canEdit){   // shown only when actions are unlocked; a lock drops the roster (operator notes) from the page
-    sec.style.display = 'none'; DISMISS = null; $('discovery').innerHTML = ''; return; }
+    sec.style.display = 'none'; DISMISS = null; paint('discovery', ''); return; }
   sec.style.display = '';
   if(go === false) return;   // not due this poll
   const t = tok(), r = await opFetch('/api/discovery/dismissals');
   if(!canEdit || tok() !== t) return;   // locked (or the token changed) while the read was out: drop the answer
   if(r.ok){ DISMISS = r.data; renderDismissals(); }
-  else $('discovery').innerHTML = loadErr('the discovery dismissals', r);
+  else paint('discovery', loadErr('the discovery dismissals', r));
 }
 function renderDismissals(){
   const ds = (DISMISS && DISMISS.dismissals) || [];
@@ -990,13 +1108,13 @@ function renderDismissals(){
     + '<span class="pill"> Drift is reported by discover_reachability (operator MCP), which reads Proxmox live; '
     + 'this page holds no Proxmox credential. A dismissed finding stops showing in later reports and changes no '
     + 'placement decision.</span></div>';
-  if(!ds.length){ $('discovery').innerHTML = add + '<div class="empty">no dismissed findings</div>'; return; }
+  if(!ds.length){ paint('discovery', add + '<div class="empty">no dismissed findings</div>'); return; }
   const rows = ds.map((x, i) => `<tr><td>${esc(x.kind)}</td><td>${esc(x.node_id)}</td><td>${esc(x.subject)}</td>
     <td class="pill">${x.note ? esc(x.note) : '—'}</td>
     <td class="pill">${tdate(x.dismissed_at)}${x.dismissed_by ? ' · ' + esc(x.dismissed_by) : ''}</td>
     <td><button class="act ghost" onclick="clearDismissal(${i})">clear</button></td></tr>`).join('');
-  $('discovery').innerHTML = add + `<table><thead><tr><th>Kind</th><th>Node</th><th>Subject</th><th>Note</th>
-    <th>Dismissed</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  paint('discovery', add + `<table><thead><tr><th>Kind</th><th>Node</th><th>Subject</th><th>Note</th>
+    <th>Dismissed</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 function openDismissForm(){
   if(paused) return;
@@ -1004,7 +1122,7 @@ function openDismissForm(){
   if(!ks.length){ notify('The finding kinds have not loaded yet; try again in a moment.'); return; }
   if(!(DATA.nodes || []).length){ notify('There are no nodes, so there is no finding to dismiss.'); return; }
   paused = true;
-  $('form-slot').innerHTML = `<div class="form"><h3>Dismiss a discovery finding</h3>
+  openDialog(`<div class="form"><h3>Dismiss a discovery finding</h3>
     <label class="ff"><span>Kind</span><select id="dd-kind">` + ks.map(k => `<option value="${esc(k)}">`
       + `${esc(k)} (subject: ${esc(kinds[k])})</option>`).join('') + `</select></label>
     <label class="ff"><span>Node</span><select id="dd-node">` + (DATA.nodes || []).map(n =>
@@ -1015,7 +1133,7 @@ function openDismissForm(){
       the kind.</p>
     <div class="erow"><button class="act" onclick="submitDismiss()">dismiss</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitDismiss(){
   const body = {kind:$('dd-kind').value, node_id:$('dd-node').value, subject:$('dd-subject').value.trim()};
@@ -1046,12 +1164,12 @@ async function loadTokens(go){
   if(go === false) return;
   const r = await opFetch('/api/tokens');
   if(r.ok) renderTokens(r.data.tokens || []);
-  else $('tokens').innerHTML = loadErr('agent tokens', r);   // never 'no tokens issued' on a failed read
+  else paint('tokens', loadErr('agent tokens', r));   // never 'no tokens issued' on a failed read
 }
 const tdate = s => s ? esc(String(s).slice(0,16).replace('T',' ')) : '';
 function renderTokens(toks){
   const add = `<div class="toolbar"><button class="act" onclick="openTokenForm()">+ create token</button></div>`;
-  if(!toks.length){ $('tokens').innerHTML = add + '<div class="empty">no tokens issued</div>'; return; }
+  if(!toks.length){ paint('tokens', add + '<div class="empty">no tokens issued</div>'); return; }
   const rows = toks.map(t => `<tr>
     <td>${t.token_id}</td><td>${esc(t.project_id)}</td><td>${esc(t.scope)}</td><td>${esc(t.label)}</td>
     <td class="pill">${t.last_used_at?tdate(t.last_used_at):'never'}</td>
@@ -1060,8 +1178,8 @@ function renderTokens(toks){
     <td>${t.active?'<button class="act ghost" onclick="setTokenExpiry('+t.token_id+')">set expiry</button> '
       +'<button class="act ghost" onclick="revokeToken('+t.token_id+')">revoke</button>':''}</td>
   </tr>`).join('');
-  $('tokens').innerHTML = add + `<table><thead><tr><th>#</th><th>Project</th><th>Scope</th><th>Label</th>
-    <th>Last used</th><th>Expires</th><th>State</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  paint('tokens', add + `<table><thead><tr><th>#</th><th>Project</th><th>Scope</th><th>Label</th>
+    <th>Last used</th><th>Expires</th><th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 function openTokenForm(){
   if(paused) return; paused = true;   // one form at a time (suppresses the poll re-render)
@@ -1070,7 +1188,7 @@ function openTokenForm(){
   const projOpts = '<option value="">(none — operator token)</option>' + ((DATA && DATA.projects) || [])
     .map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');
   const scopeOpts = ['read','consume','provision','operator'].map(s => `<option value="${s}">${s}</option>`).join('');
-  $('form-slot').innerHTML = `<div class="form"><h3>Create agent token</h3>
+  openDialog(`<div class="form"><h3>Create agent token</h3>
     <label class="ff"><span>Project (blank = operator)</span><select id="tf-project">${projOpts}</select></label>
     <label class="ff"><span>Scope (tier)</span><select id="tf-scope">${scopeOpts}</select></label>
     <label class="ff"><span>Label</span><input id="tf-label" type="text" placeholder="e.g. ci-runner"></label>
@@ -1079,7 +1197,7 @@ function openTokenForm(){
        migration + fleet reads. A powerful bearer secret — treat it like the dashboard operator token.</p>
     <div class="erow"><button class="act" onclick="submitToken()">create</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitToken(){
   const body = {project_id:$('tf-project').value, scope:$('tf-scope').value, label:$('tf-label').value};
@@ -1090,13 +1208,13 @@ async function submitToken(){
 }
 function showSecret(d){
   // one-time reveal — the secret is never stored in the clear and cannot be retrieved again
-  $('form-slot').innerHTML = `<div class="form"><h3>Token created — copy it now</h3>
+  openDialog(`<div class="form"><h3>Token created — copy it now</h3>
     <p class="pill">project ${esc(d.project_id)} · scope ${esc(d.scope)} · id ${d.token_id}</p>
-    <p>The agent sends this as <code>Authorization: Bearer &lt;secret&gt;</code>
+    <p id="dlg-desc">The agent sends this as <code>Authorization: Bearer &lt;secret&gt;</code>
        (or sets <code>BR0KR_API_TOKEN</code> on stdio). Shown ONCE — it cannot be recovered.</p>
     <input id="tf-secret" type="text" readonly value="${esc(d.secret)}" style="width:100%">
     <div class="erow"><button class="act" onclick="copySecret()">copy</button>
-    <button class="act ghost" onclick="closeForm();loadTokens()">done</button></div></div>`;
+    <button class="act ghost" onclick="closeForm();loadTokens()">done</button></div></div>`);
 }
 function copySecret(){
   const el = $('tf-secret'); el.select();
@@ -1113,13 +1231,13 @@ function revokeToken(id){
 // Re-date (or clear) an existing token's expiry — lifecycle beyond mint (a typo must NOT silently clear it).
 function setTokenExpiry(id){
   if(paused) return; paused = true;        // open a modal instead of a native prompt (one form at a time)
-  $('form-slot').innerHTML = `<div class="form"><h3>Token expiry · #${id}</h3>
+  openDialog(`<div class="form"><h3>Token expiry · #${id}</h3>
     <label class="ff"><span>Days from now</span><input id="te-days" type="number" step="1" min="1"
       placeholder="blank = never expires"></label>
     <p class="pill">Blank clears the expiry (never expires); otherwise re-dates it that many days from now.</p>
     <div class="erow"><button class="act" onclick="submitTokenExpiry(${id})">save</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitTokenExpiry(id){
   const body = {token_id:id}, t = $('te-days').value.trim();
@@ -1143,7 +1261,7 @@ async function loadOperators(go){
   if(go === false) return;   // not due this poll
   const r = await opFetch('/api/operators');
   if(r.ok) renderOperators(r.data.operators || []);
-  else $('operators').innerHTML = loadErr('dashboard operators', r);
+  else paint('operators', loadErr('dashboard operators', r));
 }
 function renderOperators(ops){
   const hint = `A NAMED bearer token per human; the audit records this name (vs the shared 'dashboard-operator').`
@@ -1151,7 +1269,7 @@ function renderOperators(ops){
   const add = `<div class="toolbar"><button class="act" onclick="openOperatorForm()">+ create operator</button>`
     + `<span class="pill">${hint}</span></div>`;
   if(!ops.length){
-    $('operators').innerHTML = add + `<div class="empty">no named operators — the shared token is used</div>`; return; }
+    paint('operators', add + `<div class="empty">no named operators — the shared token is used</div>`); return; }
   const rows = ops.map(o => `<tr>
     <td>${o.operator_id}</td><td>${esc(o.name)}</td>
     <td class="pill">${o.last_used_at?tdate(o.last_used_at):'never'}</td>
@@ -1159,19 +1277,19 @@ function renderOperators(ops){
     <td>${o.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
     <td>${o.active?'<button class="act ghost" onclick="revokeOperator('+o.operator_id+')">revoke</button>':''}</td>
   </tr>`).join('');
-  $('operators').innerHTML = add + `<table><thead><tr><th>#</th><th>Name</th><th>Last used</th><th>Expires</th>
-    <th>State</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  paint('operators', add + `<table><thead><tr><th>#</th><th>Name</th><th>Last used</th><th>Expires</th>
+    <th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 function openOperatorForm(){
   if(paused) return; paused = true;   // one form at a time (suppresses the poll re-render)
-  $('form-slot').innerHTML = `<div class="form"><h3>Create dashboard operator</h3>
+  openDialog(`<div class="form"><h3>Create dashboard operator</h3>
     <label class="ff"><span>Name (the audit actor)</span><input id="of-name" type="text" placeholder="e.g. ops"></label>
     <label class="ff"><span>Expires in days (blank = never)</span><input id="of-exp" type="number" step="1"></label>
     <p class="pill">A NAMED dashboard credential — signs into THIS dashboard only (never the MCP gateway). A
        powerful bearer secret: it can do everything the shared operator token can.</p>
     <div class="erow"><button class="act" onclick="submitOperator()">create</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitOperator(){
   const body = {name:$('of-name').value};
@@ -1182,13 +1300,14 @@ async function submitOperator(){
 }
 function showOperatorSecret(d){
   // one-time reveal — the secret is never stored in the clear and cannot be retrieved again
-  $('form-slot').innerHTML = `<div class="form"><h3>Operator created — copy the token now</h3>
+  openDialog(`<div class="form"><h3>Operator created — copy the token now</h3>
     <p class="pill">name ${esc(d.name)} · id ${d.operator_id}</p>
-    <p>Sign in by pasting this as the dashboard token (the <b>Authorization: Bearer</b> field above). Shown
+    <p id="dlg-desc">Sign in by pasting this as the dashboard token (the <b>Authorization: Bearer</b> field
+       above). Shown
        ONCE — it cannot be recovered.</p>
     <input id="of-secret" type="text" readonly value="${esc(d.secret)}" style="width:100%">
     <div class="erow"><button class="act" onclick="copyOperatorSecret()">copy</button>
-    <button class="act ghost" onclick="closeForm();loadOperators()">done</button></div></div>`;
+    <button class="act ghost" onclick="closeForm();loadOperators()">done</button></div></div>`);
 }
 function copyOperatorSecret(){
   const el = $('of-secret'); el.select();
@@ -1297,7 +1416,7 @@ function auditFilterQS(){   // build the shared query string from the filter bar
 }
 function syncAudit(){   // called each poll: manage visibility; do the INITIAL load once (don't clobber state)
   const sec = $('audit-sec');
-  if(!canEdit){ sec.style.display='none'; $('audit').innerHTML=''; $('audit-more').innerHTML='';
+  if(!canEdit){ sec.style.display='none'; paint('audit', ''); paint('audit-more', '');
     auditLoaded=false; auditRows=[]; auditCursor=null; return; }   // reset on lock
   sec.style.display='';
   if(!auditWired){ auditWired=true; wireAuditFilters(); }   // one-time: auto-apply per filter step (no Apply button)
@@ -1320,8 +1439,8 @@ async function fetchAuditPage(){
   const r = await opFetch('/api/audit?'+p.toString());
   if(gen !== auditGen) return;     // superseded by a newer request — discard this stale page
   if(!r.ok){                       // never 'no audit entries' on a failed read; the trail loads once, so offer a retry
-    $('audit').innerHTML = loadErr('the audit log', r);
-    $('audit-more').innerHTML = '<button class="act ghost" onclick="loadAudit()">retry</button>';
+    paint('audit', loadErr('the audit log', r));
+    paint('audit-more', '<button class="act ghost" onclick="loadAudit()">retry</button>');
     return;
   }
   auditRows = auditRows.concat(r.data.audit || []);
@@ -1370,8 +1489,8 @@ async function exportAudit(fmt){   // fetch (with the operator token) → Blob �
   }catch(e){ notify('Export failed: ' + why({ok:false, status:0, data:null}), 'err'); }
 }
 function renderAudit(rows, hasMore){
-  $('audit-more').innerHTML = hasMore ? '<button class="act ghost" onclick="loadMoreAudit()">load more</button>' : '';
-  if(!rows.length){ $('audit').innerHTML = '<div class="empty">no audit entries</div>'; return; }
+  paint('audit-more', hasMore ? '<button class="act ghost" onclick="loadMoreAudit()">load more</button>' : '');
+  if(!rows.length){ paint('audit', '<div class="empty">no audit entries</div>'); return; }
   // a MCP row carries a real per-token id + project; a dashboard row is the shared operator token (no id).
   const who = a => a.actor==='agent'
     ? 'agent'+(a.actor_token_id!=null?' #'+a.actor_token_id:'')+(a.project_id?' · '+esc(a.project_id):'')
@@ -1388,9 +1507,9 @@ function renderAudit(rows, hasMore){
     <td class="pill">${a.scope?esc(a.scope):'—'}</td><td class="pill">${a.target?esc(a.target):'—'}</td>
     <td class="pill" title="${p.full}">${p.cut}</td>
     <td class="pill">${a.source_ip?esc(a.source_ip):'—'}</td></tr>`; }).join('');
-  $('audit').innerHTML = `<table><thead><tr><th>When</th><th>Surface</th><th>Outcome</th><th>Action</th>
+  paint('audit', `<table><thead><tr><th>When</th><th>Surface</th><th>Outcome</th><th>Action</th>
     <th>Actor</th><th>Scope</th><th>Target</th><th>Params (redacted)</th><th>Source IP</th></tr></thead><tbody>`
-    + body + `</tbody></table>`;
+    + body + `</tbody></table>`);
 }
 // ── OS templates (catalog) + per-project governance (phase A3): public flag + the project↔template grants ──
 // The templates table renders from DATA.templates (an unauthenticated read, so it carries `public` but NOT
@@ -1417,14 +1536,14 @@ function renderTemplates(){
   const tnet = t => t.logical_network_id ? esc(t.logical_network_id) : '—';
   const dirty = t => t.source_dirty ? ' <span class="pill" style="color:var(--warn)" '+
     'title="hand-modified in Proxmox: a rebuild from its source is refused">✎ hand-modified</span>' : '';
-  $('templates').innerHTML = addBtn('template','template') + grantsErrLine() + (tpl.length ? `<table><thead><tr>
+  paint('templates', addBtn('template','template') + grantsErrLine() + (tpl.length ? `<table><thead><tr>
     <th>Template</th><th>Cluster</th><th class="num">vmid</th><th>Name</th><th>Network</th><th>Visibility</th>
-    ${canEdit?'<th></th>':''}</tr></thead><tbody>` + tpl.map((t,i) => `<tr>
+    ${canEdit?TH_ACTS:''}</tr></thead><tbody>` + tpl.map((t,i) => `<tr>
       <td>${esc(t.template_id)}${dirty(t)}</td><td class="pill">${esc(t.cluster_id)}</td>
       <td class="num">${t.vmid}</td><td class="pill">${t.name?esc(t.name):'—'}</td>
       <td class="pill">${tnet(t)}</td>
       <td>${vis(t)}</td>${canEdit?'<td>'+tActs(t,i)+'</td>':''}</tr>`).join('')
-    + '</tbody></table>' : '<div class="empty">no templates registered</div>');
+    + '</tbody></table>' : '<div class="empty">no templates registered</div>'));
 }
 // ── template instances (0032 physical copies): where each logical template actually lives (cluster/node/storage/
 //    vmid), its state/origin, and whether it is BOUND (has both a node AND a storage — an unbound seed is placeable
@@ -1439,7 +1558,7 @@ function renderInstances(){
     `<button class="act ghost" onclick="openBindForm(${i})">bind</button>`+
     `<button class="act ghost" onclick="retireInstance(${i})">retire</button>`+
     `<button class="act danger ghost" onclick="deleteInstance(${i})">delete</button></div>` : '';
-  if(!ins.length){ $('instances').innerHTML = '<div class="empty">no template instances</div>'; return; }
+  if(!ins.length){ paint('instances', '<div class="empty">no template instances</div>'); return; }
   const rows = ins.map((n,i) => `<tr>
     <td class="num">${n.instance_id}</td><td>${esc(n.template_id)}</td><td class="pill">${esc(n.cluster_id)}</td>
     <td class="pill">${n.node_id?esc(n.node_id):'<span style="color:var(--warn)">— unbound</span>'}</td>
@@ -1447,11 +1566,12 @@ function renderInstances(){
     <td class="num">${n.size_gb==null?'—':n.size_gb}</td>
     <td><span style="color:${istate(n.instance_state)}">${esc(n.instance_state)}</span></td>
     <td class="pill">${esc(n.origin)}</td>
-    <td>${n.bound?'<span class="ok">✓</span>':'<span style="color:var(--warn)">?</span>'}</td>
+    <td>${n.bound ? glyph('✓', 'bound to its node', 'class="ok"')
+                  : glyph('?', 'not bound to a node yet', 'style="color:var(--warn)"')}</td>
     ${canEdit?'<td>'+iActs(i)+'</td>':''}</tr>`).join('');
-  $('instances').innerHTML = `<table><thead><tr><th class="num">#</th><th>Template</th><th>Cluster</th>
+  paint('instances', `<table><thead><tr><th class="num">#</th><th>Template</th><th>Cluster</th>
     <th>Node</th><th>Storage</th><th class="num">vmid</th><th class="num">Size (GB)</th><th>State</th>
-    <th>Origin</th><th>Bound</th>${canEdit?'<th></th>':''}</tr></thead><tbody>`+ rows +`</tbody></table>`;
+    <th>Origin</th><th>Bound</th>${canEdit?TH_ACTS:''}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
 function openBindForm(i){
   if(paused) return; paused = true;
@@ -1466,7 +1586,7 @@ function openBindForm(i){
   const stOpts = ((DATA && DATA.storage) || []).filter(s => s.cluster_id===inst.cluster_id)
     .map(s => opt(s.storage_id, s.storage_id===inst.storage_id)).join('')
     || '<option value="">(no cluster-bound storage)</option>';
-  $('form-slot').innerHTML = `<div class="form"><h3>Bind instance #${inst.instance_id} · ${esc(inst.template_id)}</h3>
+  openDialog(`<div class="form"><h3>Bind instance #${inst.instance_id} · ${esc(inst.template_id)}</h3>
     <p class="pill">Cluster ${esc(inst.cluster_id)} · vmid ${inst.vmid==null?'?':inst.vmid}. Binds this copy to a
       concrete node + storage so the placement gate can use it on a multi-node cluster. The node must physically
       REACH the storage (declare that on the Capacity tab first) or the bind is refused.</p>
@@ -1476,7 +1596,7 @@ function openBindForm(i){
       value="${inst.size_gb!=null?esc(inst.size_gb):''}" placeholder="the template copy's disk footprint"></label>
     <div class="erow"><button class="act" onclick="submitBind(${inst.instance_id})">bind</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitBind(id){
   // resolve by ID, not the open-time index: a lock->unlock (which unpauses without closing the form) can let a
@@ -1549,10 +1669,10 @@ function renderReplications(){
     </tr>`).join('') : `<tr><td colspan="${canEdit?10:9}" class="empty">no replication jobs</td></tr>`;
   const toolbar = canEdit ? `<div class="toolbar"><button class="act" onclick="openReplicateForm()">+ replicate</button>
     <button class="act ghost" onclick="openReplicatePrune()">prune history</button></div>` : '';
-  $('replications').innerHTML = toolbar +
+  paint('replications', toolbar +
     `<table><thead><tr><th class="num">#</th><th>Template</th><th>Target cluster</th><th>Target storage</th>
      <th>Mechanism</th><th class="num">Size (GB)</th><th>State</th><th>Project</th><th>Error</th>
-     ${canEdit?'<th></th>':''}</tr></thead><tbody>`+ rows +`</tbody></table>`;
+     ${canEdit?TH_ACTS:''}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
 // storage options scoped to the SELECTED target cluster (a pool must be physically IN that cluster; the server
 // also refuses storage_wrong_cluster / storage_unreachable). Re-populated when the cluster select changes.
@@ -1574,7 +1694,7 @@ function openReplicateForm(){
   const clusterOpts = clusters.map(c => opt(c.cluster_id)).join('') || '<option value="">(no clusters)</option>';
   const projOpts = '<option value="">(operator — no project)</option>'
     + ((DATA && DATA.projects) || []).map(p => opt(p.project_id)).join('');
-  $('form-slot').innerHTML = `<div class="form"><h3>Replicate a template</h3>
+  openDialog(`<div class="form"><h3>Replicate a template</h3>
     <p class="pill">Copies a template's physical guest onto another storage pool so a node that can't reach the
       original can clone from a local copy. Control plane only — the copy runs once the replication engine is
       enabled (a REQUESTED job waits until then). clone_shared copies onto a pool the source node reaches.</p>
@@ -1587,7 +1707,7 @@ function openReplicateForm(){
       <select id="rf-project">${projOpts}</select></label>
     <div class="erow"><button class="act" onclick="submitReplicate()">replicate</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitReplicate(){
   const body = {template_id:$('rf-template').value, target_cluster_id:$('rf-cluster').value,
@@ -1627,7 +1747,7 @@ function openReplicatePrune(){
   const clusterOpts = '<option value="">(all clusters)</option>'
     + ((DATA && DATA.clusters) || []).map(c => `<option value="${esc(c.cluster_id)}">${esc(c.cluster_id)}</option>`)
       .join('');
-  $('form-slot').innerHTML = `<div class="form"><h3>Prune replication history</h3>
+  openDialog(`<div class="form"><h3>Prune replication history</h3>
     <p class="pill">Deletes SETTLED terminal (READY/FAILED) jobs older than N days — the job HISTORY, never a
       guest. Unsettled jobs are kept. 0 = a no-op.</p>
     <label class="ff"><span>Older than (days)</span>
@@ -1635,7 +1755,7 @@ function openReplicatePrune(){
     <label class="ff"><span>Cluster (optional)</span><select id="rp-cluster">${clusterOpts}</select></label>
     <div class="erow"><button class="act" onclick="submitReplicatePrune()">prune</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitReplicatePrune(){
   const num = Number($('rp-days').value);
@@ -1672,14 +1792,14 @@ function renderGrantForm(i){
   const projOpts = ((DATA && DATA.projects) || [])
     .map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('')
     || '<option value="">(no projects — create one first)</option>';
-  $('form-slot').innerHTML = `<div class="form"><h3>Grants · ${esc(tid)} ${t.public?'(public)':'(private)'}</h3>`+
+  openDialog(`<div class="form"><h3>Grants · ${esc(tid)} ${t.public?'(public)':'(private)'}</h3>`+
     grantsErrLine() +
     (t.public?'<p class="pill">Public — grants take effect only once this template is made private.</p>':'')+
     rows +
     `<label class="ff"><span>Grant to project</span><select id="gf-project">${projOpts}</select></label>`+
     `<div class="erow"><button class="act" onclick="submitGrant(${i})">grant</button>`+
     `<button class="act ghost" onclick="closeForm()">close</button>`+
-    `<span id="form-err" class="ferr"></span></div></div>`;
+    `<span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitGrant(i){
   const tid = DATA.templates[i].template_id, pid = $('gf-project').value;
@@ -1738,16 +1858,16 @@ function renderDownloads(){
     <td>${(b.state==='READY'||b.state==='FAILED')?'—'
       :`<button class="act danger ghost" onclick="forceFailBuild(${i})">force-fail</button>`}</td></tr>`).join('')
     : '<tr><td colspan="7" class="empty">no build jobs yet</td></tr>';
-  $('downloads').innerHTML =
+  paint('downloads',
     limitBanner('build_limit', 'Template build')+
     `<div class="toolbar"><button class="act" onclick="openSourceForm()">+ add source</button>
      <button class="act" onclick="openDownloadForm()">+ request download</button>
      <button class="act" onclick="openTenantDownload()">+ tenant download</button></div>`+
-    `<table><thead><tr><th>Trusted source prefix</th><th>Description</th><th></th></tr></thead><tbody>`+
+    `<table><thead><tr><th>Trusted source prefix</th><th>Description</th>${TH_ACTS}</tr></thead><tbody>`+
     srcRows + `</tbody></table>`+
     `<table style="margin-top:14px"><thead><tr><th>Target</th><th>State</th><th>Cluster</th>
-     <th class="num">vmid</th><th>Source</th><th>Error</th><th></th></tr></thead><tbody>`+
-    buildRows + `</tbody></table>`;
+     <th class="num">vmid</th><th>Source</th><th>Error</th>${TH_ACTS}</tr></thead><tbody>`+
+    buildRows + `</tbody></table>`);
 }
 function forceFailBuild(i){
   const b = BUILDS[i]; if(!b) return;
@@ -1772,14 +1892,14 @@ function delSource(i){
 }
 function openSourceForm(){
   if(paused) return; paused = true;
-  $('form-slot').innerHTML = `<div class="form"><h3>Add trusted download source</h3>
+  openDialog(`<div class="form"><h3>Add trusted download source</h3>
     <label class="ff"><span>URL prefix (https)</span><input id="sf-prefix" type="text"
       placeholder="https://cloud.debian.org/images/"></label>
     <label class="ff"><span>Description (optional)</span><input id="sf-desc" type="text"></label>
     <p class="pill">A download url must START WITH an allowlisted prefix (scheme + host + path). Only https.</p>
     <div class="erow"><button class="act" onclick="submitSource()">add</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitSource(){
   const body = {url_prefix:$('sf-prefix').value};
@@ -1793,7 +1913,7 @@ function openDownloadForm(){
   const clusterOpts = ((DATA && DATA.clusters) || [])
     .map(c => `<option value="${esc(c.cluster_id)}">${esc(c.cluster_id)}</option>`).join('')
     || '<option value="">(no clusters)</option>';
-  $('form-slot').innerHTML = `<div class="form"><h3>Request a template download</h3>
+  openDialog(`<div class="form"><h3>Request a template download</h3>
     <label class="ff"><span>Cluster</span><select id="df-cluster">${clusterOpts}</select></label>
     <label class="ff"><span>New template id</span><input id="df-target" type="text" placeholder="debian12"></label>
     <label class="ff"><span>Image URL (https, allowlisted)</span><input id="df-url" type="text"
@@ -1807,7 +1927,7 @@ function openDownloadForm(){
        catalog template. The url must match an allowlisted source.</p>
     <div class="erow"><button class="act" onclick="submitDownload()">request</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitDownload(){
   const body = {cluster_id:$('df-cluster').value, target_template_id:$('df-target').value,
@@ -1837,7 +1957,7 @@ function openTenantDownload(){
   const clusterOpts = ((DATA && DATA.clusters) || [])
     .map(c => `<option value="${esc(c.cluster_id)}">${esc(c.cluster_id)}</option>`).join('')
     || '<option value="">(no clusters)</option>';
-  $('form-slot').innerHTML = `<div class="form"><h3>Download a template for a project</h3>
+  openDialog(`<div class="form"><h3>Download a template for a project</h3>
     <label class="ff"><span>Acting as project</span><select id="tdf-project">${projOpts}</select></label>
     <p class="banner">Downloads a PRIVATE image owned by the selected project — it debits that project's
        template-disk quota.</p>
@@ -1856,7 +1976,7 @@ function openTenantDownload(){
        The size is a declared upper bound — the build FAILS if the imported image is larger.</p>
     <div class="erow"><button class="act" onclick="submitTenantDownload()">request</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitTenantDownload(){
   const t = $('tdf-size').value.trim(), num = Number(t);
@@ -1897,7 +2017,7 @@ function renderMigrations(){
   const banner = limitBanner('migrate_limit', 'Migration');
   const btn = canEdit ?
     `<div class="toolbar"><button class="act" onclick="openMigrateForm()">+ migrate lease</button></div>` : '';
-  if(!migs.length){ $('migrations').innerHTML = banner + btn + '<div class="empty">no migrations</div>'; return; }
+  if(!migs.length){ paint('migrations', banner + btn + '<div class="empty">no migrations</div>'); return; }
   const mterminal = s => (s==='DONE' || s==='ABORTED');
   const rows = migs.map((m,i) => `<tr>
     <td>${m.migration_id}</td><td>${m.lease_id}</td>
@@ -1907,8 +2027,8 @@ function renderMigrations(){
     <td class="pill">${tdate(m.updated_at)}</td>
     <td>${(canEdit && !mterminal(m.state))
       ? `<button class="act danger ghost" onclick="cancelMigration(${i})">cancel</button>` : '—'}</td></tr>`).join('');
-  $('migrations').innerHTML = banner + btn + `<table><thead><tr><th class="num">#</th><th>Lease</th><th>State</th>
-    <th>Source → Target</th><th>Reason</th><th>Updated</th><th></th></tr></thead><tbody>`+ rows +`</tbody></table>`;
+  paint('migrations', banner + btn + `<table><thead><tr><th class="num">#</th><th>Lease</th><th>State</th>
+    <th>Source → Target</th><th>Reason</th><th>Updated</th>${TH_ACTS}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
 function cancelMigration(i){
   const migs = (DATA && DATA.migrations) || [];
@@ -1932,7 +2052,7 @@ function openMigrateForm(preLeaseId){
   const nodeOpts = ((DATA && DATA.nodes) || []).filter(n => n.cluster_id)
     .map(n => `<option value="${esc(n.node_id)}">${esc(n.node_id)} (${esc(n.cluster_id)})</option>`).join('')
     || '<option value="">(no provisionable nodes)</option>';
-  $('form-slot').innerHTML = `<div class="form"><h3>Migrate a lease to another cluster</h3>
+  openDialog(`<div class="form"><h3>Migrate a lease to another cluster</h3>
     <label class="ff"><span>Idempotency key</span><input id="mf-idem" type="text"
       placeholder="a stable id for this request"></label>
     <label class="ff"><span>Lease id</span><input id="mf-lease" type="number" step="1" value="${preLease}"></label>
@@ -1942,7 +2062,7 @@ function openMigrateForm(preLeaseId){
        BR0KR_MIGRATE_LIMIT>0 and the source cluster has PDM config; otherwise it stays REQUESTED.</p>
     <div class="erow"><button class="act" onclick="submitMigrate()">request</button>
     <button class="act ghost" onclick="closeForm()">cancel</button>
-    <span id="form-err" class="ferr"></span></div></div>`;
+    <span id="form-err" class="ferr"></span></div></div>`);
 }
 async function submitMigrate(){
   const raw = $('mf-lease').value;
@@ -1990,7 +2110,7 @@ function renderLeases(){
       bar = `<div class="toolbar">${createBtn}${selBtn}</div>`;
     }
   }
-  if(!leases.length){ $('leases').innerHTML = bar + '<div class="empty">no active leases</div>'; return; }
+  if(!leases.length){ paint('leases', bar + '<div class="empty">no active leases</div>'); return; }
   const lrows = leases.map((l,i) => {
     const place = (l.node_id?'node '+esc(l.node_id):'—')
       + (l.cluster_id?' <span class="pill">'+esc(l.cluster_id)+'</span>':'');
@@ -2022,13 +2142,13 @@ function renderLeases(){
       <td class="num">${l.pinned ? pinTag : ttl(l.expires_in_seconds)}</td>
       ${canEdit?'<td>'+opcell+'</td>':''}</tr>`;
   }).join('');
-  const opsTh = canEdit ? (sel ? '<th>sel</th>' : '<th></th>') : '';
+  const opsTh = canEdit ? (sel ? '<th>sel</th>' : TH_ACTS) : '';
   let lh = bar + `<table><thead><tr><th class="num">#</th><th>Lease</th><th>Project</th><th>Placement</th>
     <th>State</th><th class="num">vmid</th><th>IP</th><th class="num">CPU</th><th class="num">Mem (GiB)</th>
     <th>Storage</th><th class="num">Age</th><th class="num">TTL</th>${opsTh}</tr></thead>
     <tbody>` + lrows + '</tbody></table>';
   if(leases.length >= 100) lh += `<div class="empty">showing first 100 — some active leases hidden</div>`;
-  $('leases').innerHTML = lh;
+  paint('leases', lh);
 }
 function enterLeaseSelect(){ if(paused) return; leaseSelectMode = true; paused = true; renderLeases(); }
 function exitLeaseSelect(){ leaseSelectMode = false; paused = false; renderLeases(); poll(); }
@@ -2253,7 +2373,7 @@ function attention(){
   if(qd) add('info', plural(qd, 'request queued', 'requests queued'), 'tenancy', 'queue-sec');
   return {items, failed: fb.length + fr.length, queued: qd};
 }
-let ATT_HTML = null;   // the line as last written: it is re-rendered several times a poll, so write only on change
+// the line is re-rendered several times a poll; paint() writes it only when it changes
 function renderAttention(){
   const el = $('attention'); if(!el) return;
   const a = attention();
@@ -2262,11 +2382,17 @@ function renderAttention(){
     `<button class="att ${it.sev}" onclick="goTo('${it.tab}','${it.sec}')">${esc(it.text)}</button>`
     + (it.ack ? `<button class="att-x" title="dismiss until a newer failure" aria-label="dismiss ${esc(it.text)}" `
       + `onclick="ackFailures('${it.ack}')">&times;</button>` : '')).join('') : '';
-  if(html !== ATT_HTML){ el.innerHTML = html; ATT_HTML = html; }   // a rewrite would drop keyboard focus
+  paint('attention', html);   // a rewrite would drop keyboard focus
   el.hidden = !a.items.length;   // no empty "needs attention" landmark for a screen reader on a healthy fleet
-  const badge = (id, n) => { const b = $(id), t = n ? String(n) : ''; if(b && b.textContent !== t) b.textContent = t; };
-  badge('badge-images', a.failed);
-  badge('badge-tenancy', a.queued);
+  // a tab's count is part of its name for a screen reader ("Images, 2 failed"), not a bare digit after the word
+  const badge = (tab, n, label, what) => {
+    const b = $('badge-' + tab), t = n ? String(n) : '';
+    if(b && b.textContent !== t) b.textContent = t;
+    const name = n ? label + ', ' + n + ' ' + what : label, el = $('tab-' + tab);
+    if(el.getAttribute('aria-label') !== name) el.setAttribute('aria-label', name);
+  };
+  badge('images', a.failed, 'Images', 'failed');
+  badge('tenancy', a.queued, 'Tenancy', 'queued');
 }
 function goTo(tab, sec){
   setTab(tab);
@@ -2282,13 +2408,13 @@ function render(d){
   // the Security & Ops tab is empty until unlocked (its sections self-hide) — show a one-line hint instead.
   if($('sec-hint')) $('sec-hint').style.display = canEdit ? 'none' : '';
   // Clusters
-  $('clusters').innerHTML = addBtn('cluster','cluster') + (d.clusters.length ? d.clusters.map((c,i) => resourceCard(
+  paint('clusters', addBtn('cluster','cluster') + (d.clusters.length ? d.clusters.map((c,i) => resourceCard(
     c.cluster_id, `${c.node_count} node(s) · ${c.lease_count} live lease(s)`, [
       bar(c.cpu_used, c.cpu_total, c.cpu_pct, 'CPU'),
       bar(gib(c.mem_mb_used), gib(c.mem_mb_total), c.mem_pct, 'Mem (GiB)'),
     ], acts('cluster',i) + (canEdit ? `<div class="erow"><button class="act ghost" `
        + `onclick="clearPdm(${i})">clear PDM endpoint</button></div>` : '')
-    )).join('') : '<div class="empty">no clusters defined</div>');
+    )).join('') : '<div class="empty">no clusters defined</div>'));
   // Nodes (table, grouped implicitly by the cluster column). A cordoned node is badged + its row dimmed,
   // and the actions cell carries a cordon/uncordon toggle alongside edit/delete (operator only).
   const cordonBadge = n => n.cordoned ?
@@ -2298,9 +2424,9 @@ function render(d){
     `<button class="act ghost" onclick="openBridgesForm(${i})">bridges</button>`+
     `<button class="act ghost" onclick="editItem('node',${i})">edit</button>`+
     `<button class="act ghost" onclick="delItem('node',${i})">delete</button></div>` : '';
-  $('nodes').innerHTML = addBtn('node','node') + (d.nodes.length ? `<table><thead><tr>
+  paint('nodes', addBtn('node','node') + (d.nodes.length ? `<table><thead><tr>
     <th>Node</th><th>Cluster</th><th>PVE node</th><th>Bridges</th><th class="num">CPU</th>
-    <th class="num">Mem (GiB)</th><th class="num">Leases</th>${canEdit?'<th></th>':''}</tr></thead><tbody>`
+    <th class="num">Mem (GiB)</th><th class="num">Leases</th>${canEdit?TH_ACTS:''}</tr></thead><tbody>`
     + d.nodes.map((n,i) =>
       `<tr${n.cordoned?' style="opacity:.6"':''}>`+
       `<td>${esc(n.node_id)}${cordonBadge(n)}</td>`+
@@ -2310,12 +2436,12 @@ function render(d){
       <td class="num">${cell(n.cpu_used, n.cpu_total, n.cpu_pct)}</td>
       <td class="num">${cell(gib(n.mem_mb_used), gib(n.mem_mb_total), n.mem_pct)}</td>
       <td class="num">${n.lease_count}</td>${canEdit?'<td>'+nodeActs(n,i)+'</td>':''}</tr>`).join('')
-    + '</tbody></table>' : '<div class="empty">no nodes defined</div>');
+    + '</tbody></table>' : '<div class="empty">no nodes defined</div>'));
   renderNetworks();   // the logical networks (0039) each node bridge above maps to
   // Storage — pool disk usage + the 0031 physical binding (cluster · PVE pool), the 0041 content types, and the
   // reachability map: which nodes may clone onto it (pairState). An operator changes the binding and content from
   // the card and opens a reachability chip to clear that pair quarantine or remove it (openStoragePair).
-  $('storage').innerHTML = addBtn('storage','storage pool') + (d.storage.length ? d.storage.map((s,i) => {
+  paint('storage', addBtn('storage','storage pool') + (d.storage.length ? d.storage.map((s,i) => {
     const bind = s.cluster_id ? esc(s.cluster_id)+' · '+esc(s.pve_name)
       : '<span style="color:var(--warn)">unbound</span>';
     const content = s.content_types == null ? '<span style="color:var(--warn)">undeclared</span>'
@@ -2337,13 +2463,13 @@ function render(d){
       `<div class="lbl"><span>Content</span><span>${content}</span></div>`,
       `<div class="lbl"><span>Reachable nodes</span><span>${reach}</span></div>`,
     ], acts('storage',i) + sActs);
-  }).join('') : '<div class="empty">no shared storage pools</div>');
+  }).join('') : '<div class="empty">no shared storage pools</div>'));
   // OS templates (catalog) — read + operator CRUD + per-project governance (public flag + grants, phase A3)
   renderTemplates();
   renderInstances();   // template_instances panel (0032 physical copies) — Images tab, operator bind/retire/delete
   renderReplications();// template_replication jobs (0034 control plane) — Images tab, operator replicate/cancel/prune
   // Projects
-  $('projects').innerHTML = addBtn('project','project') + (d.projects.length ? d.projects.map((p,i) => {
+  paint('projects', addBtn('project','project') + (d.projects.length ? d.projects.map((p,i) => {
     const cap = p.max_queued!=null ? '/'+p.max_queued : '';
     const ss = [p.cpu_limit_max!=null?p.cpu_limit_max+'cpu':null,
                 p.mem_mb_limit_max!=null?gib(p.mem_mb_limit_max)+'G':null,
@@ -2359,7 +2485,7 @@ function render(d){
     return resourceCard(p.project_id, meta, [bar(p.cpu_used, p.cpu_limit, p.cpu_pct, 'CPU'),
       bar(gib(p.mem_mb_used), gib(p.mem_mb_limit), p.mem_pct, 'Mem (GiB)'),
       bar(p.lease_count, p.max_leases, p.lease_pct, 'Leases')], acts('project',i) + tdBtn);
-  }).join('') : '<div class="empty">no projects defined</div>');
+  }).join('') : '<div class="empty">no projects defined</div>'));
   // Active leases (holding capacity). Extracted into renderLeases() so pause-mode multi-select (cancel-many)
   // can re-render the table on demand without waiting for the poll.
   renderLeases();
@@ -2374,7 +2500,7 @@ function render(d){
     const left = w => w.wait_remaining_seconds!=null?Math.round(w.wait_remaining_seconds)+'s':'—';
     qh += `<table><thead><tr><th class="num">#</th><th>Lease</th><th>Target</th><th>Project</th>
       <th class="num">CPU</th><th class="num">Mem (GiB)</th><th>Storage</th><th class="num">Waited</th>
-      <th class="num">Left</th>${canEdit?'<th></th>':''}</tr></thead><tbody>` + q.waiting.map(w => `<tr>
+      <th class="num">Left</th>${canEdit?TH_ACTS:''}</tr></thead><tbody>` + q.waiting.map(w => `<tr>
         <td class="num">${w.position}</td><td>${w.lease_id}</td>
         <td class="pill">${target(w)}</td><td class="pill">${w.project_id?esc(w.project_id):'—'}</td>
         <td class="num">${w.req_cpu}</td><td class="num">${gib(w.req_mem_mb)}</td>
@@ -2384,7 +2510,7 @@ function render(d){
       </tr>`).join('') + '</tbody></table>';
     if(q.truncated) qh += `<div class="empty">showing first ${q.shown} of ${q.depth}</div>`;
   }
-  $('queue').innerHTML = qh;
+  paint('queue', qh);
   renderMigrations();   // cross-cluster migration panel (+ the operator migrate form when unlocked)
   operatorReads(false);   // the operator panels: due every third poll, for the open tab (see operatorReads)
   TICK++;
@@ -2477,7 +2603,7 @@ function openCreateVM(){
   h += `<div class="erow"><button class="act" onclick="submitCreateVM('${idem}')">create VM</button>`
     + `<button class="act ghost" onclick="closeForm()">cancel</button>`
     + `<span id="form-err" class="ferr"></span></div></div>`;
-  $('form-slot').innerHTML = h;
+  openDialog(h);
 }
 async function submitCreateVM(idem){
   const cpu = parseFloat($('cv-cpu').value), mem = parseInt($('cv-mem').value, 10);
@@ -2502,9 +2628,9 @@ async function submitCreateVM(idem){
 }
 function showLeaseStatus(id){
   paused = true;
-  $('form-slot').innerHTML = `<div class="form" style="max-width:560px"><h3>Lease ${id}</h3>`
+  openDialog(`<div class="form" style="max-width:560px"><h3>Lease ${id}</h3>`
     + `<div id="ps-body"><div class="empty">loading…</div></div><div id="ps-note" class="ferr"></div>`
-    + `<div class="erow" id="ps-actions"></div></div>`;
+    + `<div class="erow" id="ps-actions"></div></div>`);
   pollLeaseStatus(id);
 }
 function leaseDetail(id){ if(paused) return; showLeaseStatus(id); }
@@ -2534,7 +2660,7 @@ function pollLeaseStatus(id){
 function renderLeaseStatus(id, data){
   const body = $('ps-body'); if(!body) return;
   if(!data || data.exists===false){
-    body.innerHTML = '<div class="empty">lease not found</div>'; setPsActions(id, null); return;
+    paint('ps-body', '<div class="empty">lease not found</div>'); setPsActions(id, null); return;
   }
   const st = data.state;
   let h = `<div class="lbl"><span>state</span><span><b>${esc(st||'?')}</b></span></div>`;
@@ -2555,7 +2681,7 @@ function renderLeaseStatus(id, data){
       + `<input type="text" readonly value="${esc(ssh)}" onclick="this.select()"></label>`;
     h += `<p class="pill">vmid ${data.vmid!=null?data.vmid:'—'} · node ${data.node_id?esc(data.node_id):'—'}</p>`;
   } else h += `<p class="pill err">the broker reclaimed this lease (${esc(st||'gone')})</p>`;
-  body.innerHTML = h;
+  paint('ps-body', h);
   setPsActions(id, data);
 }
 function setPsActions(id, data){
@@ -2564,7 +2690,7 @@ function setPsActions(id, data){
   let btns = '';
   if(canEdit && live) btns += `<button class="act ghost" onclick="renewLease(${id})">renew</button> `;
   btns += `<button class="act ghost" onclick="closeForm()">close</button>`;
-  a.innerHTML = btns;
+  paint('ps-actions', btns);
 }
 async function renewLease(id){
   const r = await postJSON('/api/lease/renew', {lease_id:id});
@@ -2582,10 +2708,8 @@ function showStale(reason){
   const st = $('status');
   st.textContent = (LAST_OK ? 'stale since ' + LAST_OK.toLocaleTimeString() : 'could not load') + ' — ' + reason;
   st.className = 'err';
-  if(!LAST_OK) Object.keys(PANELS).forEach(id => {
-    const el = $(id); if(el) el.innerHTML = '<div class="err load-err">could not load ' + esc(PANELS[id])
-      + ' — ' + esc(reason) + '</div>';
-  });
+  if(!LAST_OK) Object.keys(PANELS).forEach(id => paint(id, '<div class="err load-err">could not load '
+    + esc(PANELS[id]) + ' — ' + esc(reason) + '</div>'));
   if(!STALE) console.warn('br0kr dashboard: overview refresh failed — ' + reason);   // once per outage
   STALE = true;
 }

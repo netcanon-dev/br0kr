@@ -149,6 +149,16 @@ Action results (a refusal, a no-op, a guest left to clean up) appear in the stat
 errors stay until you close them. Each reason is the server's code followed by what it means, for example
 *unauthorized — this needs a valid token*.
 
+**The page works from the keyboard and with a screen reader.**
+- Type the token and press Enter to unlock.
+- The arrow keys, Home and End move between the tabs. Only the open tab is a Tab stop, so Tab moves on into
+  the page.
+- A form or confirmation opens as a named dialog with focus inside it. Tab stays inside the dialog, and Escape
+  closes it and returns focus to the button that opened it. A red confirmation starts on *cancel*.
+- The 5-second refresh does not move your focus. A panel whose numbers changed is redrawn with focus on the
+  same control. If that control is gone (its row went away), focus moves to the panel's heading, never to
+  another row's button.
+
 Smoke-test the whole stack end-to-end (no Proxmox needed) with
 [`scripts/run_compose_smoke.sh`](../../scripts/run_compose_smoke.sh): it brings the stack up under a
 throwaway project + `.env`, asserts migrations applied, the standby is streaming, the daemon is

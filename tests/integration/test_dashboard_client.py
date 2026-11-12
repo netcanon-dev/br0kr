@@ -440,13 +440,103 @@ def test_a_token_that_is_not_an_operator_token_unlocks_nothing_with_open_reads(s
 
 def test_a_poll_never_rewrites_the_token_field_or_the_lock_button(served_script: Path) -> None:
     """On a server with open reads and operator actions on, two polls with a token half typed into the field
-    leave it there: the header is not rewritten when what it shows is unchanged. Once unlocked, a poll does not
-    rewrite the lock button either; lock still draws a fresh, empty field. Guards the 5-second poll wiping the
+    leave it there: the header is not rewritten when what it shows is unchanged. Enter in the field unlocks.
+    Once unlocked, a poll does not rewrite the lock button either; lock still draws a fresh, empty field.
+    Guards the 5-second poll wiping the
     token an operator was typing (and moving keyboard focus off the field), reported in the UI-04 review."""
     got = _run(served_script, "token_field_survives_polls")
     assert got["typed"] == {"value": "half-typ", "writes": 0}
     assert "actions unlocked" in got["unlocked"] and got["pollWritesUnlocked"] == 0
     assert 'id="tok"' in got["locked"] and got["after"] == ""
+
+
+def test_a_dialog_takes_focus_keeps_tab_inside_and_returns_focus_on_escape(served_script: Path) -> None:
+    """Opening a form from a panel button names the dialog after its heading and focuses its first editable field
+    (the node id is read-only on edit). Tab on the last control wraps to the first and Shift+Tab on the first
+    wraps to the last; inside, Tab is left to the browser. Escape empties and hides the dialog and puts focus
+    back on the button that opened it, and when the poll that follows redraws that table with new numbers,
+    focus moves to the same button in the new table without scrolling. Guards the review's UI-05 finding: the
+    modal took no focus and gave none back, so a keyboard user landed at the top of the page after every
+    dialog."""
+    got = _run(served_script, "dialog_focus_returns")
+    assert got["opened"] == {"hidden": False, "titleId": "dlg-title", "title": "Edit node n1",
+                             "focus": "f-cpu_total"}
+    assert got["controls"] >= 3
+    assert got["tabPrevented"] and got["wrapped"] and got["shiftPrevented"] and got["wrappedBack"]
+    assert got["innerPrevented"] is False
+    assert got["closed"] == {"hidden": True, "html": "", "returned": True}
+    assert got["repainted"] is True
+    assert got["after"] == {"tag": "BUTTON", "onclick": "editItem('node',0)", "focusedWith": {"preventScroll": True}}
+
+
+def test_a_dialog_focuses_what_is_safe_and_a_replacement_keeps_the_first_opener(served_script: Path) -> None:
+    """A red (danger) confirmation focuses cancel, so Enter cannot destroy anything by accident; a plain one
+    focuses yes. A dialog that replaces another (a result shown after a submit) focuses its own control but
+    still returns focus to the button that opened the first one. A dialog with nothing to press keeps Tab
+    inside it, with focus on its heading (a lease-status dialog has no button until its first answer). A
+    confirmation is described by its question; a form is not described (its hints would be read before every
+    field). Guards focus landing on a destructive default, a chained dialog losing the way back, focus left
+    outside a dialog with nothing to press yet, and a screen reader announcing only "Confirm" for a destructive
+    question."""
+    got = _run(served_script, "dialog_initial_focus")
+    assert got["danger"] == "cm-no" and got["afterDanger"] is True
+    assert got["plain"] == "cm-ok"
+    assert got["first"] == "dlg-a" and got["second"] == "dlg-b" and got["backToFirstOpener"] is True
+    assert got["emptyFocus"] == "dlg-title" and got["emptyPrevented"] is True
+    assert got["described"] == {"confirm": "dlg-desc", "says": "Renew it?", "form": None}
+
+
+def test_focus_follows_a_control_that_changes_or_goes_away(served_script: Path) -> None:
+    """When a poll redraws a panel and the focused button's label changed (cordon became uncordon), focus moves
+    to the button with the same handler; when its row went away, to the section's heading (script-focusable,
+    no scroll), never to a neighbouring row's button. When the button that opened a dialog is redrawn behind
+    the open dialog (an operator read landing), Escape returns focus to the new button. Guards the review's
+    cases: matching only on the exact label threw focus to the top of the page after any action that changes
+    or removes its own button, and a position fallback could leave focus on another lease's one-press renew."""
+    got = _run(served_script, "paint_focus_fallbacks")
+    assert got["flipped"] == {"onclick": "toggleCordon(0)", "text": "uncordon"}
+    assert got["removed"] == {"tag": "H2", "text": "Nodes", "tabIndex": -1, "focusedWith": {"preventScroll": True}}
+    assert got["detached"] is True
+    assert got["back"] == {"onclick": "openTokenForm()", "fresh": True, "inTokens": True}
+
+
+def test_a_poll_keeps_keyboard_focus_on_the_panel_control(served_script: Path) -> None:
+    """A poll whose overview changes nothing leaves the focused panel button as it was (the panel is not
+    rewritten). A poll that does change the panel replaces the button, and focus moves to the same button
+    (same handler and label) in the new markup without scrolling. Guards the 5-second refresh throwing
+    keyboard focus back to the top of the page, which made every panel control unreachable by keyboard for
+    more than a few seconds."""
+    got = _run(served_script, "panel_focus_survives_polls")
+    assert got["unchanged"] == {"same": True, "connected": True}
+    assert got["replaced"] is True and got["inNodes"] is True
+    assert got["onclick"] == "editItem('node',0)" and got["focusedWith"] == {"preventScroll": True}
+
+
+def test_the_tabs_follow_the_aria_tabs_pattern(served_script: Path) -> None:
+    """At boot exactly the selected tab is aria-selected and in the Tab order (tabindex 0, the others -1) and only
+    its panel shows. Arrow keys move to the next or previous tab and wrap, Home and End go to the ends; each
+    opens the tab it lands on, focuses it and is remembered; any other key is left alone. Guards the review's
+    UI-05 finding that the tab buttons exposed no selected state and no keyboard model."""
+    got = _run(served_script, "tabs_keyboard")
+    assert got["atBoot"] == {"tab": "capacity", "focus": "", "selected": ["true", "false", "false", "false"],
+                             "tabIndex": [0, -1, -1, -1], "shown": ["", "none", "none", "none"]}
+    walk = [(s["key"], s["tab"], s["focus"], s["prevented"]) for s in got["steps"]]
+    assert walk == [("ArrowRight", "tenancy", "tab-tenancy", True), ("End", "security", "tab-security", True),
+                    ("ArrowRight", "capacity", "tab-capacity", True), ("Home", "capacity", "tab-capacity", True),
+                    ("ArrowLeft", "security", "tab-security", True)]
+    last = got["steps"][-1]
+    assert last["selected"] == ["false", "false", "false", "true"] and last["tabIndex"] == [-1, -1, -1, 0]
+    assert last["shown"] == ["none", "none", "none", ""]
+    assert got["otherPrevented"] is False and got["stored"] == "security"
+
+
+def test_a_tab_badge_is_part_of_the_tab_name(served_script: Path) -> None:
+    """With a failed build and two queued requests, the Images and Tenancy tabs are named 'Images, 1 failed' and
+    'Tenancy, 2 queued' for a screen reader; when both clear, the names go back to the plain labels. Guards
+    the badge reading as a bare digit glued to the word ('Images1')."""
+    got = _run(served_script, "tab_badge_names")
+    assert got["named"] == {"images": "Images, 1 failed", "tenancy": "Tenancy, 2 queued"}
+    assert got["cleared"] == {"images": "Images", "tenancy": "Tenancy"}
 
 
 def test_a_read_token_on_a_read_gated_server_keeps_the_reads(served_script: Path) -> None:

@@ -76,7 +76,8 @@ tests/
   unit/                        # pure functions, no I/O
   integration/                 # the app driven as a black box, boundaries mocked
                                #   dashboard_client_harness.js: the dashboard client script as served, run
-                               #   in node on a fake DOM + fake server (test_dashboard_client.py; self-skips w/o node)
+                               #   in node on a fake DOM + fake server (test_dashboard_client.py; self-skips w/o node);
+                               #   the fake DOM keeps element identity and focus, so dialog and tab focus are tested
   harness/                     # the real-Postgres ledger harnesses as pytest items (opt-in: harness marker)
   e2e/                         # the real booted app (opt-in: e2e marker)
 ```

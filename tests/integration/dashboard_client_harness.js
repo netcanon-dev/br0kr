@@ -16,65 +16,156 @@ const vm = require('vm');
 const [, , scriptPath, scenarioName] = process.argv;
 
 // ── a minimal DOM. Every element the page asks for by id exists (created on first use). ──
-// A browser builds NEW elements from markup, so a form control starts from what its markup says (value, checked,
-// the selected option, a button's label) with no handler bound. The fake keeps one element per id across writes,
-// so hydrate() resets each control a write declares to its markup state: a scenario then sees what an operator
-// would (a pre-ticked checkbox stays ticked), and a handler bound to an earlier dialog cannot survive into the next.
-// An id'd element written empty (a dialog's error line) starts with no text. Limits: only markup that carries an
-// id="..." is hydrated (bare <option>s written into an existing select keep its old value), a textarea only loses
-// its handler, and only the four entities esc() emits are decoded.
+// A browser builds NEW elements from markup, so an element a write declares (by id="...") is a fresh object here
+// too: it starts from what its markup says (a control's value, checked, the selected option, its text), with no
+// handler bound and no state from an earlier dialog, and getElementById returns it from then on. The element it
+// replaced is no longer in the page. Elements without an id are made per write, on demand, for the selector
+// queries below. Limits: only the four entities esc() emits are decoded, and bare <option>s written into an
+// existing select keep its old value.
 const unesc = s => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-function hydrate(html) {
-  if (!html || html.indexOf('id="') < 0) return;
-  const ctl = /<(input|select|button|textarea)\b([^>]*)>/g;
-  let m;
-  const empty = /<([a-z]+)\b([^>]*)><\/\1>/g;
-  while ((m = empty.exec(html))) {
-    const idm = /\bid="([^"]*)"/.exec(m[2]);
-    if (idm) document.getElementById(idm[1]).textContent = '';
+const OPEN = () => /<([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+const VOID = new Set(['input', 'br', 'img', 'hr', 'meta', 'link', 'col', 'area', 'source', 'wbr']);
+// the text of some markup: every character outside a tag (a scan, not a one-pass tag-stripping regex)
+function textOf(html) {
+  let out = '', inTag = false;
+  for (const c of html) {
+    if (c === '<') inTag = true;
+    else if (c === '>') inTag = false;
+    else if (!inTag) out += c;
   }
-  while ((m = ctl.exec(html))) {
-    const idm = /\bid="([^"]*)"/.exec(m[2]);
-    if (!idm) continue;
-    const el = document.getElementById(idm[1]);
-    el.onclick = null;
-    if (m[1] === 'input') {
-      const v = /\bvalue="([^"]*)"/.exec(m[2]);
-      el.value = v ? unesc(v[1]) : '';
-      el.checked = /\schecked\b/.test(m[2]);
-    } else if (m[1] === 'select') {
-      const end = html.indexOf('</select>', m.index);
-      const opts = [...html.slice(m.index, end < 0 ? undefined : end).matchAll(/<option value="([^"]*)"([^>]*)>/g)];
-      const sel = opts.find(o => /\bselected\b/.test(o[2])) || opts[0];
-      el.value = sel ? unesc(sel[1]) : '';
-    } else if (m[1] === 'button') {
-      const end = html.indexOf('</button>', m.index + m[0].length);
-      el.textContent = end < 0 ? '' : html.slice(m.index + m[0].length, end);
-    }
+  return unesc(out);
+}
+function attrsOf(src) {
+  const a = {};
+  for (const m of src.matchAll(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*"([^"]*)")?/g)) {
+    a[m[1].toLowerCase()] = m[2] === undefined ? '' : unesc(m[2]);
+  }
+  return a;
+}
+// where the element whose open tag ends at `from` closes (nesting of the same tag counted)
+function closeOf(html, tag, from) {
+  const re = new RegExp('<(/?)' + tag + '\\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>', 'gi');
+  re.lastIndex = from;
+  let depth = 1, m;
+  while ((m = re.exec(html))) { depth += m[1] ? -1 : 1; if (!depth) return { inner: m.index, after: re.lastIndex }; }
+  return { inner: html.length, after: html.length };
+}
+function fromMarkup(el, tag, at, html, from) {
+  Object.assign(el.attrs, at);
+  el.className = at.class || ''; el.disabled = 'disabled' in at; el.readOnly = 'readonly' in at;
+  el.type = at.type || '';
+  if (tag === 'input') { el.value = 'value' in at ? at.value : ''; el.checked = 'checked' in at; return; }
+  if (VOID.has(tag)) return;
+  const inner = html.slice(from, closeOf(html, tag, from).inner);
+  el.textContent = textOf(inner);
+  if (tag === 'select') {
+    const opts = [...inner.matchAll(/<option value="([^"]*)"([^>]*)>/g)];
+    const sel = opts.find(o => /\bselected\b/.test(o[2])) || opts[0];
+    el.value = sel ? unesc(sel[1]) : '';
+  } else if (tag === 'textarea') el.value = unesc(inner);
+  return inner;
+}
+function hydrate(owner, html) {
+  if (!html || html.indexOf('id="') < 0) return;
+  const re = OPEN();
+  let m;
+  while ((m = re.exec(html))) {
+    const tag = m[1].toLowerCase(), at = attrsOf(m[2]);
+    if (!at.id) continue;
+    const el = new El(tag, at.id);
+    el._owner = owner;
+    const inner = fromMarkup(el, tag, at, html, re.lastIndex);
+    if (inner !== undefined) el._html = inner;   // its own content, so a later write into it replaces just that
+    els.set(at.id, el);
   }
 }
+let FOCUSED = null;
 class El {
   constructor(tag, id) {
-    this.tagName = tag; this.id = id || ''; this._html = ''; this.textContent = ''; this.className = '';
-    this.value = ''; this.style = {}; this.dataset = {}; this.children = []; this.parentNode = null;
-    this.onclick = null; this.attrs = {}; this.classList = { toggle() {}, add() {}, remove() {} };
+    this.tagName = String(tag).toUpperCase(); this.id = id || ''; this._html = ''; this.textContent = '';
+    this.className = ''; this.value = ''; this.style = {}; this.dataset = {}; this.children = []; this.parentNode = null;
+    this.onclick = null; this.attrs = {}; this._ls = {}; this.classList = { toggle() {}, add() {}, remove() {} };
   }
   get innerHTML() { return this._html; }
-  set innerHTML(v) { this._html = String(v); hydrate(this._html); }
+  // a write rebuilds the children even when the markup is the same, as a browser does
+  set innerHTML(v) { this._html = String(v); this._kidsOf = null; hydrate(this, this._html); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  removeAttribute(k) { delete this.attrs[k]; }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   remove() {
     const p = this.parentNode;
     if (p) { const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); }
     this.parentNode = null;
   }
-  // '.name' only: true when the rendered markup carries that class (enough for the page's own checks).
-  querySelector(sel) {
-    if (!sel.startsWith('.')) return null;
-    return new RegExp('class="[^"]*\\b' + sel.slice(1) + '\\b').test(this.innerHTML) ? new El('div') : null;
+  // the elements this one's markup declares, in page order; an id'd one's content belongs to that element
+  ownKids() {
+    if (this._kidsOf === this._html) return this._kids;
+    const kids = [], html = this._html, re = OPEN();
+    let m;
+    while ((m = re.exec(html))) {
+      const tag = m[1].toLowerCase(), at = attrsOf(m[2]);
+      if (at.id) {
+        kids.push(document.getElementById(at.id));
+        if (!VOID.has(tag)) re.lastIndex = closeOf(html, tag, re.lastIndex).after;
+      } else {
+        const el = new El(tag);
+        el._parent = this;
+        fromMarkup(el, tag, at, html, re.lastIndex);
+        kids.push(el);
+      }
+    }
+    this._kidsOf = html; this._kids = kids;
+    return kids;
   }
-  querySelectorAll() { return []; }
-  addEventListener() {}
+  all() {
+    const out = [];
+    for (const k of this.ownKids()) { out.push(k); if (k.id && k !== this) out.push(...k.all()); }
+    return out;
+  }
+  // tag selectors ('button, input, a[href]', '*'); '.name' keeps its old meaning: a truthy stand-in when the
+  // markup carries that class (enough for the page's own checks)
+  querySelectorAll(sel) {
+    const want = sel.split(',').map(x => x.trim().toLowerCase()).map(x => {
+      const m = /^([a-z0-9]+|\*)(?:\[([a-z-]+)\])?$/.exec(x);
+      if (!m) throw new Error('fake DOM: unsupported selector ' + x);
+      return { tag: m[1], attr: m[2] };
+    });
+    return this.all().filter(e => want.some(w => (w.tag === '*' || e.tagName.toLowerCase() === w.tag)
+      && (!w.attr || w.attr in e.attrs)));
+  }
+  querySelector(sel) {
+    if (sel.startsWith('.')) {
+      return new RegExp('class="[^"]*\\b' + sel.slice(1) + '\\b').test(this.innerHTML) ? new El('div') : null;
+    }
+    return this.querySelectorAll(sel)[0] || null;
+  }
+  up() { return this._parent || this._owner || this.parentNode || null; }
+  // a detached element is in nothing (a browser's getElementById would not even find it)
+  contains(x) {
+    if (!x || (x !== this && !x.isConnected)) return false;
+    for (let n = x; n; n = n.up()) if (n === this) return true;
+    return false;
+  }
+  // tag or [attr=value] selectors, up through what contains this element
+  closest(sel) {
+    const hit = (n, w) => {
+      const m = /^\[([a-z-]+)=([a-z-]+)\]$/.exec(w);
+      return m ? n.attrs[m[1]] === m[2] : n.tagName === w.toUpperCase();
+    };
+    const want = sel.split(',').map(x => x.trim());
+    for (let n = this; n; n = n.up()) if (want.some(w => hit(n, w))) return n;
+    return null;
+  }
+  get isConnected() {
+    if (this._parent) return this._parent.isConnected && this._parent.ownKids().includes(this);
+    if (this.id && els.has(this.id) && els.get(this.id) !== this) return false;   // declared again since
+    if (this._owner) return this._owner.isConnected && this._owner.ownKids().includes(this);
+    return true;   // the static page, <body>, a toast
+  }
+  focus(opts) { if (this.isConnected) { FOCUSED = this; this.focusedWith = opts || null; } }
+  getClientRects() { return 'hidden' in this.attrs || /display:\s*none/.test(this.attrs.style || '') ? [] : [{}]; }
+  addEventListener(type, fn) { (this._ls[type] = this._ls[type] || []).push(fn); }
   select() {}
   scrollIntoView(opts) { this.scrolledWith = opts || true; }
 }
@@ -88,7 +179,21 @@ const document = {
   addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
   execCommand() {},
   body: new El('body'),
+  get activeElement() { return FOCUSED && FOCUSED.isConnected ? FOCUSED : this.body; },
 };
+// A key press as a browser dispatches it: to the target and up through what contains it, then the document.
+// The target is the focused element unless `on` names one (a static element has no known parent here).
+async function press(key, { shift = false, on = null } = {}) {
+  const ev = { key, shiftKey: shift, target: document.activeElement, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; } };
+  for (let n = on || document.activeElement; n; n = n.up()) {
+    if (n.onkeydown) n.onkeydown(ev);
+    (n._ls.keydown || []).forEach(fn => fn(ev));
+  }
+  (listeners.keydown || []).forEach(fn => fn(ev));
+  await settle();
+  return ev;
+}
 async function fire(type) { (listeners[type] || []).forEach(fn => fn({})); await settle(); }
 const storage = () => {
   const m = new Map();
@@ -215,6 +320,12 @@ const strip = () => ({ html: $('attention').innerHTML, hidden: $('attention').hi
   tenancy: $('badge-tenancy').textContent, tab: run('TAB') });
 const FAILED_BUILD = (id, at) => ({ build_id: id, target_template_id: 'debian-' + id, state: 'FAILED', cluster_id: 'c1',
   vmid: null, url: 'https://images.example/d.qcow2', error: 'checksum mismatch', updated_at: at });
+// a button in a panel, found by its inline handler (the element the page drew, as a browser would hand it out)
+const buttonIn = (panel, onclick) => {
+  const b = $(panel).querySelectorAll('button').find(x => x.getAttribute('onclick') === onclick);
+  if (!b) throw new Error(`#${panel} has no button running ${onclick}`);
+  return b;
+};
 async function confirmYes() { await run("document.getElementById('cm-ok').onclick()"); await settle(); }
 
 const SCENARIOS = {
@@ -457,12 +568,141 @@ const SCENARIOS = {
     await run('poll()'); await settle();
     await run('poll()'); await settle();
     const typed = { value: $('tok').value, writes: writes.length };
-    field.value = 't'; run('unlock()'); await settle();
+    field.value = 't'; field.focus(); await press('Enter');   // Enter in the field unlocks
     const unlocked = $('actions').innerHTML, before = writes.length;
     await run('poll()'); await settle();
     const pollWritesUnlocked = writes.length - before;
     run('lock()'); await settle();
     return { typed, unlocked, pollWritesUnlocked, locked: $('actions').innerHTML, after: $('tok').value };
+  },
+  async dialog_focus_returns() {
+    await boot({ token: 't' });
+    const edit = buttonIn('nodes', "editItem('node',0)");
+    edit.focus();
+    await run(edit.getAttribute('onclick')); await settle();
+    const slot = $('form-slot');
+    const opened = { hidden: slot.hidden, titleId: slot.querySelector('h3').id,
+      title: slot.querySelector('h3').textContent, focus: document.activeElement.id };
+    const all = run("focusables(document.getElementById('form-slot'))");
+    all[all.length - 1].focus();
+    const tab = await press('Tab');
+    const wrapped = document.activeElement === all[0];
+    const shiftTab = await press('Tab', { shift: true });
+    const wrappedBack = document.activeElement === all[all.length - 1];
+    all[0].focus();
+    const inner = await press('Tab');           // not at an edge: the browser moves focus itself
+    let release;
+    routes['/api/overview'] = () => new Promise(r => { release = r; });
+    await press('Escape');
+    const closed = { hidden: slot.hidden, html: slot.innerHTML, returned: document.activeElement === edit };
+    release(ok({ ...OVERVIEW, nodes: [{ ...OVERVIEW.nodes[0], mem_mb_used: 2048, mem_pct: 25 }] }));
+    await settle();                             // closeForm's poll repaints the nodes table with the new numbers
+    const now = document.activeElement;
+    return { opened, controls: all.length, tabPrevented: tab.defaultPrevented, wrapped,
+      shiftPrevented: shiftTab.defaultPrevented, wrappedBack, innerPrevented: inner.defaultPrevented, closed,
+      repainted: !edit.isConnected, after: { tag: now.tagName, onclick: now.getAttribute('onclick'),
+        focusedWith: now.focusedWith } };
+  },
+  async dialog_initial_focus() {
+    await boot({ token: 't' });
+    const add = buttonIn('nodes', "openForm('node','create')");
+    add.focus();
+    run("confirmModal('Delete it?', () => {}, true)");
+    const danger = document.activeElement.id;
+    await press('Escape');
+    const afterDanger = document.activeElement === add;
+    run("confirmModal('Renew it?', () => {})");
+    const plain = document.activeElement.id;
+    const described = { confirm: $('form-slot').getAttribute('aria-describedby'), says: $('dlg-desc').textContent };
+    await press('Escape');
+    // a dialog that replaces another (a result after a submit) keeps the first opener
+    run('openDialog(`<div class="form"><h3>First</h3><input id="dlg-a"></div>`)');
+    const first = document.activeElement.id;
+    described.form = $('form-slot').getAttribute('aria-describedby');
+    run('openDialog(`<div class="form"><h3>Second</h3><p>done</p><button class="act" id="dlg-b">ok</button></div>`)');
+    const second = document.activeElement.id;
+    run('closeForm()'); await settle();
+    const backToFirstOpener = document.activeElement === add;
+    // a dialog with nothing to focus keeps Tab inside it anyway
+    run('openDialog(`<div class="form"><h3>Note</h3><p>nothing to press</p></div>`)');
+    const emptyFocus = document.activeElement.id;
+    const empty = await press('Tab');
+    run('closeForm()'); await settle();
+    return { danger, afterDanger, plain, first, second, backToFirstOpener, emptyFocus,
+      emptyPrevented: empty.defaultPrevented, described };
+  },
+  async panel_focus_survives_polls() {
+    await boot({ token: 't' });
+    const edit = buttonIn('nodes', "editItem('node',0)");
+    edit.focus();
+    await run('poll()'); await settle();
+    const unchanged = { same: document.activeElement === edit, connected: edit.isConnected };
+    routes['/api/overview'] = ok({ ...OVERVIEW, nodes: [{ ...OVERVIEW.nodes[0], cpu_used: 4, cpu_pct: 50 }] });
+    await run('poll()'); await settle();
+    const now = document.activeElement;
+    return { unchanged, replaced: !edit.isConnected, onclick: now.getAttribute('onclick'),
+      focusedWith: now.focusedWith, inNodes: $('nodes').contains(now) };
+  },
+  async paint_focus_fallbacks() {
+    const node2 = { ...OVERVIEW.nodes[0], node_id: 'n2' };
+    await boot({ token: 't', routes: { '/api/overview': ok({ ...OVERVIEW, nodes: [OVERVIEW.nodes[0], node2] }) } });
+    const sec = $('nodes-sec');   // the static markup around the table: <section id="nodes-sec"><h2>Nodes</h2>
+    sec.tagName = 'SECTION'; sec._html = '<h2>Nodes</h2>'; $('nodes').parentNode = sec;
+    // cordon: the button keeps its handler while its label flips to uncordon
+    buttonIn('nodes', 'toggleCordon(0)').focus();
+    routes['/api/overview'] = ok({ ...OVERVIEW, nodes: [{ ...OVERVIEW.nodes[0], cordoned: true }, node2] });
+    await run('poll()'); await settle();
+    let a = document.activeElement;
+    const flipped = { onclick: a.getAttribute('onclick'), text: a.textContent };
+    // the row goes away: focus lands on the section heading, never on a neighbouring row's button
+    const gone = buttonIn('nodes', "delItem('node',1)");
+    gone.focus();
+    routes['/api/overview'] = ok({ ...OVERVIEW, nodes: [{ ...OVERVIEW.nodes[0], cordoned: true }] });
+    await run('poll()'); await settle();
+    a = document.activeElement;
+    const removed = { tag: a.tagName, text: a.textContent, tabIndex: a.tabIndex, focusedWith: a.focusedWith };
+    // a dialog's opener redrawn behind the open dialog: Escape still returns focus to it (the new one)
+    run("setTab('security')"); await settle();
+    const create = buttonIn('tokens', 'openTokenForm()');
+    create.focus();
+    run('openTokenForm()');
+    routes['/api/tokens'] = ok({ tokens: [{ token_id: 1, project_id: 'p1', scope: 'tenant', label: 'ci',
+      created_at: '2026-11-12T08:00:00+00:00', expires_at: null, last_used_at: null, revoked_at: null }] });
+    await run('loadTokens(true)'); await settle();
+    const detached = !create.isConnected;
+    await press('Escape');
+    a = document.activeElement;
+    return { flipped, removed, detached, back: { onclick: a.getAttribute('onclick'), fresh: a !== create,
+      inTokens: $('tokens').contains(a) } };
+  },
+  async tabs_keyboard() {
+    await boot({});
+    const TABS = ['capacity', 'tenancy', 'images', 'security'];
+    const state = () => ({ tab: run('TAB'), focus: document.activeElement.id,
+      selected: TABS.map(t => $('tab-' + t).getAttribute('aria-selected')),
+      tabIndex: TABS.map(t => $('tab-' + t).tabIndex), shown: TABS.map(t => $('panel-' + t).style.display) });
+    const atBoot = state();
+    $('tab-capacity').focus();
+    const steps = [];
+    for (const key of ['ArrowRight', 'End', 'ArrowRight', 'Home', 'ArrowLeft']) {
+      const ev = await press(key, { on: $('tabnav') });
+      steps.push({ key, prevented: ev.defaultPrevented, ...state() });
+    }
+    const other = await press('a', { on: $('tabnav') });
+    return { atBoot, steps, otherPrevented: other.defaultPrevented, stored: sandbox.localStorage.getItem('br0kr_tab') };
+  },
+  async tab_badge_names() {
+    await boot({ token: 't', routes: {
+      '/api/template/builds': ok({ builds: [FAILED_BUILD(1, '2026-11-10T10:00:00+00:00')] }),
+      '/api/overview': ok({ ...OVERVIEW, queue: { depth: 2, waiting: [], truncated: false, shown: 0 } }) } });
+    const named = { images: $('tab-images').getAttribute('aria-label'),
+      tenancy: $('tab-tenancy').getAttribute('aria-label') };
+    routes['/api/template/builds'] = ok({ builds: [] });
+    routes['/api/overview'] = ok(OVERVIEW);
+    await run('loadDownloads(true)'); await settle();
+    await run('poll()'); await settle();
+    return { named, cleared: { images: $('tab-images').getAttribute('aria-label'),
+      tenancy: $('tab-tenancy').getAttribute('aria-label') } };
   },
   async read_token_required() {
     await boot({ routes: { '/api/overview': fail(401, 'unauthorized') } });

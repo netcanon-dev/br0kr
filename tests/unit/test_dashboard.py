@@ -335,6 +335,41 @@ def test_form_slot_is_a_centered_modal_overlay():
     assert "if(e.key === 'Escape'" in page and "closeForm()" in page   # Escape-to-close is wired
 
 
+def test_the_page_meets_the_accessibility_floor():
+    """The UI-05 floor, as source needles (tests/integration/test_dashboard_client.py proves the behaviour):
+    #form-slot is a named modal dialog, hidden while empty, and every write into it goes through openDialog
+    (which focuses it and remembers the opener); every panel the poll redraws goes through paint (which keeps
+    keyboard focus); the tab bar is a tablist of four tabs over four tabpanels; each audit filter and the token
+    field carry a label, not just a placeholder; the status glyphs say their meaning in words; and no text is
+    set below 11 px. Guards a new dialog or panel writer bypassing the helpers (its focus would be lost again)
+    and the labels or roles being dropped in a later edit. The review found 0 aria- and 0 role= attributes."""
+    page = dashboard.PAGE
+    js = _script_block(page)
+    assert js is not None
+    assert '<div id="form-slot" role="dialog" aria-modal="true" aria-labelledby="dlg-title" hidden></div>' in page
+    assert "function openDialog(html){" in js and "h.id = 'dlg-title'" in js
+    assert "slot.setAttribute('aria-describedby', 'dlg-desc')" in js and "err.setAttribute('role', 'alert')" in js
+    assert page.count('id="dlg-desc"') >= 3          # the confirmation and the two one-time secrets
+    assert js.count("$('form-slot').innerHTML") == 1          # confirmModal's occupancy check; no direct writer
+    assert js.count("openDialog(") >= 27
+    for panel in ("clusters", "nodes", "networks", "storage", "discovery", "projects", "leases", "queue",
+                  "templates", "instances", "replications", "downloads", "migrations", "tokens", "operators",
+                  "audit", "audit-more", "attention"):
+        assert f"$('{panel}').innerHTML" not in js, panel      # written through paint() only
+        assert f"paint('{panel}'," in js, panel
+    assert '<nav id="tabnav" aria-label="sections"><div role="tablist" aria-label="dashboard sections">' in page
+    assert "TH_ACTS" in js and "<th></th>" not in page   # every row-actions column header has a name
+    assert page.count('role="tab" id="tab-') == 4 and page.count('role="tabpanel"') == 4
+    assert "b.setAttribute('aria-selected'" in js and "$('tabnav').addEventListener('keydown'" in js
+    bar = page[page.index('<div class="auditbar"'):page.index('<div id="audit">')]
+    controls = re.findall(r"<(?:select|input) [^>]*>", bar)
+    assert len(controls) == 8 and all("aria-label=" in c for c in controls), controls
+    assert '<input id="tok" type="password" aria-label="' + "'+what+'" + '" placeholder=' in js
+    assert ".sr{position:absolute" in page and js.count("glyph('") >= 4
+    sizes = [float(x) for x in re.findall(r"font-size:\s*([0-9.]+)px", page)]
+    assert sizes and min(sizes) >= 11, sorted(sizes)[:3]
+
+
 def test_page_uses_client_side_tabs_grouped_into_four_panels():
     """The dashboard is no longer one long scroll: the ~13 sections are grouped into FOUR client-side tabs
     (Capacity / Tenancy / Images / Security & Ops) that share ONE page + ONE poll loop. A tab only toggles which
@@ -349,10 +384,10 @@ def test_page_uses_client_side_tabs_grouped_into_four_panels():
     tests/integration/test_dashboard_client.py proves the strip's behaviour."""
     page = dashboard.PAGE
     # the nav + the four grouped panels, in the agreed classification
-    for needle in ('<nav id="tabnav">', "onclick=\"setTab('capacity')\"", "onclick=\"setTab('tenancy')\"",
+    for needle in ('<nav id="tabnav" aria-label="sections"><div role="tablist"', "onclick=\"setTab('capacity')\"", "onclick=\"setTab('tenancy')\"",
                    "onclick=\"setTab('images')\"", "onclick=\"setTab('security')\"",
-                   '<div class="tabpanel" data-tab="capacity">', '<div class="tabpanel" data-tab="tenancy">',
-                   '<div class="tabpanel" data-tab="images">', '<div class="tabpanel" data-tab="security">',
+                   *(f'<div class="tabpanel" role="tabpanel" id="panel-{t}" aria-labelledby="tab-{t}" data-tab="{t}">'
+                     for t in ("capacity", "tenancy", "images", "security")),
                    # setTab wired: defined, persisted to localStorage (a preference, NOT the token), init-called
                    "function setTab(", "localStorage.setItem('br0kr_tab'", "setTab(TAB)", 'id="sec-hint"',
                    "const TABS = ['capacity', 'tenancy', 'images', 'security']",
@@ -643,7 +678,7 @@ def test_destructive_confirmations_are_modal_dialogs_not_native_confirm():
         "function confirmModal(", 'id="cm-ok"', 'id="cm-no"',        # the helper + its buttons
         "class=\"act${danger?' danger':''}\"",                        # the danger (red) confirm button
         ".act.danger{",                                                # its CSS
-        "function closeForm(){ $('form-slot').innerHTML = ''; paused = leaseSelectMode;",  # lease-select-aware
+        "slot.innerHTML = ''; slot.hidden = true;", "paused = leaseSelectMode; if(!paused) poll();",  # lease-select-aware
         # the destructive sites now route through confirmModal (a representative spread across the panels);
         # cancelLease is state-aware (confirmModal(msg,...) with a destroy warning for a live lease)
         "will be DESTROYED.", "confirmModal('Delete '", "confirmModal(msg,",

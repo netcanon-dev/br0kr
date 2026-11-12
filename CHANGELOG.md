@@ -39,6 +39,8 @@ resolve in this repository.
 - **Dashboard controls for storage reachability, node bridges, template networks, discovery dismissals.** 14 operator
   routes were curl-only (bearer in shell history); a test requires a page control per write route. Deleting a
   quarantined node bridge now needs `force`, like a storage pair, so delete + re-add cannot launder it (UI-04).
+- **The dashboard works from the keyboard and with a screen reader.** It had no ARIA and the 5 s poll dropped focus;
+  dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
 - **One runner for the ledger harnesses: `bash scripts/run_harness.sh <name>... | --ci | --all`.** Copied wrappers
