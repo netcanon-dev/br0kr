@@ -54,7 +54,7 @@ def test_apply_settings_hot_applies_every_knob_from_the_ledger(monkeypatch):
     ns = _ns()
     resolved = {"reap_grace": 45, "sweep_every": 6, "sweep_dry_run": True, "provision_limit": 3,
                 "promote_limit": 9, "max_release_attempts": 2, "build_limit": 1, "migrate_limit": 1,
-                "guest_ip_prefix": "192.168.11.", "audit_retention_days": 30, "queue_max": 500,
+                "guest_ip_prefix": "192.168.1.", "audit_retention_days": 30, "queue_max": 500,
                 "full_clone": False, "placement_assert": False, "cross_node_clone": True,
                 "clone_content_enforcement": True, "discovery_interval_seconds": 300, "log_level": "DEBUG",
                 "provision_stuck_seconds": 600}
@@ -387,12 +387,12 @@ def test_hold_records_the_edge_and_counts_a_recheck(monkeypatch):
     ns = _pns()
     summ = daemon.TickSummary()
     daemon.Daemon._hold(ns, _PConn(), 7, placement.NO_REACHABLE_INSTANCE, summ,
-                        template_id="debian12", node_id="pvenas")
+                        template_id="debian12", node_id="pve2")
     assert summ.placement_holds == 1 and audited == ["placement_hold"]
     assert ns._hold_checks[7] == 1
     assert ns._refusals.calls == [{"surface": "daemon", "action": "placement_refused",
                                    "reason": placement.NO_REACHABLE_INSTANCE, "template_id": "debian12",
-                                   "node_id": "pvenas", "lease_id": 7}]
+                                   "node_id": "pve2", "lease_id": 7}]
 
 
 def test_hold_auto_releases_at_the_ceiling(monkeypatch):

@@ -18,8 +18,8 @@ pytestmark = pytest.mark.integration
 @pytest.mark.parametrize(
     "host,ok",
     [
-        ("192.168.11.16", True),
-        ("pvenas", True),
+        ("192.168.1.16", True),
+        ("pvehost", True),
         ("pve-1.lan", True),
         ("http://evil.com", False),
         ("evil.com/path", False),

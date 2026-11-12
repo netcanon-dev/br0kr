@@ -124,10 +124,10 @@ def test_parse_node_forwards_pve_node_for_the_operator_surface():
     build a driver) so an operator can set it from the dashboard — GAP-1: before this it was unsettable through
     the ENTIRE operator surface (dashboard + admin), forcing a raw `UPDATE node SET pve_node` and silently
     leaving the node capacity-only. A blank stays None (set_node COALESCEs None → keep existing)."""
-    out = dashboard._parse_node({"node_id": "pvenas", "cpu_total": 16, "mem_total_mb": 32768,
-                                 "cluster_id": "pvenas", "pve_node": "pvenas"})
-    assert out == {"node_id": "pvenas", "cpu_total": 16.0, "mem_total_mb": 32768,
-                   "cluster_id": "pvenas", "pve_node": "pvenas"}
+    out = dashboard._parse_node({"node_id": "pve2", "cpu_total": 16, "mem_total_mb": 32768,
+                                 "cluster_id": "pve2", "pve_node": "pve2"})
+    assert out == {"node_id": "pve2", "cpu_total": 16.0, "mem_total_mb": 32768,
+                   "cluster_id": "pve2", "pve_node": "pve2"}
     assert dashboard._parse_node({"node_id": "n", "cpu_total": 1, "mem_total_mb": 1})["pve_node"] is None
 
 
@@ -567,7 +567,7 @@ def test_named_operator_action_is_attributed_by_name_through_the_handler(monkeyp
                         lambda c, lid: {"lease_id": lid, "cancelled": True, "outcome": "cancelled"})
     monkeypatch.setattr(dashboard, "_op_connect", lambda: _FakeConn())
     monkeypatch.setattr(auth, "resolve_dashboard_operator",
-                        lambda c, secret: (7, "sam") if secret == "sam-token" else None)
+                        lambda c, secret: (7, "dana") if secret == "dana-token" else None)
     seen: list = []
 
     class _AuditConn(_FakeConn):
@@ -577,10 +577,10 @@ def test_named_operator_action_is_attributed_by_name_through_the_handler(monkeyp
             return self
 
     with _serving(lambda: _AuditConn(), token="sekret") as port:
-        code, body = _post(port, "/api/cancel", {"lease_id": 7}, token="sam-token")   # the NAMED bearer
+        code, body = _post(port, "/api/cancel", {"lease_id": 7}, token="dana-token")   # the NAMED bearer
     assert code == 200 and json.loads(body)["cancelled"] is True   # authorized AS the named operator
     # audit.record's INSERT params: (surface, action, actor, actor_token_id, ...). Attribution = the NAME + id.
-    assert len(seen) == 1 and seen[0][2] == "sam" and seen[0][3] == 7   # actor==NAME (not the id), token id==7
+    assert len(seen) == 1 and seen[0][2] == "dana" and seen[0][3] == 7   # actor==NAME (not the id), token id==7
 
 
 def test_whoami_echoes_only_the_caller_own_identity(monkeypatch):
@@ -590,10 +590,10 @@ def test_whoami_echoes_only_the_caller_own_identity(monkeypatch):
     presented token's resolution), and the id/name order (name in `actor`, id in `actor_token_id`)."""
     monkeypatch.setattr(dashboard, "_op_connect", lambda: _FakeConn())
     monkeypatch.setattr(auth, "resolve_dashboard_operator",
-                        lambda c, secret: (7, "sam") if secret == "sam-token" else None)
+                        lambda c, secret: (7, "dana") if secret == "dana-token" else None)
     with _serving(lambda: _FakeConn(), token="sekret") as port:
-        assert json.loads(_get(port, "/api/whoami", token="sam-token")[1]) == {
-            "verdict": "ok", "actor": "sam", "actor_token_id": 7}
+        assert json.loads(_get(port, "/api/whoami", token="dana-token")[1]) == {
+            "verdict": "ok", "actor": "dana", "actor_token_id": 7}
         assert json.loads(_get(port, "/api/whoami", token="sekret")[1]) == {
             "verdict": "ok", "actor": "dashboard-operator", "actor_token_id": None}
         assert json.loads(_get(port, "/api/whoami", token="bogus")[1]) == {
@@ -798,12 +798,12 @@ def test_node_create_route_marshals_and_calls_the_verb(monkeypatch):
         return {"node_id": k["node_id"], "created": True, "reason": None}
 
     monkeypatch.setattr(admin, "create_node", fake)
-    body = {"node_id": "n9", "cpu_total": 8, "mem_total_mb": 16384, "cluster_id": "", "pve_node": "pvenas"}
+    body = {"node_id": "n9", "cpu_total": 8, "mem_total_mb": 16384, "cluster_id": "", "pve_node": "pve2"}
     with _serving(lambda: _FakeConn(), token="sekret") as port:
         code, rb = _post(port, "/api/node/create", body, token="sekret")
         assert code == 200 and json.loads(rb)["created"] is True
     assert captured == {"node_id": "n9", "cpu_total": 8.0, "mem_total_mb": 16384, "cluster_id": None,
-                        "pve_node": "pvenas"}   # the in-cluster name is marshaled through to the verb (GAP-1)
+                        "pve_node": "pve2"}   # the in-cluster name is marshaled through to the verb (GAP-1)
 
 
 def test_cluster_create_rejects_a_non_bare_host_before_any_db_write(monkeypatch):

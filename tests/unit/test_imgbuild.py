@@ -3,7 +3,7 @@
 This module is the PURE supply-chain gate for the riskiest template slice (downloading a net-new image), so
 its policy is pinned hard here — especially `source_allowed`, where a naive prefix (or path-traversal)
 match would be a real bypass. The actuation (the actual fetch/import/templatize) is covered hermetically by
-a mock driver in tests/integration/test_reconciler.py AND proven LIVE on pvenas (PVE 8.4.17) via
+a mock driver in tests/integration/test_reconciler.py AND proven LIVE on a lab node (PVE 8.4.17) via
 scripts/live_imgbuild.py (download→import→templatize→finalize + the build-fence safety properties, GO 18/18
 on 2026-06-29). The LEDGER lifecycle is proven on real Postgres in scripts/harness_imgbuild.py. What CAN
 drift silently is exactly these pure checks.

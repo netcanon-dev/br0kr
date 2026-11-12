@@ -89,7 +89,7 @@ def test_validate_ci_user_rejects_bad_names(user, reason):
 @pytest.mark.parametrize("cfg", [
     "ip=dhcp",
     "ip=10.0.0.5/24,gw=10.0.0.1",
-    "ip=192.168.11.50/24,gw=192.168.11.1",
+    "ip=192.168.1.50/24,gw=192.168.1.1",
     "ip6=dhcp",
 ])
 def test_validate_ip_config_accepts_well_formed(cfg):
@@ -160,9 +160,9 @@ def test_pick_guest_ip_skips_loopback_and_link_local():
     neither is how an agent reaches the guest. Guards returning 127.0.0.1 (the agent could never connect)."""
     interfaces = [
         _iface("lo", "127.0.0.1"),
-        _iface("eth0", "169.254.10.10", "192.168.11.42"),
+        _iface("eth0", "169.254.10.10", "192.168.1.42"),
     ]
-    assert cloudinit.pick_guest_ip(interfaces) == "192.168.11.42"
+    assert cloudinit.pick_guest_ip(interfaces) == "192.168.1.42"
 
 
 def test_pick_guest_ip_prefers_prefix_subnet():
@@ -170,9 +170,9 @@ def test_pick_guest_ip_prefers_prefix_subnet():
     (e.g. a docker0 172.17.x) even if the latter appears first — so lease_status returns the reachable IP."""
     interfaces = [
         _iface("docker0", "172.17.0.1"),
-        _iface("eth0", "192.168.11.42"),
+        _iface("eth0", "192.168.1.42"),
     ]
-    assert cloudinit.pick_guest_ip(interfaces, prefer_prefix="192.168.11.") == "192.168.11.42"
+    assert cloudinit.pick_guest_ip(interfaces, prefer_prefix="192.168.1.") == "192.168.1.42"
 
 
 def test_pick_guest_ip_returns_none_when_no_usable_address():
@@ -197,7 +197,7 @@ def test_agent_responded_distinguishes_running_from_absent():
     no LAN IP yet (only loopback) still 'responded'. Guards the template-agent verify conflating 'agent not
     running' (the bake failure it exists to catch) with 'agent running, IP still pending'."""
     assert cloudinit.agent_responded([_iface("lo", "127.0.0.1")]) is True       # up, only loopback → responded
-    assert cloudinit.agent_responded([_iface("eth0", "192.168.11.42")]) is True  # up with a real IP
+    assert cloudinit.agent_responded([_iface("eth0", "192.168.1.42")]) is True  # up with a real IP
     assert cloudinit.agent_responded([]) is False        # agent absent / not answering yet (empty result)
     assert cloudinit.agent_responded(None) is False       # 500 'agent not running' → pve maps to None
     assert cloudinit.agent_responded("nonsense") is False  # malformed payload — defensive, never raises

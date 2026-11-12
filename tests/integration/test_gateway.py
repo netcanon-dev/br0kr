@@ -98,11 +98,11 @@ def test_lease_status_returns_access_facts_for_an_active_guest(monkeypatch):
     vmid, node_id) the agent needs to ssh in — this is the whole point of the VM-access feature. Guards a
     regression that drops the discovered IP from the status response."""
     monkeypatch.setattr(lease, "access_of", lambda c, lid: {
-        "state": "ACTIVE", "vmid": 9901, "node_id": "pvenas",
-        "ip_address": "192.168.11.214", "ci_user": "runner", "access_requested": True})
+        "state": "ACTIVE", "vmid": 9901, "node_id": "pve2",
+        "ip_address": "192.168.1.214", "ci_user": "runner", "access_requested": True})
     out = gateway.lease_status(object(), 9)
-    assert out == {"lease_id": 9, "exists": True, "state": "ACTIVE", "vmid": 9901, "node_id": "pvenas",
-                   "ip_address": "192.168.11.214", "ci_user": "runner", "access_requested": True}
+    assert out == {"lease_id": 9, "exists": True, "state": "ACTIVE", "vmid": 9901, "node_id": "pve2",
+                   "ip_address": "192.168.1.214", "ci_user": "runner", "access_requested": True}
 
 
 def test_request_lease_forwards_cloud_init_fields(monkeypatch):

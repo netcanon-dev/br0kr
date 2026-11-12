@@ -5,7 +5,7 @@ any failure is to never orphan a guest or strand a lease — including when a dr
 DB call RAISES (the live-hardware failure mode the adversarial review flagged). Those
 modes are pure control flow over the lease + driver seams, tested here by patching the
 lease CAS in its home module and injecting a fake driver (which can raise). The live
-end-to-end (real VM on pvenas) is proven in scripts/harness_reconcile.py.
+end-to-end (real VM on a lab node) is proven in scripts/harness_reconcile.py.
 """
 from __future__ import annotations
 
@@ -396,9 +396,9 @@ def test_discover_and_stamp_ip_stamps_a_reachable_address(monkeypatch):
     write-once CAS. Guards the return-path that hands the agent its connection address."""
     stamped: dict = {}
     monkeypatch.setattr(lease, "set_ip_address", lambda c, lid, ip: stamped.setdefault(lid, ip) or True)
-    d = _FakeDriver(agent_result=[{"name": "eth0", "ip-addresses": [{"ip-address": "192.168.11.42"}]}])
+    d = _FakeDriver(agent_result=[{"name": "eth0", "ip-addresses": [{"ip-address": "192.168.1.42"}]}])
     ip = reconciler.discover_and_stamp_ip(object(), d, 5, 9001)
-    assert ip == "192.168.11.42" and stamped == {5: "192.168.11.42"}
+    assert ip == "192.168.1.42" and stamped == {5: "192.168.1.42"}
 
 
 def test_discover_and_stamp_ip_returns_none_when_agent_not_ready(monkeypatch):

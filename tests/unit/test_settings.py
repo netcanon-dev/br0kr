@@ -24,7 +24,7 @@ def test_validate_patch_accepts_ints_bools_str_and_clears():
     (which CLEARS the override → fallback). Guards the validator rejecting a legitimate edit."""
     assert settings.validate_patch({"queue_max": 0, "reap_grace": 30}) is None
     assert settings.validate_patch({"sweep_dry_run": True}) is None
-    assert settings.validate_patch({"guest_ip_prefix": "192.168.11."}) is None
+    assert settings.validate_patch({"guest_ip_prefix": "192.168.1."}) is None
     assert settings.validate_patch({"queue_max": None, "guest_ip_prefix": None}) is None   # clears
     assert settings.validate_patch({}) is None
 

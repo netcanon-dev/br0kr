@@ -290,8 +290,8 @@ def test_resolve_dashboard_operator_returns_id_name_and_bumps_last_used():
     """A LIVE named operator resolves to (id, name) and its last_used_at is bumped. Distinct from `resolve`
     (api_token / MCP): a dashboard credential never yields a Principal/MCP scope — it drives ONLY the dashboard.
     Guards resolution dropping the name or the bump not firing."""
-    conn = _DashOpConn((5, "sam"))
-    assert auth.resolve_dashboard_operator(conn, "the-secret") == (5, "sam")
+    conn = _DashOpConn((5, "dana"))
+    assert auth.resolve_dashboard_operator(conn, "the-secret") == (5, "dana")
     assert conn.touched == [(5,)]   # last_used_at bumped for the resolved id
 
 

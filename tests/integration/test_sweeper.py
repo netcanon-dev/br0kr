@@ -4,7 +4,7 @@ The sweep's job — destroy a fenced guest IFF its lease is terminal/absent, and
 touch one whose lease is still live — is pure control flow over two seams: the ledger
 read (lease.states_of, one query per node) and the fenced driver. So it is tested by patching it in
 its home module and injecting a fake driver. The live REST behaviour (a real orphan on
-pvenas) is proven in scripts/harness_daemon.py.
+a lab node) is proven in scripts/harness_daemon.py.
 """
 from __future__ import annotations
 

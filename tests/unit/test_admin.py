@@ -260,7 +260,7 @@ def test_create_node_persists_pve_node_and_rejects_a_bad_one():
     non-bare-hostname value `invalid_pve_node` from a PRE-CHECK with NO INSERT (it lands in the driver's API
     path `/nodes/{pve_node}/...`, so an injection-shaped name must never reach the URL)."""
     seq = _Seq(("nX",))
-    out = admin.create_node(seq, "nX", cpu_total=8, mem_total_mb=4096, cluster_id=None, pve_node="pvenas")
+    out = admin.create_node(seq, "nX", cpu_total=8, mem_total_mb=4096, cluster_id=None, pve_node="pve2")
     assert out == {"node_id": "nX", "created": True, "reason": None}
     assert "pve_node" in seq.sqls[0]                       # the column is in the INSERT column list
     bad = _Seq(("nX",))
@@ -813,14 +813,14 @@ def test_create_node_gate_refuses_second_node_while_cluster_has_unbound_instance
     → unbound-instance → [INSERT]. A cluster with NO unbound instance (or its FIRST node) is allowed."""
     refused = _Seq((1,), (1,), (1,))   # cluster exists, has a node, holds an unbound instance
     assert admin.create_node(refused, "pve5", cpu_total=4, mem_total_mb=8192,
-                             cluster_id="sam")["reason"] == "cluster_has_unbound_instances"
+                             cluster_id="lab1")["reason"] == "cluster_has_unbound_instances"
     assert len(refused.sqls) == 3   # the INSERT never ran
     # first node of a cluster (no node yet) → the instance check short-circuits, INSERT proceeds
     first = _Seq((1,), None, ("n1",))
-    assert admin.create_node(first, "n1", cpu_total=4, mem_total_mb=8192, cluster_id="sam")["created"] is True
+    assert admin.create_node(first, "n1", cpu_total=4, mem_total_mb=8192, cluster_id="lab1")["created"] is True
     # second node but NO unbound instance → allowed
     ok = _Seq((1,), (1,), None, ("pve5",))
-    assert admin.create_node(ok, "pve5", cpu_total=4, mem_total_mb=8192, cluster_id="sam")["created"] is True
+    assert admin.create_node(ok, "pve5", cpu_total=4, mem_total_mb=8192, cluster_id="lab1")["created"] is True
 
 
 def test_create_template_forwards_the_public_flag():
@@ -1145,8 +1145,8 @@ def test_validate_dashboard_operator_accepts_well_formed_and_rejects_bad():
     """Named-operator validation (0026): a non-empty, bounded name + an optional positive/in-ceiling expiry is
     accepted; an empty/over-long name or an out-of-range expiry is a crisp reason. No scope — a dashboard
     operator has one fixed authority. Guards a bad name/expiry reaching the DB as a dead-on-arrival row."""
-    assert admin.validate_dashboard_operator("sam", None) is None
-    assert admin.validate_dashboard_operator("sam", 30) is None
+    assert admin.validate_dashboard_operator("dana", None) is None
+    assert admin.validate_dashboard_operator("dana", 30) is None
     assert admin.validate_dashboard_operator("", None) == "missing_name"
     assert admin.validate_dashboard_operator("x" * 129, None) == "name_too_long"
     for bad in (0, -1, 3651):   # 0 / negative / past the _MAX_TOKEN_TTL_DAYS ceiling
@@ -1158,12 +1158,12 @@ def test_create_dashboard_operator_stores_the_hash_and_returns_the_secret_once()
     the PLAINTEXT secret ONCE + the id. The stored token value is the HASH of the returned secret — the
     plaintext is NEVER persisted. Guards a secret landing in the clear, or the wrong column order."""
     seq = _SeqP((7,))
-    out = admin.create_dashboard_operator(seq, name="sam", expires_in_days=None)
-    assert out["created"] is True and out["operator_id"] == 7 and out["name"] == "sam"
+    out = admin.create_dashboard_operator(seq, name="dana", expires_in_days=None)
+    assert out["created"] is True and out["operator_id"] == 7 and out["name"] == "dana"
     assert isinstance(out["secret"], str) and len(out["secret"]) >= 32   # a real high-entropy secret
     p = _param_of(seq, "INSERT INTO dashboard_operator")
     assert p[0] == auth.hash_token(out["secret"]) and p[0] != out["secret"]   # the HASH, not the plaintext
-    assert p[1] == "sam" and p[2] is None and p[3] is None                    # name + NULL expiry (both params)
+    assert p[1] == "dana" and p[2] is None and p[3] is None                    # name + NULL expiry (both params)
 
 
 def test_create_dashboard_operator_forwards_the_expiry_days():
@@ -1180,9 +1180,9 @@ def test_list_dashboard_operators_returns_metadata_only_never_the_hash():
     the hash or a secret — safe to show an operator. Guards a leak of credential material or a mis-shaped
     active flag."""
     dt = datetime.datetime(2026, 7, 3, 12, 0, 0)
-    row = (5, "sam", dt, None, None, dt, True)
+    row = (5, "dana", dt, None, None, dt, True)
     out = admin.list_dashboard_operators(_Rows([row]))
-    assert out == [{"operator_id": 5, "name": "sam", "created_at": dt.isoformat(), "expires_at": None,
+    assert out == [{"operator_id": 5, "name": "dana", "created_at": dt.isoformat(), "expires_at": None,
                     "revoked_at": None, "last_used_at": dt.isoformat(), "active": True}]
     assert "token_hash" not in out[0] and "secret" not in out[0]
 

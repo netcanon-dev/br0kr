@@ -374,9 +374,9 @@ def test_parse_operator_create_validates_and_shapes():
     """_parse_operator_create (0026) keeps {name, expires_in_days}, running the name/expiry validation first (a
     blank name or an out-of-range expiry → a crisp _Reject, never a bad row). Guards a malformed named-operator
     mint reaching the DB."""
-    assert dashboard._parse_operator_create({"name": "sam"}) == {"name": "sam", "expires_in_days": None}
-    assert dashboard._parse_operator_create({"name": "sam", "expires_in_days": 30}) == {
-        "name": "sam", "expires_in_days": 30}
+    assert dashboard._parse_operator_create({"name": "dana"}) == {"name": "dana", "expires_in_days": None}
+    assert dashboard._parse_operator_create({"name": "dana", "expires_in_days": 30}) == {
+        "name": "dana", "expires_in_days": 30}
     with pytest.raises(dashboard._Reject):
         dashboard._parse_operator_create({"name": ""})                         # blank name (_req_str)
     with pytest.raises(dashboard._Reject):

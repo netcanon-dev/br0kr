@@ -65,9 +65,9 @@ def test_audit_row_shapes_a_stored_row():
         "actor_token_id": 7, "project_id": "team-a", "scope": "consume", "target": "42",
         "params": {"lease_id": 42}, "source_ip": None, "outcome": None}
     dash = audit._audit_row((6, dt.datetime(2026, 7, 2, 14, 4), "dashboard", "/api/cancel",
-                             "dashboard-operator", None, None, None, "7", {"lease_id": 7}, "192.168.11.20",
+                             "dashboard-operator", None, None, None, "7", {"lease_id": 7}, "192.168.1.20",
                              None))
-    assert dash["actor_token_id"] is None and dash["source_ip"] == "192.168.11.20" and dash["outcome"] is None
+    assert dash["actor_token_id"] is None and dash["source_ip"] == "192.168.1.20" and dash["outcome"] is None
     # a denial row (0025): actor 'anonymous', outcome 'denied', the reason + coalesced count in params.
     den = audit._audit_row((7, dt.datetime(2026, 7, 2, 14, 5), "mcp", "request_lease", "anonymous",
                             None, None, None, None, {"reason": "invalid_token", "attempts": 3}, "10.0.0.9",
@@ -522,14 +522,14 @@ def test_note_refusal_writes_a_refused_row_with_placement_context():
     conn = _DenialConn()
     dl = audit.DenialLog(window_s=60, now=_Clock(), outcome="refused")
     dl.note_refusal(lambda: conn, surface="daemon", action="placement_refused",
-                    reason="cross_provision_refused", template_id="debian12", node_id="pvenas", lease_id=42)
+                    reason="cross_provision_refused", template_id="debian12", node_id="pve2", lease_id=42)
     assert len(conn.calls) == 1
     p = conn.calls[0][1]
     # tuple: surface, action, actor, token_id, project, scope, target, Json(params), source_ip, outcome
     assert p[0] == "daemon" and p[1] == "placement_refused" and p[2] == "placement" and p[9] == "refused"
     assert p[6] == "42"   # primary_target: lease_id wins over node/template
     assert p[7].obj == {"reason": "cross_provision_refused", "lease_id": 42,
-                        "template_id": "debian12", "node_id": "pvenas", "attempts": 1}
+                        "template_id": "debian12", "node_id": "pve2", "attempts": 1}
 
 
 def test_note_refusal_coalesces_per_template_and_reason_not_globally():

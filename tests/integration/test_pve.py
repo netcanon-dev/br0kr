@@ -3,7 +3,7 @@
 The fence is the safety property that stops a stale teardown from destroying a reused
 vmid's guest, so its DECISION is a pure function tested exhaustively here, and the
 `fenced_destroy` orchestration is tested via a Pve subclass that stubs the HTTP — no
-network. The live REST behaviour is proven against pvenas in
+network. The live REST behaviour is proven against a lab node in
 scripts/harness_pve_fence.py.
 """
 from __future__ import annotations
@@ -626,7 +626,7 @@ def test_agent_network_interfaces_returns_result_or_none():
     """agent_network_interfaces returns the agent's `result` list when present, and None when the agent
     errors (still booting / not installed) — the signal the discovery step polls on. Guards a boot-in-
     progress error being treated as a hard failure (it must just retry)."""
-    ifaces = [{"name": "eth0", "ip-addresses": [{"ip-address": "192.168.11.5"}]}]
+    ifaces = [{"name": "eth0", "ip-addresses": [{"ip-address": "192.168.1.5"}]}]
     ok = _ActuatorStub(get_map={"/nodes/n/qemu/9901/agent/network-get-interfaces": {"result": ifaces}})
     assert ok.agent_network_interfaces(9901) == ifaces
     notready = _ActuatorStub(raise_get={"/nodes/n/qemu/9901/agent/network-get-interfaces"})

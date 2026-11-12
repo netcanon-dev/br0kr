@@ -182,13 +182,13 @@ def main() -> int:
     # ── H: return path — set_ip_address (write-once) + lease_status ────────────────
     _activate(lid, vmid=9501)
     with connect() as c:
-        first = lease.set_ip_address(c, lid, "192.168.11.214")
+        first = lease.set_ip_address(c, lid, "192.168.1.214")
     with connect() as c:
         again = lease.set_ip_address(c, lid, "10.0.0.9")   # write-once: must NOT overwrite
     with connect() as c:
         st = gateway.lease_status(c, lid)
     check("set_ip_address_writes_once",
-          first is True and again is False and st["ip_address"] == "192.168.11.214",
+          first is True and again is False and st["ip_address"] == "192.168.1.214",
           f"first={first} again={again} ip={st['ip_address']}")
     check("lease_status_returns_connection_facts",
           st["state"] == "ACTIVE" and st["vmid"] == 9501 and st["ci_user"] == "runner"

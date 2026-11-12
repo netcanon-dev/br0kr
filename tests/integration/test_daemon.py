@@ -430,12 +430,12 @@ def test_ip_discovery_runs_every_tick_and_passes_the_env_template_flag(wired):
     wired["ip_pending"] = [lease.IpPending(id=7, node_id="n1", vmid=9007)]
     # No env template, but the (real) work-list could still hold a per-request templated lease → discovery
     # runs, and the env_template flag passed is False (so SQL includes only template_id-bearing leases).
-    summary = _daemon(vm_template=None, guest_ip_prefix="192.168.11.").tick(_FakeConn())
+    summary = _daemon(vm_template=None, guest_ip_prefix="192.168.1.").tick(_FakeConn())
     assert summary.ip_discovered == 1 and wired["awaiting_env_template"] is False
-    assert wired["ip_discovered"] == [(7, 9007, "192.168.11.")]
+    assert wired["ip_discovered"] == [(7, 9007, "192.168.1.")]
     # With an env template, the flag is True (so SQL also includes env-cloned leases, unchanged from #36).
     wired.pop("ip_discovered", None)
-    summary = _daemon(vm_template=9000, guest_ip_prefix="192.168.11.").tick(_FakeConn())
+    summary = _daemon(vm_template=9000, guest_ip_prefix="192.168.1.").tick(_FakeConn())
     assert summary.ip_discovered == 1 and wired["awaiting_env_template"] is True
 
 

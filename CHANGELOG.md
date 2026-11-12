@@ -543,7 +543,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `br0kr/reconciler.py`, `br0kr/daemon.py`, `br0kr/pve.py`, `br0kr/admin.py`, `br0kr/nodes.py`,
   `br0kr/mcp_server.py`, `br0kr/dashboard.py`) — a CROSS-NODE (and, via PDM, cross-cluster) clone now REWRITES its
   `net0` bridge to the PLACEMENT node's OWN bridge for the template's LOGICAL NETWORK, so it boots on ANY node
-  regardless of local bridge naming (pve5's `vmbr0` vs pvenas's `vmbr402`).** Why: 0038 could only VERIFY the
+  regardless of local bridge naming (one node's `vmbr0` vs another's `vmbr402`).** Why: 0038 could only VERIFY the
   template's baked bridge is present (fail-closed at admit); it could not make a guest boot on a node whose bridge
   for "the same network" carries a different name — the heterogeneous-node wall the `cross_node_clone` live-verify
   hit. This RE-KEYS 0038's raw `(node, bridge)` reachability onto a logical IDENTITY, closing the wrong-L2 footgun
@@ -976,7 +976,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   quarantine/verify lifecycle, and migration-reservation immunity.
 - **A logical template's physical INSTANCES: which concrete (cluster, node, storage, vmid) actually hold a
   cloneable copy (schema + operator surface; migration 0032).** Why: a `template` row is a single
-  `(cluster_id, vmid)` pin — it cannot express "this image lives on pvenas's FastStorage, so ONLY pvenas can
+  `(cluster_id, vmid)` pin — it cannot express "this image lives on node A's FastStorage, so ONLY node A can
   clone it" on a multi-node cluster, which is exactly the per-node hosting fact the placement gate (0033/PR-2)
   needs to refuse a cross-node clone. DELIBERATELY behaviour-identical on the current fleet: nothing READS
   instances yet. New `template_instance(template_id, cluster_id, node_id, vmid, storage_id, instance_state,
@@ -1152,7 +1152,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `br0kr/reconciler.py` + `br0kr/lease.py` + `br0kr/daemon.py`; proven by `tests/unit/test_pve_parse.py`
   (boot-disk detection), `tests/integration/test_pve.py` (resize API shape + grow-only), `test_reconciler.py`
   (clone→configure→grow→start order + fail-loud), `test_daemon.py` (threading), and `scripts/harness_cloudinit.py`
-  §F2 (req_disk_gb survives request→admit→list_admitted on real Postgres) + a live pvenas clone-and-grow proof.
+  §F2 (req_disk_gb survives request→admit→list_admitted on real Postgres) + a live clone-and-grow proof on a lab node.
 - **The MCP gateway 421'd `Invalid Host header` for every non-loopback Host — breaking the OAuth connector's
   DATA path AND the plain-HTTP / LAN-TLS paths, even though OAuth discovery/consent succeeded.** Why: FastMCP
   (mcp SDK **≥ 1.23**) auto-enables DNS-rebinding protection with a LOOPBACK-ONLY Host allowlist (`127.0.0.1:*`
@@ -1627,7 +1627,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `network-get-interfaces` (new pure `br0kr/cloudinit.py: agent_responded` distinguishes "agent running" from
   "agent absent", vs the existing `pick_guest_ip`), then tears the clone down under its fence. The vm-access
   runbook §2/§2b wire in the helper + the verify; SECURITY.md C13's covering-check adds the verify. Covered by
-  `tests/unit/test_cloudinit.py` (`agent_responded`) + a live-pvenas run: a baked Debian 12 template was cloned,
+  `tests/unit/test_cloudinit.py` (`agent_responded`) + a live run on a lab node: a baked Debian 12 template was cloned,
   booted, its agent answered and reported its DHCP IP, and the clone was fenced-torn-down — **GO 6/6**.
 - **`cancel_migration` — an OPERATOR verb to cancel a migration saga, releasing its held target reservation
   without destroying the workload (`br0kr/migration.py`, `br0kr/gateway.py`, `br0kr/mcp_server.py`,
@@ -2028,7 +2028,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   (`scripts/harness_imgbuild_project.py`, PG :5463, GO 18/18: disabled/gate/reserve/over-quota, the atomic
   READY+catalog+grant settle, settle-frees-room, ownership isolation, and the FOR UPDATE concurrency race) +
   unit/integration (the size parse, the settle/over-declared/fail-closed paths); the new disk-size READ
-  re-proven LIVE on pvenas via `scripts/live_imgbuild.py`. The build storage must offer both `import` and
+  re-proven LIVE on a lab node via `scripts/live_imgbuild.py`. The build storage must offer both `import` and
   `images` content (an NFS/dir storage), PVE 8.2+.
 - **Operator template downloads — bring a net-new image into the catalog by downloading it (phase A4.1)
   (`db/migrations/0015_template_build.sql`, `br0kr/{imgbuild,build,pve,reconciler,daemon,admin,dashboard}.py`).**
@@ -2051,7 +2051,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   build-job status panel (operator-gated GETs, like token/grant metadata). Proven on real Postgres
   (`scripts/harness_imgbuild.py`, PG :5462, GO 15/15: allowlist, request gate, the lifecycle incl. the atomic
   READY+INSERT, collision, stale reclaim) + the build flow unit-tested with a mock driver, AND **proven LIVE
-  on pvenas (PVE 8.4.17) via `scripts/live_imgbuild.py` + `scripts/run_live_imgbuild.sh` —
+  on a lab node (PVE 8.4.17) via `scripts/live_imgbuild.py` + `scripts/run_live_imgbuild.sh` —
   download→import→templatize→finalize, GO 18/18 (2026-06-29), incl. the build-fence safety properties (a
   finalized template is refused by the build-orphan reclaim).** Operator precondition: the build storage must
   offer both `import` and `images` content (an NFS/dir storage — a zfspool can host neither), on a PVE 8.2+
@@ -2184,7 +2184,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   work-list is exact, idempotency keeps the original key, and the reclaim guard spares live/reused/cross-
   cluster vmids while reclaiming a genuine orphan) + hermetic unit/integration (`tests/unit/test_cloudinit.py`,
   `tests/integration/test_{pve,reconciler,sweeper,daemon,gateway}.py`). **Actuation (clone→inject→start→IP→
-  ssh→teardown + the marker reclaim) is proven LIVE on pvenas** via `scripts/live_cloudinit.py` (a throwaway
+  ssh→teardown + the marker reclaim) is proven LIVE on a lab node** via `scripts/live_cloudinit.py` (a throwaway
   template + 99xx clone, fence-safe). TWO adversarial ultracode reviews (6 lenses then 3, each finding
   refuted by 2–3 verifiers) drove the fixes folded in before merge: a HIGH where the clone-orphan reclaim
   deleted on on-host marker state alone (no ledger check) — a clone-TIMEOUT or failover clone→configure
@@ -2702,7 +2702,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   with a fake actuator whose `nextid()` models Proxmox's UNRESERVED `/cluster/nextid`, and asserts
   single-writer holds — a burst of leases each land on a DISTINCT vmid (a second writer would collide),
   committed leases survive on the promoted primary, a daemon re-homes, and leases are reaped; the live
-  one does the same with a real fenced VM on a Proxmox node (proven on pvenas: the guest's lease survives
+  one does the same with a real fenced VM on a Proxmox node (proven on a lab node: the guest's lease survives
   the failover, the daemon re-homes and provisions a second real guest, then reaps). Adversarial review
   (4 dimensions) drove the design: the original single-daemon check was a state-machine tautology (it
   could not catch double-allocation) → rewritten to two daemons + unreserved-nextid; total teardown that
@@ -2773,7 +2773,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   review drove the hardening: `pve_host` is validated (an unvalidated host could redirect the
   token-bearing request — SSRF), a configured-but-unprovisionable node is logged loudly (not a silent
   skip), and the routing destroyer RAISES for an unserved node (→ `RELEASE_FAILED`, never silently
-  drops a lease whose VM lives). Proven live on pvenas (`scripts/harness_multinode.py`: two ledger
+  drops a lease whose VM lives). Proven live on a lab node (`scripts/harness_multinode.py`: two ledger
   nodes route to distinct drivers + a capacity-only node is correctly skipped; teardown verified to
   route through each lease's own driver). Added the redaction covering-test that fills **SECURITY.md
   C2** and a control + residuals for the new node-config trust surface.
@@ -2792,7 +2792,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   wrong/empty `PGCONN`). An adversarial 4-lens review drove the hardening (per-tick leadership re-check
   + keepalives for the double-writer window; the sweep circuit-breaker; a per-tick provision cap; a
   `try/except` so a `nextid()` blip can't abort a tick's reaping; autocommit work connections;
-  `PVEAPIToken=` redaction). Proven **live on pvenas** (`scripts/harness_daemon.py`: a tick provisions a
+  `PVEAPIToken=` redaction). Proven **live on a lab node** (`scripts/harness_daemon.py`: a tick provisions a
   real fenced VM → reaps it on release; the sweep keeps a live guest but destroys a terminal-lease
   orphan). The gateway runs as an MCP server (`python -m br0kr.mcp_server`) alongside the daemon
   (`python -m br0kr.daemon`). Closes `SECURITY.md` C6 (now ✔ — reclamation *runs*), adds C9
@@ -2808,7 +2808,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `begin_provisioning` hands durable teardown to the reaper (`release → RELEASING`; the reaper
   fenced-destroys with retry + grace + `RELEASE_FAILED`), a still-running create (`TIMEOUT`) is left
   for the TTL reaper instead of racing an in-flight build, and a reaped-mid-provision lease only
-  self-destroys when the reaper can no longer own teardown. Proven **live on pvenas**
+  self-destroys when the reaper can no longer own teardown. Proven **live on a lab node**
   (`scripts/harness_reconcile.py` / `bash scripts/run_reconcile.sh`): admit → a real **disk-backed**
   VM → ACTIVE → release → reaper destroys it → capacity freed, on a throwaway vmid with an ephemeral
   token. `pve.provision()` gained `extra_config` (disk/net/cloud-init recipe) and `pve.wait()` now
@@ -2820,7 +2820,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `DirectPveDriver` now stamps each guest at provision with its lease id (PVE tag `br0kr-lease-<id>`)
   and `fenced_destroy()` reads the tag and deletes ONLY on a match; a reused vmid returns
   `fence_mismatch` and is left untouched. The fence DECISION is a pure function unit-tested
-  exhaustively (`tests/integration/test_pve.py`); the REST path is **proven live against pvenas**
+  exhaustively (`tests/integration/test_pve.py`); the REST path is **proven live against a lab node**
   (`scripts/harness_pve_fence.py` / `bash scripts/run_pve_fence.sh` — create → fence-match →
   wrong-lease refused → destroyed → **vmid-reuse zombie-destroy refused**, on a throwaway vmid with an
   ephemeral token). Closes SECURITY.md C6's vmid-reuse residual (now control **C8**).

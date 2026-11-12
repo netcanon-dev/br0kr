@@ -96,7 +96,7 @@ def test_storage_row_derives_disk_available():
     """A storage-pool row computes disk available = total − used and the util %, and surfaces the 0031
     physical binding (cluster_id + effective pve_name = COALESCE(pve_name, id)) and the reachability map.
     Guards a node-only fleet's storage panel being wrong (or crashing) and an oversubscribed pool hidden."""
-    reach = [{"node_id": "pvenas", "verified": True, "quarantined": False}]
+    reach = [{"node_id": "pve2", "verified": True, "quarantined": False}]
     out = inventory._storage_row(("ceph", 1000, "lab1", "ceph-pool", ["import", "images"], 750, 4, reach))
     assert out == {"storage_id": "ceph", "cluster_id": "lab1", "pve_name": "ceph-pool",
                    "disk_gb_total": 1000, "disk_gb_used": 750, "disk_gb_available": 250,
@@ -123,11 +123,11 @@ def test_instance_row_shapes_bound_and_unbound():
     mislabelled bound, plus the vmid/size int-coercion and the created_at ISO/None handling."""
     ts = datetime.datetime(2026, 7, 11, tzinfo=datetime.UTC)
     bound = inventory._instance_row(
-        (7, "debian12", "sam", "pvenas", 9900, "FastStorage", "READY", "seed", 8, ts))
-    assert bound == {"instance_id": 7, "template_id": "debian12", "cluster_id": "sam", "node_id": "pvenas",
+        (7, "debian12", "lab1", "pve2", 9900, "FastStorage", "READY", "seed", 8, ts))
+    assert bound == {"instance_id": 7, "template_id": "debian12", "cluster_id": "lab1", "node_id": "pve2",
                      "vmid": 9900, "storage_id": "FastStorage", "instance_state": "READY", "origin": "seed",
                      "size_gb": 8, "bound": True, "created_at": ts.isoformat()}
-    unbound = inventory._instance_row((8, "debian12", "sam", None, 9900, None, "READY", "seed", None, None))
+    unbound = inventory._instance_row((8, "debian12", "lab1", None, 9900, None, "READY", "seed", None, None))
     assert unbound["bound"] is False and unbound["node_id"] is None and unbound["storage_id"] is None
     assert unbound["size_gb"] is None and unbound["created_at"] is None
 
@@ -312,9 +312,9 @@ def test_lease_row_shapes_active_lease_and_derives_action_flags():
     # (id, project_id, node_id, cluster_id, state, req_cpu, req_mem_mb, storage_id, req_disk_gb,
     #  vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned)
     active = inventory._lease_row((11, "team-a", "n1", "clA", "ACTIVE", Decimal("4"), 8192, None, 0,
-                                   1234, "192.168.11.31", "runner", 61.44, 3500.2, False, False))
+                                   1234, "192.168.1.31", "runner", 61.44, 3500.2, False, False))
     assert active["lease_id"] == 11 and active["state"] == "ACTIVE" and active["vmid"] == 1234
-    assert active["ip_address"] == "192.168.11.31" and active["req_cpu"] == 4.0 and active["age_seconds"] == 61.4
+    assert active["ip_address"] == "192.168.1.31" and active["req_cpu"] == 4.0 and active["age_seconds"] == 61.4
     assert active["expires_in_seconds"] == 3500.2 and active["is_reservation"] is False
     assert active["ci_user"] == "runner"
     assert active["cancellable"] is True and active["renewable"] is True and active["migratable"] is True

@@ -638,7 +638,7 @@ def test_detect_template_bridge_reports_net0_bridge_and_current_identity(monkeyp
         def fetchone(self) -> object:
             if "FROM template WHERE id" in self._sql:
                 return ("lan",)                # the template's currently-declared logical net
-            return ("pvenas", 9900)            # the placed instance (node_id, vmid)
+            return ("pve2", 9900)            # the placed instance (node_id, vmid)
 
         def commit(self) -> None:
             pass

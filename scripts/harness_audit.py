@@ -61,7 +61,7 @@ def check_round_trip() -> bool:
     _truncate()
     with connect() as c:   # a dashboard row first, then (later) an MCP row → MCP is the newest
         audit.record(c, surface="dashboard", action="/api/cancel", actor="dashboard-operator",
-                     params={"lease_id": 7}, target="7", source_ip="192.168.11.20")
+                     params={"lease_id": 7}, target="7", source_ip="192.168.1.20")
     with connect() as c:
         audit.record(c, surface="mcp", action="release_lease", actor="agent", actor_token_id=9,
                      project_id="team-a", scope="consume", target="42", params={"lease_id": 42})
@@ -71,7 +71,7 @@ def check_round_trip() -> bool:
           and rows[0]["surface"] == "mcp" and rows[0]["actor_token_id"] == 9
           and rows[0]["project_id"] == "team-a" and rows[0]["scope"] == "consume" and rows[0]["target"] == "42"
           and rows[1]["surface"] == "dashboard" and rows[1]["actor_token_id"] is None
-          and rows[1]["scope"] is None and rows[1]["source_ip"] == "192.168.11.20")
+          and rows[1]["scope"] is None and rows[1]["source_ip"] == "192.168.1.20")
     return check("round_trip", ok,
                  f"n={len(rows)} order={[r['surface'] for r in rows]} (want mcp then dashboard, newest first)")
 
