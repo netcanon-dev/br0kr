@@ -3,16 +3,20 @@
 The agent-facing gateway (br0kr/gateway.py) is the CAPACITY control plane — agents reserve/renew/release
 their own leases. This module is the separate, OPERATOR control plane: changes to config-as-data rows that
 an agent must never make. It is deliberately a distinct module (not folded into the gateway) so the
-privileged surface is small, isolated, and easy to reason about — exposed ONLY through the dashboard's
-token-gated POST endpoints (br0kr/dashboard.py), never over MCP.
+privileged surface is small, isolated, and easy to reason about — exposed through the dashboard's
+token-gated POST endpoints (br0kr/dashboard.py), a few operator-tier MCP tools (cordon, discovery
+dismissals, the hand-modified template mark, force-failing a build) and the OAuth shim, which mints a
+project token through `create_token` (br0kr/oauth.py); never to a tenant token.
 
-Today it holds ONE verb — `set_project_quota` — plus its pure validator. Editing a project's tenant
-budget is safe with respect to the broker's race-freedom: `admission.admit()` re-reads the project's
-DERIVED availability (limit − Σ active) UNDER its scope lock on every call, so lowering a quota mid-flight
-simply admits less — it can never cause a double-allocation. Lowering a quota below current usage leaves
-existing leases running (they release on their own TTL) and rejects new admits; raising it admits more.
-The `project` table's `CHECK (… > 0)` constraints are the DB backstop; `validate_quota` mirrors them so a
-bad value is a crisp rejection rather than a DB error.
+It holds the operator verbs (clusters, nodes, storage, networks, projects, tokens, dashboard operators,
+templates with their grants and sources, discovery dismissals); numeric and identifier input is checked by a
+pure validator before any write. Editing a project's tenant budget, for example, is safe with respect to the
+broker's race-freedom: `admission.admit()` re-reads the project's DERIVED availability (limit − Σ active)
+UNDER its scope lock on every call, so lowering a quota mid-flight simply admits less — it can never cause a
+double-allocation. Lowering a quota below current usage leaves existing leases running (they release on
+their own TTL) and rejects new admits; raising it admits more. The `project` table's `CHECK (… > 0)`
+constraints are the DB backstop; `validate_quota` mirrors them so a bad value is a crisp rejection rather
+than a DB error.
 
 Following the gateway's convention, the DB verb does NOT commit — the caller owns the transaction (the
 dashboard's action handler commits once), so a write is atomic and a failure rolls back cleanly.

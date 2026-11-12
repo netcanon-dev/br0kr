@@ -162,6 +162,7 @@ button on the migrations panel). It is the confirm-safe sibling of the build-sid
 - [operator-tier.md](operator-tier.md) — minting/using the `operator` token that starts a migration over MCP
 - [/SECURITY.md](../../SECURITY.md) — the migration residual + C8 (fencing) the move reuses, C9 (single-writer)
 - [pdm-api-contract.md](../pdm-api-contract.md) — the assumed PDM REST contract the actuation depends on
-- [../architecture.md](../architecture.md) — roadmap #9 (the saga is its last build step)
+- [../architecture.md](../architecture.md#roadmap) — roadmap #9 (the saga is its last build step); the long form is
+  [../designs/runtime.md](../designs/runtime.md#3-dormant-cross-cluster-migration)
 - [ledger-ha.md](ledger-ha.md) — single-primary is load-bearing for the daemon that drives the saga
 - `br0kr/migration.py` — the saga; `br0kr/pdm.py` — the actuator; `br0kr/admission.py` — the re-debit

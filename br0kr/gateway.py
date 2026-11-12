@@ -8,12 +8,11 @@ same functions. Each takes a DB connection and returns a plain JSON-able dict â€
 transport, no framework, so the wiring is unit-testable and the interface choice is
 not baked into the logic.
 
-Scope today is the CONTROL PLANE: admission control + lease lifecycle. A granted
-lease is a capacity RESERVATION (state ADMITTED). Turning it into a real VM (the
-reconciler provisioning step) is roadmap #6 â€” so `request_lease` returns the lease id
-and state, and an agent heartbeats/releases it; provisioning happens out of band until
-that lands. The status tool surfaces the lease state so a caller can see ADMITTED
-(reserved) vs ACTIVE (provisioned, once the reconciler is wired).
+This is the CONTROL PLANE: admission control + lease lifecycle. A granted lease is a
+capacity RESERVATION (state ADMITTED); the leader daemon's reconciler (br0kr/reconciler.py)
+turns it into a real VM out of band. So `request_lease` returns the lease id and state, an
+agent heartbeats/releases it, and the status tool shows ADMITTED (reserved) vs ACTIVE
+(provisioned).
 
 ADMIT_OUTCOMES (`br0kr_admit_total{tool,outcome}`) counts the request_lease / schedule_lease answers. The MCP
 tools increment it at the agent-facing boundary (br0kr/mcp_server.py), so a failure in the layer around these

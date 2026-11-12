@@ -9,7 +9,7 @@ This is the synth-FINAL: the synth-critic pass returned recommendation_clear=Tru
 adversarial finding to an adopted fix.
 Raw per-agent artifacts (3 designs, 151 findings, 8 research reports, the critique) persist in
 _template-sharing-run-wf_6089a7c3-569.journal.jsonl beside this file.
-Status: DESIGN for review — NOT an approved plan. No code has been written.
+Status: DESIGN for review — NOT an approved plan. No code has been written. (Since built: see §12, As built.)
 NEXT GATE: AskUser on approach + schema before any implementation (schema + new-surface +
 safety-critical: touches admit(), the per-cluster vmid fence, storage quota, no-orphan, PDM).
 -->
@@ -446,3 +446,74 @@ A per-tick leader sweep over PENDING leases with `awaiting_replication_id`:
 | i | Whether `/cluster/nextid` can collide with unmanaged guests on node-b (the 99xx throwaway convention) — confirms the PVE-create-failure arbitration story | vmid model residual |
 
 Every checklist item is executed from the deploy host against node-b with an ephemeral PVE token (piped host-to-host, never to transcript, revoked after), per standing rules; no item blocks PR-0…PR-5, which are safe (and the bug is dead — refused up front by declarations, and runtime-asserted at every clone — ) without any of them.
+
+## 12. As built: the component notes (moved from architecture.md)
+
+These notes were the component entries in [../architecture.md](../architecture.md), moved here word for word by review
+DOCS-03 (their links re-pointed, and a label added where a note was split), so they keep the migration numbers, PR
+labels and harness tallies they were written with. The discovery half of the placement-gate note is in
+[storage-network-discovery.md](storage-network-discovery.md) §12; the rest of the runtime is in [runtime.md](runtime.md).
+
+- **Template placement gate (`br0kr/placement.py`, `db/migrations/0031..0042`)** — a clone's disk must land
+  on a pool the target node PHYSICALLY reaches, AND (cross-node) its `net0` is REWRITTEN to a bridge that exists
+  there. `storage` gains a physical identity (`cluster_id`, `pve_name`) + a per-node `storage_node` reachability
+  map (operator-DECLARED, so adding a node reaches nothing until declared — fail-closed); a fleet-global
+  `logical_network` identity + a per-node `network_node(node, logical_network) → bridge` map add the NETWORK twin
+  (0039, re-keying 0038's raw `node_bridge`/`required_bridge` onto the identity so a cross-node clone rewrites
+  `net0` to THIS node's own bridge for the template's net); a logical `template` fans out to physical
+  `template_instance` rows (which `(cluster, node, storage, vmid)` actually holds a cloneable copy). For a
+  templated ask, `admit()` (and `promote_pinned`, through the same `_locked_fit`) resolves — under the node lock — the usable instance
+  (node-local, or a shared-storage instance on another node in the SAME cluster when the `cross_node_clone` knob
+  is ON, 0037) + the clone-storage (the DEBITED row's `pve_name`, never redirected off it), fail-closed on
+  `no_reachable_instance` / `storage_unreachable_from_node` / `linked_clone_storage_pinned` / `storage_unbound`
+  / (cross-node) `template_bridge_undeclared` / `network_unreachable_from_node` / (opt-in, 0042) `storage_not_capable`
+  (the target pool isn't `images`-capable — behind the default-OFF `clone_content_enforcement` knob, evaluated in
+  the admit/recheck lockstep via the SAME `content_capable` the build path uses), and STAMPS
+  `(template_instance_id, clone_storage_id)` on the lease BELOW the idem-key surface (I6 — a retry that
+  re-resolves is not a conflict). The daemon RE-CHECKS the stamped triple before every clone (holds an
+  unplaceable lease with a `hold_reason`, never substitutes, bounded auto-release), then RE-READS the guest
+  config after the clone and ASSERTS the disk landed where the gate resolved — a mismatch releases the fenced
+  guest (`cross_provision_detected`), audits, and quarantines the pair. `br0kr/placement.py` is the ONE shared
+  predicate imported by admission + scheduler + daemon so the ordering snapshot and the enforcement never
+  diverge. `BR0KR_VM_CLONE_STORAGE` retired; clone placement is now per-lease. Proven on real Postgres
+  (`scripts/harness_placement.py`).
+- **Template replication control plane (`br0kr/replication.py`, `db/migrations/0034`)** — when the placement
+  gate refuses a clone because no copy of the template is reachable, a template must be COPIED onto a pool the
+  target node reaches. `template_replication` is the async job that records + tracks such a copy (which
+  template, onto which `(cluster, storage)`, by which mechanism, and its `REQUESTED→COPYING→CONVERTING→READY |
+  FAILED (+RECLAIMING)` lifecycle — build.py's guarded-CAS shape). This is the CONTROL PLANE only:
+  `gateway.request_replication` (the shared entrypoint the operator MCP verb `replicate_template` and the
+  dashboard act-as path both call) SIMULATES the post-copy placement so a job is never created that couldn't
+  yield a usable copy, then inserts a REQUESTED row under a `replication_one_active` unique index (a duplicate →
+  `replication_in_progress`); `cancel_replication` (REQUESTED-only), `replication_status`, `list_replications`,
+  and the retention verb `prune_replications` (settled-terminal only, severing the `lease.awaiting_replication_id`
+  waiter FK first) complete the surface. `admin.delete_cluster` gains the decommission recipe
+  (`cluster_has_instances` / `cluster_has_replications`).
+- **Template replication DATA PLANE (PR-5; `br0kr/replication.py`, `br0kr/daemon.py`, `br0kr/pve.py`,
+  `db/migrations/0035`) — the `clone_shared` leader engine, OFF by default (`BR0KR_REPLICATE_LIMIT`).** The
+  leader daemon advances each job as a resumable saga built on the migration saga's recipe: the target
+  storage-byte **reservation goes THROUGH `admit()`** (a deterministic reserved idem-key `br0kr-repl-<id>`, the
+  same column shape the `br0kr-mig-` reservation admits, on a dedicated non-autocommit connection, heartbeated
+  with lapse→abort, settled-by-key) — so the ADMISSION GATE ITSELF IS UNTOUCHED (no new scope). The copy is
+  fenced `br0kr-repl-<id>` (the clone-orphan sweep spares its vmid), runs the same post-copy disk-location
+  assertion as the lease path (`landed_wrong_pool` → quarantine + reclaim), converts under a re-checked fence,
+  and marks the twin `template_instance` READY in one atomic CTE (the single-debit handoff). Stale/wedged jobs
+  are reclaimed destroy-first on the stamped node; `force_fail_replication` is the operator escape hatch; a
+  level-triggered waiter sweep rejects a lease parked behind a FAILED job; a `(template, target)` cooldown
+  (0035) throttles a failing target. Proven on real Postgres + a fake PVE driver
+  (`scripts/harness_replicate_data.py`). See
+  [designs/template-sharing-cross-cluster.md](template-sharing-cross-cluster.md) §5.
+- **`rebuild_source` mechanism + template SOURCE PROVENANCE (PR-6; `db/migrations/0040`, `br0kr/replication.py`,
+  `br0kr/pve.py`, `br0kr/build.py`).** The SECOND replication mechanism, for a target cluster where no shared
+  copyable instance exists: instead of cloning an existing instance it REPLAYS the template's original build
+  (`download_image → build_template_vm → make_template`, `pve.rebuild_replica_vm` under the repl fence) on a node
+  chosen by `reach(node, target_storage)` — needing NO source instance. It plugs into the SAME saga (only the
+  COPY step differs, `_do_copy_rebuild`; resume ADOPTS an existing guest via `driver.exists`). Eligibility is
+  provenance-gated (`template.source_url`/`source_sha256`/`source_dirty`, 0040, backfilled from `template_build`
+  history + forward-stamped by `build.mark_ready`): `source_not_replicable` (no provenance), `source_hand_modified`
+  (the operator `source_dirty` attestation — a hand-edited built template; `force_source_dirty` overrides),
+  `no_replication_path` (no reaching node). `admin.set_template_source_dirty` / MCP `mark_template_source_dirty`
+  is the attestation verb; `inventory.list_templates` surfaces `replicable` + `source_dirty`. Also retrofits
+  `template_build.error` redaction. Both mechanisms need the `replication_mechanisms` knob allowlist (default
+  `clone_shared`); the engine stays OFF by default. Proven `scripts/harness_rebuild_source.py`; not
+  live-verified (PR-7). See §5.2/§10.14.

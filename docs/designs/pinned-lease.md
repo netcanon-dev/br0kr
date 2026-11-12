@@ -4,7 +4,8 @@
 lease can be pinned until an operator allows it. Code: [br0kr/pin.py](../../br0kr/pin.py). Proof:
 `scripts/harness_lease.py` (the `pin*` checks, real Postgres) and `tests/unit/test_pin.py`.
 
-See also: [../architecture.md](../architecture.md#lease-lifecycle), [admission-queue.md](admission-queue.md),
+See also: [../architecture.md](../architecture.md#lease-lifecycle), [runtime.md](runtime.md#2-provisioning-and-teardown),
+[admission-queue.md](admission-queue.md),
 [../../SECURITY.md](../../SECURITY.md), [../runbooks/connecting-an-agent.md](../runbooks/connecting-an-agent.md).
 
 ## 1. Why

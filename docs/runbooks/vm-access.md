@@ -9,8 +9,8 @@ It is **off by default** (no template configured → today's create-blank shell,
 per request** (no `ssh_pubkey` → a fenced shell). Nothing here touches the admission/double-allocation
 path: the cloud-init fields debit no capacity scope.
 
-See also: [docker-deploy.md](docker-deploy.md) (deploying the daemon + env), [../architecture.md](../architecture.md)
-(lease lifecycle + provisioning), [../../SECURITY.md](../../SECURITY.md) (the trust model + residuals).
+See also: [docker-deploy.md](docker-deploy.md) (deploying the daemon + env), [../architecture.md](../architecture.md#lease-lifecycle)
+(lease lifecycle), [../designs/runtime.md](../designs/runtime.md#2-provisioning-and-teardown) (provisioning), [../../SECURITY.md](../../SECURITY.md) (the trust model + residuals).
 
 ---
 

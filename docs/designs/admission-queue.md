@@ -5,7 +5,7 @@
 or over a project quota) is parked and admitted **automatically** when room frees — instead of the
 agent busy-polling `request_lease` in a retry loop.
 
-See also: [architecture.md](../architecture.md) (the admission transaction), `db/migrations/0001_baseline.sql`
+See also: [architecture.md](../architecture.md) (the admission transaction), [runtime.md](runtime.md) (the queue's component note), `db/migrations/0001_baseline.sql`
 (the `lease_state` enum already reserves `PENDING` "for a future admission queue").
 
 ---

@@ -327,3 +327,36 @@ all three lenses — the fixes (the `storage_id`-is-a-raw-name resolver, the fou
 catch, `import`+`images`, the PR-A2 split, the confirm guards, the deploy sequencing, the harness update) are
 folded into §3–§9 above. The design *decisions* (pool grain, declared-only trust, computed-on-read, the partial
 vmbr verdict) survived review unchanged.
+
+## 12. As built: declaration reconcile and discovery (moved from architecture.md)
+
+These notes were the component entries in [../architecture.md](../architecture.md), moved here word for word by review
+DOCS-03 (their links re-pointed, and a label added where a note was split), so they keep the migration numbers, PR
+labels and harness tallies they were written with. The placement gate this half belongs to is in
+[template-sharing-cross-cluster.md](template-sharing-cross-cluster.md) §12.
+
+- **Declaration reconcile and discovery (`br0kr/placement.py`; the second half of the placement-gate note)** — Two operator MCP verbs reconcile the DECLARED `storage_node` rows against
+  PVE's live view: `verify_declarations` (narrow-only — auto-quarantines a declared pair PVE reports
+  `enabled=0`, OR — since 0041/PR-E — one whose live `content` dropped the CLONE-relevant declared token
+  `images`, the actuation companion to the content gate: `content_capability_quarantined`, keyed on the clone
+  requirement {images} not the build set so a build-only `import` drop never false-quarantines a clone-capable
+  pool, and bounded to a positive observed content set) and
+  its widen-half twin `discover_reachability` (0041/PR-B — read-only, computed-on-read; REPORTS
+  new-node widen candidates / unknown pools / disabled/absent/inactive declarations / content drift + first-class
+  `acl_denied_nodes`/`unserved_nodes`, but WRITES NOTHING — the operator confirms via the dashboard's single-pair
+  `add`/`remove_storage_node`). They share one PVE-gather (`placement._gather_node_views`) with verify's
+  all-or-nothing ACL abort preserved. `discover_reachability` ALSO carries a network read-side (0041/PR-C): a raw
+  per-node `bridge_menu` + `declared_missing_bridge` (a declared `network_node` bridge PVE does not present) from
+  `pve.list_node_bridge_details` — read-only, still writing nothing (the operator's `set_network_node` remains the
+  only writer). The report also carries `bridge_suggestions` (§6): the one deliberately-labeled NAME-COINCIDENCE
+  HINT — a prefill for `set_network_node`, tagged `basis:"name_coincidence"`, NEVER an authoritative mapping
+  (same-name ≠ same-L2 is unobservable from PVE, so the operator must verify the L2 out of band; the net0 assertion
+  backstops only bridge absence). Report-only, not a drift bucket. Since 0043/PR-G the daemon can run `discover_reachability` on an
+  OPT-IN wall-clock cadence (`discovery_interval_seconds` knob, default 0 = off) and LOG the drift + publish a
+  `discovery_drift` gauge, so drift is seen on a schedule without hand-running the verb — REPORT-ONLY, it writes
+  nothing (a future `auto_confirm` on any discovery cadence is FORBIDDEN, design §11). Since 0044/PR-H an operator
+  can DISMISS a known-benign finding (`dismiss_discovery_finding` / `clear_discovery_dismissal`, keyed on
+  `(kind, node_id, subject)`) so it is filtered out of the report into a `dismissed` roster — pure reporting
+  suppression, the `discovery_dismissal` table is read only by `discover_reachability` and no gate reads it. See
+  SECURITY.md C18 and
+  [designs/template-sharing-cross-cluster.md](template-sharing-cross-cluster.md).

@@ -503,4 +503,4 @@ recorded in the audit log.
 - [runbooks/connecting-an-agent.md](runbooks/connecting-an-agent.md): connecting an agent, or a CI job through `scripts/br0kr_mcp_call.py`
 - [runbooks/operator-tier.md](runbooks/operator-tier.md): the operator token and the operator gateway
 - [runbooks/docker-deploy.md](runbooks/docker-deploy.md): the dashboard's tokens and the stack's ports
-- [architecture.md](architecture.md): how the gateway and the dashboard sit above admission
+- [designs/surfaces.md](designs/surfaces.md): how the gateway and the dashboard sit above admission

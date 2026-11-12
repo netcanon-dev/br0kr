@@ -357,7 +357,8 @@ below) and do the sweep dry-run before resuming teardown.
 - [day2-operations.md](day2-operations.md) — the backup schedule, rolling back across a migration, re-cloning a standby
 - [docker-deploy.md](docker-deploy.md) — the Compose stack that wires this HA topology (the bundled primary+standby starter; §9 the stretched/DR standby over the mesh)
 - [/SECURITY.md](../../SECURITY.md) — C9 single-writer + the split-brain residual
-- [../architecture.md](../architecture.md) — roadmap item #9 (ledger HA)
+- [../architecture.md](../architecture.md#the-shape) — the leader and HA model; roadmap item #9 (ledger HA) as built is in
+  [../designs/runtime.md](../designs/runtime.md#4-roadmap-history)
 - `br0kr/db.py` — the connection seam (keepalives in both directions, retry, classifier)
 - `scripts/backup_ledger.sh` — the logical-backup tool this runbook drives
 - `scripts/restore_ledger.sh` — the restore drill as one command

@@ -21,7 +21,7 @@ docs/
 │   └── reason-codes.md        # every reason code an agent can receive, and what to do about it
 ├── status.md                  # what is built, dormant and next, per feature (status-legended)
 ├── pdm-api-contract.md        # the assumed Proxmox Datacenter Manager API (unverified)
-├── designs/                   # per-feature design specs (status-legended)
+├── designs/                   # per-feature design specs, and each component's long form (runtime.md, surfaces.md)
 ├── runbooks/                  # operator procedures (deploy, HA, connect an agent, …)
 └── reviews/                   # FROZEN evidence trail from reviews/audits
     └── <UTC-date>-<slug>.md   # one file per review run; EXPECTED-STALE by design
@@ -64,6 +64,7 @@ docs/
 - [runbooks/operator-tier.md](runbooks/operator-tier.md) — minting/using the cross-tenant `operator` MCP token (cordon + migrate + fleet observability)
 - [runbooks/vm-access.md](runbooks/vm-access.md) — handing an agent SSH access to its VM via cloud-init (its own public key)
 - [architecture.md](architecture.md) — the broker's plan of record
+- [designs/runtime.md](designs/runtime.md) and [designs/surfaces.md](designs/surfaces.md) — each component in full: the runtime, and the agent and operator surfaces
 - [status.md](status.md) — what is built, dormant and next, per feature, with the harness that proves each
 - [/scripts/README.md](../scripts/README.md) — the harness catalogue and the operator tools
 - [standards/documentation.md](standards/documentation.md) — the full doctrine

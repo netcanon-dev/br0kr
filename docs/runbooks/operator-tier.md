@@ -215,4 +215,5 @@ migration as pre-wired, not proven-live.
 - [cross-cluster-migration.md](cross-cluster-migration.md) — the migration saga `migrate_lease` triggers, and how to enable + live-verify it
 - [docker-deploy.md](docker-deploy.md) — §10 the optional Caddy TLS front that encrypts the bearer
 - [vm-access.md](vm-access.md) — the tenant (agent) side: reserving a lease + SSHing into its guest
+- [../designs/surfaces.md](../designs/surfaces.md) — how the gateway, its auth tiers and the dashboard sit above admission
 - `br0kr/auth.py` — `tier_allows` (the parallel operator rule); `br0kr/mcp_server.py` — the operator-only verbs (`@_operator_tool`); `br0kr/admin.py` — `create_token` / `revoke_token`

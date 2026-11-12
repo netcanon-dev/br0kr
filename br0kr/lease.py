@@ -546,9 +546,9 @@ def claim_releasing(
 
     IMPORTANT: this makes the *ledger* single-claimant, not the *guest destroy*
     itself. Across grace windows (a destroy that stalls >grace, then resumes) the
-    same vmid could still be DELETEd twice; making the destroy truly idempotent
-    against vmid reuse needs per-VMID fencing (roadmap #4). Until then the reaper
-    treats destroy as best-effort-retried and gives up to RELEASE_FAILED.
+    same vmid could still be DELETEd twice; per-VMID fencing (`pve.fenced_destroy`,
+    roadmap #6) makes the second DELETE of a reused vmid a refused `fence_mismatch`.
+    The reaper still treats destroy as best-effort-retried and gives up to RELEASE_FAILED.
     """
     rows = conn.execute(
         """WITH due AS (

@@ -341,4 +341,5 @@ Codes only the operator tools answer, outside the request path's vocabulary.
   retry and queue loop
 - [../api.md](../api.md): every MCP tool (tier, parameters) and dashboard route, generated from the code
 - [../runbooks/alerts.md](../runbooks/alerts.md): the operator's side of holds, stuck queues and failed releases
-- [../architecture.md](../architecture.md): the reason vocabulary (`br0kr/reasons.py`) and how admission uses it
+- [../designs/runtime.md](../designs/runtime.md#1-the-ledger-and-admission): the reason vocabulary (`br0kr/reasons.py`)
+  and how admission uses it

@@ -318,4 +318,4 @@ Every code an answer can carry, with the agent's next step and the operator's le
 - [docker-deploy.md](docker-deploy.md) — deploying the gateway (and the optional TLS termination) with Docker Compose
 - [/README.md](../../README.md) — the external front door (install and run, the feature table)
 - [/SECURITY.md](../../SECURITY.md) — the agent-token trust model + the cleartext-bearer control (C12)
-- [../architecture.md](../architecture.md) — how the gateway sits above admission
+- [../designs/surfaces.md](../designs/surfaces.md) — how the gateway sits above admission

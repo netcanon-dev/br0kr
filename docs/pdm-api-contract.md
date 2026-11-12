@@ -124,7 +124,8 @@ is this contract's reconciliation (steps 1–3 at the top) plus a live proof. Se
 `docs/runbooks/cross-cluster-migration.md`, `docs/architecture.md` (roadmap #9), and `SECURITY.md`.
 
 ## See also
-- [architecture.md](architecture.md) — the PDM driver component + roadmap #9
+- [architecture.md](architecture.md#roadmap) — roadmap #9; the PDM driver's long-form note is in
+  [designs/runtime.md](designs/runtime.md#3-dormant-cross-cluster-migration)
 - [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md) — the lease-migration saga that consumes this contract
 - [/SECURITY.md](../SECURITY.md) — the PDM actuation-surface residual (validate `pdm_endpoint`, token in env)
 - [runbooks/ledger-ha.md](runbooks/ledger-ha.md) — the config-as-data + secret-in-env pattern this mirrors

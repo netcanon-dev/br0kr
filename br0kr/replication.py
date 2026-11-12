@@ -2,20 +2,20 @@
 
 A `template_replication` row (migration 0034) tracks copying a logical template's physical guest onto another
 storage pool, so a node that cannot reach the original can clone from a local copy (the reachability arc,
-docs/designs/template-sharing-cross-cluster.md §5). This module is the ledger half — the request-eligibility
-planner, the guarded-CAS transitions PR-4 exercises, and the reads — kept separate from the (not-yet-built)
-ACTUATION and the OPERATOR surface (br0kr/mcp_server.py + br0kr/dashboard.py). It is the exact shape of
+docs/designs/template-sharing-cross-cluster.md §5). This module holds the ledger half — the request-eligibility
+planner, the guarded-CAS transitions and the reads — and, further down, the DATA PLANE the leader daemon drives
+(`run_pending_replications`, `reclaim_stale_replications`; design doc §12). The OPERATOR surface stays in
+br0kr/mcp_server.py + br0kr/dashboard.py. It is the exact shape of
 br0kr/build.py: a job holds NO lease/capacity scope and takes NO admission lock in the control plane; it is
 made safe by a guarded CAS on every transition + the `replication_one_active` unique index (so two requests
 can't race the same target) + the single leader-writer (in the data plane).
 
-WHAT PR-4 SHIPS (control plane only): `request_replication` composes eligibility + the REQUESTED insert (via
+THE CONTROL PLANE: `request_replication` composes eligibility + the REQUESTED insert (via
 br0kr/gateway.py); `cancel_replication` CASes a REQUESTED job → FAILED (no teardown — it never had a guest);
-`replication_status` / `list_replications` read; `prune_replications` is the retention verb. NO daemon step
-advances a job — the DATA PLANE (the clone tick, the admit() byte reservation, the fence + post-copy placement
-assertion, the READY/RECLAIMING transitions, and the waiter coupling) arrives in a LATER PR. A REQUESTED job
-therefore holds nothing; `replication_enabled()` reads the leader-published fact (DORMANT here → False) so the
-request surface honestly tells a caller the engine is off.
+`replication_status` / `list_replications` read; `prune_replications` is the retention verb. A REQUESTED job
+holds nothing until the data plane advances it, which runs only with `BR0KR_REPLICATE_LIMIT` > 0;
+`replication_enabled()` reads the leader-published fact, so the request surface tells a caller when the engine
+is off.
 
 The CALLER owns the transaction/commit for the WRITE verbs — insert_replication / cancel_replication /
 prune_replications (the gateway composes request+insert in ONE txn; the MCP tool / dashboard `_action` commits

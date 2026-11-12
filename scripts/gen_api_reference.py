@@ -192,7 +192,7 @@ def render() -> str:
             " through `scripts/br0kr_mcp_call.py`",
             "- [runbooks/operator-tier.md](runbooks/operator-tier.md): the operator token and the operator gateway",
             "- [runbooks/docker-deploy.md](runbooks/docker-deploy.md): the dashboard's tokens and the stack's ports",
-            "- [architecture.md](architecture.md): how the gateway and the dashboard sit above admission"]
+            "- [designs/surfaces.md](designs/surfaces.md): how the gateway and the dashboard sit above admission"]
     return "\n".join(head + _render_tools() + _render_dashboard() + tail) + "\n"
 
 
