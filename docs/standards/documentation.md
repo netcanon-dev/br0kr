@@ -1,7 +1,10 @@
 # Documentation standards
 
+> Inherited from the netcanon-dev project-scaffold kit and adapted for br0kr; it does not track the kit.
+> br0kr's never-break rules are in [AGENTS.md](../../AGENTS.md).
+
 Binding documentation doctrine for this repo. Follow it every session without
-being asked. The never-break subset is mirrored in [/CLAUDE.md](../../CLAUDE.md);
+being asked. The never-break subset is mirrored in the Hard Rules;
 this file is the full rationale.
 
 The throughline: **documentation is a first-class, tested deliverable, not an
@@ -100,7 +103,7 @@ lets a stranger extend the subsystem without reverse-engineering it.
 
 The README is the **front door, not the whole house**: orientation + a "What's
 here" path table + a quickstart, then it points at the architecture doc of
-record for the *why*. See [README.template.md](../../README.template.md).
+record for the *why*. [README.md](../../README.md) is br0kr's.
 
 ### 1e. Governance docs
 
@@ -110,7 +113,7 @@ record for the *why*. See [README.template.md](../../README.template.md).
 - **SECURITY.md** — every control maps to **the file that implements it and the
   check that proves it**, plus an accepted-risks table and an explicit "update
   this document when…" trigger list. *Security claims without a covering check
-  are not claims.* (Covered in the security dimension of the scaffold.)
+  are not claims.* (Covered in [security-and-hygiene.md](security-and-hygiene.md).)
 
 ---
 
@@ -136,7 +139,7 @@ Observed consistently across the source repos:
 
 Docs rot silently. Three mechanical guards keep them honest:
 
-1. **The Documentation Sync Checklist** (in [CLAUDE.md](../../CLAUDE.md)) — a
+1. **The Documentation Sync Checklist** (in [AGENTS.md](../../AGENTS.md)) — a
    `change X -> touch Y` table, updated in the **same commit** as the change.
    Every row exists because someone once shipped drift by forgetting it.
 2. **Cross-reference reciprocity** — when you add a doc, add the reciprocal
@@ -153,17 +156,16 @@ added and not find its rationale, there's a doc gap to close.*
 
 ## 4. Two contributor-directive files
 
-- **[CLAUDE.md](../../CLAUDE.md)** is the canonical, loaded-every-session
-  directive file: overview -> core doctrine -> Hard Rules -> the Documentation
-  Sync Checklist -> the before-you-commit checklist. It is the *binding
-  summary*; full rationale lives here in `docs/standards/`.
-- **[AGENTS.md](../../AGENTS.md)** is a thin, tool-agnostic pointer to CLAUDE.md
-  under the emerging cross-tool convention name, so *any* assistant or human
-  finds the same rulebook. The rules are identical regardless of who authored a
-  change.
+- **[AGENTS.md](../../AGENTS.md)** is the canonical directive file, under the
+  cross-tool convention name so *any* assistant or human finds the same
+  rulebook: overview -> core doctrine -> Hard Rules -> the Documentation Sync
+  Checklist -> the before-you-commit checklist. It is the *binding summary*;
+  full rationale lives here in `docs/standards/`.
+- **[CLAUDE.md](../../CLAUDE.md)** is a short pointer that imports AGENTS.md
+  (`@AGENTS.md`), because Claude Code loads CLAUDE.md every session. The rules
+  are identical regardless of who authored a change.
 
 ## See also
-- [/CLAUDE.md](../../CLAUDE.md) — the never-break subset + the sync checklist
+- [/AGENTS.md](../../AGENTS.md) — the never-break subset + the sync checklist
 - [docs/README.md](../README.md) — the `docs/` tree skeleton
-- [/README.template.md](../../README.template.md) — the external-README shape
 - [/CHANGELOG.md](../../CHANGELOG.md) — the changelog discipline

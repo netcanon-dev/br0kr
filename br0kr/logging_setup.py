@@ -67,7 +67,7 @@ REDACTED = "[REDACTED]"
 
 # Substring-matched, case-insensitive. Specific enough that a substring hit is
 # almost always sensitive ("first_name" not bare "name", so "filename" /
-# "username" are spared). TUNE: add your project's secret + PII key names.
+# "username" are spared). Add a key name here when a new secret or PII field appears.
 _SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = (
     # secrets / credentials
     "password", "passwd", "secret", "api_key", "apikey", "authorization",

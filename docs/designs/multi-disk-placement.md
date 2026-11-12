@@ -215,7 +215,7 @@ admit and recheck share, **untouched**.
 
 The boot disk **stays exactly where it is** (`lease.storage_id` / `req_disk_gb` / `clone_storage_id` = disk 0),
 byte-identical, zero backfill. Data disks are additive child rows — a new capability is a new table, never a
-widened hub row (CLAUDE.md doctrine).
+widened hub row (AGENTS.md doctrine).
 
 ```sql
 -- 0046_lease_data_disk.sql

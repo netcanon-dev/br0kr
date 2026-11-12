@@ -7,9 +7,10 @@ capacity or a real guest, so the contribution shape is opinionated.
 
 ## Before you write code
 
-- Read [CLAUDE.md](CLAUDE.md) (the same rules are indexed from
-  [AGENTS.md](AGENTS.md) for other tools). Its **Hard Rules** are never-break;
-  a PR that crosses one will be asked to change, however small.
+- Read [CONVENTIONS.md](CONVENTIONS.md) next: the one-page doctrine, which
+  points on to [docs/standards/](docs/standards/) for the reasons. The
+  never-break **Hard Rules** are in [AGENTS.md](AGENTS.md); a PR that crosses
+  one will be asked to change, however small.
 - For a non-trivial change, open an issue first so the design can be agreed
   before the code exists.
 - Security or privacy problems are **never** public issues: report them

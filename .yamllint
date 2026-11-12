@@ -19,7 +19,7 @@ rules:
   braces:
     max-spaces-inside: 1    # allow `{ key: value }` flow maps
 
-# Skip generated / vendored / secret trees. Add paths your repo renders or vendors.
+# Skip generated / vendored / secret trees.
 ignore: |
   .venv/
   **/*.generated.yml

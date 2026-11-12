@@ -1,6 +1,9 @@
 # Logging & Observability Standard
 
-> Drop-in doctrine for **br0kr**. The reference implementation that
+> Inherited from the netcanon-dev project-scaffold kit and adapted for br0kr; it does not track the kit.
+> br0kr's never-break rules are in [AGENTS.md](../../AGENTS.md).
+
+> Doctrine for **br0kr**. The reference implementation that
 > encodes these rules is [`br0kr/logging_setup.py`](../../br0kr/logging_setup.py);
 > a worked example is in [`examples/logging_usage.py`](../../examples/logging_usage.py).
 >
@@ -160,7 +163,7 @@ level     # §3
 run_id    # §2 — the correlation key, the cross-silo join
 ```
 
-plus a small number of **domain dimensions** for your app (keep them few and
+plus a small number of **domain dimensions** for br0kr (keep them few and
 bounded).
 
 - **Never** a high-cardinality value (a full id space, a URL, a body) as a

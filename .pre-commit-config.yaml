@@ -7,8 +7,8 @@
 # never-commit-secrets rule). CI re-runs gitleaks over FULL history as a backstop.
 #
 # Keep the hook set lean and fast — anything slow (full test suite, e2e) belongs
-# in CI, not here. Heavier static analysis (ruff, mypy) runs in CI; add it here
-# too only if your team wants it enforced pre-commit.
+# in CI, not here. Heavier static analysis (ruff, mypy) runs in CI and in
+# tests/validate.sh, the gate to run before committing.
 #
 # Pin `rev:` to a tag and let Dependabot/`pre-commit autoupdate` bump it.
 repos:
@@ -30,9 +30,8 @@ repos:
         args: ["--allow-multiple-documents"]
 
   # ---------------------------------------------------------------------------
-  # OPTIONAL — uncomment to enforce lint/format locally (CI runs these anyway).
-  # Greenfield repos (e.g. br0kr) should turn these ON from commit 1 so the tree
-  # never accumulates drift. Config lives in pyproject.toml [tool.ruff].
+  # Off: CI and tests/validate.sh run ruff on every change. Uncomment to also run it on commit.
+  # Config lives in pyproject.toml [tool.ruff].
   # ---------------------------------------------------------------------------
   # - repo: https://github.com/astral-sh/ruff-pre-commit
   #   rev: v0.15.0

@@ -129,7 +129,7 @@ jobs:
       - name: pytest (offline — e2e/slow excluded; the hermetic default)
         # The PR gate runs the fast, hermetic tiers. Slow/e2e tiers (real
         # browser, live service) run in a dedicated job or out-of-band so the
-        # gate stays fast. Coverage targets your package(s).
+        # gate stays fast. Coverage targets the br0kr package.
         run: pytest -m "not e2e and not slow" --cov=br0kr --cov-report=term-missing
 
   harness:

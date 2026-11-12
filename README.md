@@ -84,6 +84,6 @@ reconciler (one holds the leader lock), `br0kr-gateway` serves agents over MCP (
 
 Run the gate CI runs before you commit: `bash tests/validate.sh` (lint · secret-scan · types · unit ·
 test-docs). Tests, docstrings, logging and docs land in the same commit as the change; stale docs are a bug.
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) for a first PR, then [CLAUDE.md](CLAUDE.md) (the hard rules)
-and [CONVENTIONS.md](CONVENTIONS.md). Everyone follows the [Code of Conduct](CODE_OF_CONDUCT.md); report a
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for a first PR; it leads on to
+[CONVENTIONS.md](CONVENTIONS.md) and the hard rules in [AGENTS.md](AGENTS.md). Everyone follows the [Code of Conduct](CODE_OF_CONDUCT.md); report a
 vulnerability as [SECURITY.md](SECURITY.md) describes. Licensed under [Apache-2.0](LICENSE).

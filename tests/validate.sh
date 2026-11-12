@@ -5,8 +5,6 @@
 # tool that is missing also fails — so CI never silently loses a check.
 #
 # Add a check: append one `step` line. Never edit the runner functions.
-# Swap per language: the lint / types / unit steps below are the examples to
-# replace (Python shown). Keep the secret-scan + test-docs steps language-agnostic.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 STRICT="${1:-}"
@@ -27,7 +25,7 @@ step() { # name  present(0=yes)  command...
 PY="$(command -v python3 || command -v python || true)"
 
 # ── lint ──────────────────────────────────────────────────────────────────────
-# SWAP per language: ruff (py) -> eslint / golangci-lint / cargo clippy / ...
+# ruff, configured in pyproject.toml [tool.ruff]
 have ruff; step lint $? ruff check .
 
 # ── secret-scan ───────────────────────────────────────────────────────────────
@@ -40,11 +38,10 @@ step secret-staged 0 bash -c '
   exit 0'
 
 # ── types ─────────────────────────────────────────────────────────────────────
-# SWAP per language: mypy (py) -> tsc --noEmit / go vet / ...
+# mypy, configured in pyproject.toml [tool.mypy]
 have mypy; step types $? mypy br0kr
 
 # ── unit (the hermetic test suite) ────────────────────────────────────────────
-# SWAP per language: pytest (py) -> npm test / go test ./... / cargo test
 # e2e/slow excluded — the offline default (docs/standards/testing.md §2-3).
 # Skipped gracefully if pytest isn't installed; CI installs tests/requirements-dev.txt.
 if [ -n "$PY" ] && "$PY" -m pytest --version >/dev/null 2>&1; then

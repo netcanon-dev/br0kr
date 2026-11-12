@@ -1,5 +1,8 @@
 # Security & Repo-Hygiene Standards
 
+> Inherited from the netcanon-dev project-scaffold kit and adapted for br0kr; it does not track the kit.
+> br0kr's never-break rules are in [AGENTS.md](../../AGENTS.md).
+
 The lint, secret-management, and supply-chain discipline every repo inherits.
 Each rule names the file that enforces it. The binding meta-rule: **a security
 control with no covering check is not a control**, and **secret-hygiene + tests +
@@ -51,8 +54,8 @@ not a data API.
   SIM,RUF`), `line-length = 120`. Every `ignore` carries a reason — an unexplained
   ignore is a smell. Per-file-ignores relax test-scaffold and `__init__.py`
   re-export conventions.
-- **`ruff format`** is adopted for greenfield repos (no giant reflow diff if you
-  start formatted); an existing unformatted tree may decline it deliberately.
+- **`ruff format`** is adopted (the tree was formatted from its first commit, so
+  there is no reflow diff).
 - **`mypy`** runs over the engine package (gradual: start permissive, tighten over
   time; silence missing third-party stubs per-module, not globally). br0kr has
   tightened to `disallow_untyped_defs` and `warn_return_any`: every def is

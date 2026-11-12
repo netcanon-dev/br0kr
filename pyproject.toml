@@ -117,15 +117,8 @@ ignore = [
 # prose reason).
 "br0kr/ui_assets.py" = ["E501", "W291", "W293", "RUF001"]
 
-[tool.ruff.lint.isort]
-# Force the future-import so `str | None` annotations evaluate on older legs and
-# import order is deterministic. Drop this line if your minimum is 3.10+ and you
-# don't want it.
-
 [tool.ruff.format]
-# `ruff format` is adopted here (greenfield-friendly: no giant reflow diff if you
-# start formatted). An existing unformatted tree may choose to OMIT this section
-# to avoid a one-shot whole-tree reflow — that's a deliberate per-project call.
+# `ruff format` settings (the tree was formatted from the start).
 quote-style = "double"
 
 # =============================================================================

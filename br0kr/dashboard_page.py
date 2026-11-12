@@ -1,6 +1,6 @@
 """dashboard_page.py — the single self-contained HTML page (CSS + vanilla-JS polling client)
 served by br0kr/dashboard.py's GET /. Split out of dashboard.py so the ~1.1k-line PAGE string does
-not bloat the HTTP hub (CLAUDE.md 'no god files'), and so the client-JS diff lands here, away from
+not bloat the HTTP hub (AGENTS.md 'no god files'), and so the client-JS diff lands here, away from
 the dispatch/auth logic.
 
 Imported back as `dashboard.PAGE` (a re-export), so every `dashboard.PAGE` reference and source-needle

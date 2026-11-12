@@ -50,9 +50,9 @@ its tables. The few harnesses that need more than one Postgres or a Proxmox node
 ## Hermetic by default — the single mock seam
 
 The default suite touches no network, no real DB, no live service. Each boundary is mocked **in its
-home module**; tests patch the seam, never the caller, never below it. The seams live in
-[`conftest.py`](conftest.py) (e.g. `http_seam`, `temp_db`). To swap real ↔ fake you change the
-fixture, nothing else.
+home module**; tests patch the seam, never the caller, never below it. A test patches the home-module
+entry point it needs with `monkeypatch` (the ledger connection, the PVE driver, the clock) or passes a fake
+connection or driver in; to swap real ↔ fake you change that one patch, nothing else.
 
 ## Adding a test
 

@@ -5,8 +5,8 @@ title = "br0kr secret-scan"
 [extend]
 useDefault = true   # built-in rules: private keys, cloud creds, tokens, high-entropy strings
 
-# OPTIONAL — a custom always-catch rule for your project's crown-jewel secret.
-# Example: an age private key. Replace/remove to match your highest-value secret.
+# A custom always-catch rule can be added below; br0kr relies on the built-in rules.
+# Example (unused): an age private key.
 # [[rules]]
 # id = "age-secret-key"
 # description = "age private key"

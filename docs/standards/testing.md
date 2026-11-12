@@ -1,11 +1,11 @@
 # Testing standard
 
-Binding doctrine for how **br0kr** tests, documents its tests, and keeps changes
-diagnosable. The never-break subset belongs in `CLAUDE.md`/`AGENTS.md` Hard Rules; this file is the
-detail those point at.
+> Inherited from the netcanon-dev project-scaffold kit and adapted for br0kr; it does not track the kit.
+> br0kr's never-break rules are in [AGENTS.md](../../AGENTS.md).
 
-> Fill in: `br0kr` (display name), `br0kr` (the importable package/dir under
-> coverage, e.g. `br0kr`), `'3.11','3.12','3.13'` (the CI matrix, e.g. `3.11`–`3.13`).
+Binding doctrine for how **br0kr** tests, documents its tests, and keeps changes
+diagnosable. The never-break subset is in the Hard Rules; this file is the
+detail those point at.
 
 **Why this is codified this hard:** tests and test-docs are the substrate that lets a *later* iteration
 — a different contributor, a future AI — continue development without re-deriving intent. A change that
@@ -38,7 +38,7 @@ reasons CI will be. WHY: a checkmark that means different things locally vs in C
 
 ### The shipped checks (cheap → expensive)
 
-| Check | Tool (swap per language) | What it guards |
+| Check | Tool | What it guards |
 |---|---|---|
 | **lint** | `ruff` (py) · `eslint` · `golangci-lint` | style + obvious bugs |
 | **secret-scan** | `gitleaks` + a staged-artifact grep | no plaintext key/cred reaches a commit |
@@ -151,13 +151,12 @@ test is a lie — scope it so the figure means something.
 
 ---
 
-## 6. test-id selectors (only if the project has a UI)
+## 6. UI tests select by behaviour, not by appearance
 
-If br0kr ships an HTML UI exercised by e2e tests, those tests select on `data-testid`
-**exclusively** — never CSS classes, never DOM structure. Naming: lowercase, hyphen-separated, by
-role/action (`search-input`, `submit-btn`, `result-card`), never by appearance. Maintain an inventory
-(`tests/testid_reference.md`) kept in lock-step with the templates. WHY: a test should break when
-behavior breaks, not when someone renames a CSS class. *(Drop this section if there is no UI.)*
+br0kr's one UI is the dashboard. `tests/integration/test_dashboard_client.py` runs its script as served, in
+node, against a fake DOM, and finds a control by its `id` or its handler (`onclick="cancelLease(7)"`), never by a
+CSS class or by DOM position. WHY: a test should break when behaviour breaks, not when someone restyles a
+button.
 
 ---
 

@@ -68,4 +68,4 @@ docs/
 - [/scripts/README.md](../scripts/README.md) — the harness catalogue and the operator tools
 - [standards/documentation.md](standards/documentation.md) — the full doctrine
 - [/README.md](../README.md) — the external front door
-- [/CLAUDE.md](../CLAUDE.md) — contributor directives + the doc-sync checklist
+- [/AGENTS.md](../AGENTS.md) — contributor directives + the doc-sync checklist

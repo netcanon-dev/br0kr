@@ -1,5 +1,8 @@
 # CI/CD Standards — br0kr
 
+> Inherited from the netcanon-dev project-scaffold kit and adapted for br0kr; it does not track the kit.
+> br0kr's never-break rules are in [AGENTS.md](../../AGENTS.md).
+
 How this repo proves it's green and ships safely. The gate is the **GitHub
 Actions workflows** below plus Dependabot. CI proves **offline correctness only** —
 anything that needs live infrastructure or real credentials stays out of CI (run
@@ -191,13 +194,13 @@ with a **7-day `cooldown`** (let upstream yank/hotfix windows close; also
 satisfies zizmor's `dependabot-cooldown` rule), **`groups`** to batch low-risk
 bumps into single PRs, and **`labels`** for triage.
 
-## Release pipeline (guidance — adapt to your artifact)
+## Release pipeline
 
-The artifact differs per project (a wheel to PyPI, a container to a registry, a
-desktop installer to GitHub Releases), so there is no one template workflow. The
-*discipline* is general — a release workflow triggers on a version tag
-(`vX.Y.Z`, with `-rcN`/`-alpha`/`-beta` marked pre-release) and runs
-**fail-closed gates before building**:
+br0kr's is `.github/workflows/release.yml` (the steps are in
+[CONTRIBUTING.md](../../CONTRIBUTING.md#releases)). A `vX.Y.Z` tag builds the image
+once, gates that image on Trivy, pushes it to GHCR signed with its SBOM and
+provenance attested, and attaches the wheel and sdist to the GitHub release. It
+runs **fail-closed gates before building**:
 
 - The tagged commit **must be an ancestor of `origin/main`** — a tag can't ship
   code that isn't on the mainline.

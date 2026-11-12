@@ -12,8 +12,7 @@
   A step scriptblock signals FAILURE by `throw`-ing (or a non-zero $LASTEXITCODE).
   It must NOT call `exit` — that would terminate the script and mask later steps.
 
-  Add a check: append one Step line. Swap per language: the lint / types / unit
-  steps are the examples to replace (Python shown).
+  Add a check: append one Step line.
 #>
 [CmdletBinding()]
 param([switch]$Strict)   # -Strict: treat skipped-because-missing as failure (CI)
@@ -45,7 +44,7 @@ function Step($name, $present, [scriptblock]$run) {
 
 $py = (Get-Command py, python3, python -ErrorAction SilentlyContinue | Select-Object -First 1)
 
-# ── lint ──  SWAP per language: ruff (py) -> eslint / golangci-lint / ...
+# ── lint ──  ruff (pyproject.toml [tool.ruff])
 Step "lint" (Have ruff) { ruff check . }
 
 # ── secret-scan ──
@@ -61,10 +60,10 @@ Step "secret-staged" $true {
   if ($leaks.Count) { throw "$($leaks.Count) staged secret artifact(s)" }
 }
 
-# ── types ──  SWAP per language: mypy (py) -> tsc --noEmit / go vet / ...
+# ── types ──  mypy (pyproject.toml [tool.mypy])
 Step "types" (Have mypy) { mypy . }
 
-# ── unit (hermetic suite) ──  SWAP per language: pytest -> npm test / go test ...
+# ── unit (hermetic suite) ──  pytest
 $hasPytest = $false
 if ($py) { & $py.Source -m pytest --version *> $null; $hasPytest = ($LASTEXITCODE -eq 0) }
 Step "unit" $hasPytest {

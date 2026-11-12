@@ -1,9 +1,11 @@
 # Conventions
 
+> Inherited from the netcanon-dev project-scaffold kit and adapted for br0kr; it does not track the kit.
+
 The one-page doctrine for this repo, distilled across five dimensions. Every rule here exists
 because a real regression earned it. This page is what a new contributor (human **or** agent)
-must know; the full rationale lives in [docs/standards/](docs/standards/), and the gate enforces
-it so the rules can't quietly rot.
+must know; the full rationale lives in [docs/standards/](docs/standards/) (read that next), and the
+gate enforces it so the rules can't quietly rot. The never-break rules are in [AGENTS.md](AGENTS.md).
 
 > **The binding meta-rule.** Tests, test-docstrings, logging, and security-doc updates are
 > **first-class deliverables in the same commit** as the behaviour change — never optional
@@ -44,7 +46,7 @@ rationale-first; SECURITY mapping control → file → check).
 - **Comments explain WHY, never WHAT.** Name the magic — every timeout/threshold/limit is a
   named constant, never an inline literal. No hard-coded counts in prose unless a check keeps
   them honest ("the modules", not "the 7 modules").
-- **Drift is a bug**, caught two ways: the Documentation Sync Checklist in CLAUDE.md
+- **Drift is a bug**, caught two ways: the Documentation Sync Checklist in AGENTS.md
   (`change X → touch Y`, same commit) and cross-reference reciprocity (add a doc ⇒ add the
   reciprocal `See also` link the same commit).
 
@@ -75,7 +77,7 @@ value queryable. Always keep a degrade path (aggregator down ⇒ the rotating fi
 - **Hermetic by default.** `pytest -m "not e2e and not slow"`: no network, no real DB, no
   browser. Mock each I/O boundary **in its home module** (patch `mypkg.http._get`, never the
   caller) — one injectable seam per surface, never patch below it.
-- **The pyramid, enforced by markers.** unit = pure, zero I/O; integration = your app/API as a
+- **The pyramid, enforced by markers.** unit = pure, zero I/O; integration = br0kr's modules as a
   black box with boundaries mocked; e2e = the real booted app (opt-in only). `--strict-markers`
   makes a typo'd marker an error. Add a test at the **lowest** layer that proves the behaviour.
 - **Every test is documented — machine-enforced.** `tests/check_test_docs.py` walks the AST and
@@ -97,7 +99,7 @@ value queryable. Always keep a degrade path (aggregator down ⇒ the rotating fi
   The decryption key never lives next to the ciphertext; a leaked artifact decrypts nothing.
 - **Lint/format/type** (Python example, principle language-general): `ruff` with explicit,
   commented rule selection and `line-length = 120` — every `ignore` carries a WHY. `ruff format`
-  on (adopt from commit 1 in a greenfield repo). `mypy` gradual, `strict` on new code. CI pins
+  on from the first commit. `mypy` gradual, `strict` on new code. CI pins
   the linter version; the invocation is config-free (`ruff check .`). `yamllint extends: default`.
 - **Supply-chain.** `zizmor` audits the workflows; the hybrid pinning policy is the key reusable
   artifact. `persist-credentials: false` + `permissions: contents: read` everywhere.
@@ -111,5 +113,5 @@ value queryable. Always keep a degrade path (aggregator down ⇒ the rotating fi
 ## See also
 
 - [docs/standards/README.md](docs/standards/README.md) — full rationale per dimension
-- [CLAUDE.md](CLAUDE.md) — Hard Rules, the Documentation Sync Checklist, the before-commit list
-- [README.md](README.md) — what this scaffold is and how to apply it
+- [AGENTS.md](AGENTS.md) — Hard Rules, the Documentation Sync Checklist, the before-commit list
+- [README.md](README.md) — what br0kr is and how to run it

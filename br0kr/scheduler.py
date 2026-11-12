@@ -13,7 +13,7 @@ anywhere with room. The design keeps the race-critical surface untouched:
   The snapshot ranking can be stale; that only affects WHICH node we try first, never
   correctness — `admit()` re-reads fresh capacity under the lock and is the source of truth.
 
-This makes `admit()` the single race-critical seam (CLAUDE.md: one dispatch seam) and lets the
+This makes `admit()` the single race-critical seam (AGENTS.md: the race-critical seam) and lets the
 scheduler stay ordinary, testable orchestration.
 
 **Idempotency is node-agnostic here.** A scheduled request's node is chosen by the broker, so a

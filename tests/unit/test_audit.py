@@ -40,7 +40,7 @@ def test_redact_masks_secret_keys_keeps_ids_and_deep_copies():
 
 def test_redact_never_stores_a_minted_secret():
     """The real leak risk: create_token's RESULT carries a plaintext `secret`. We audit PARAMS not results,
-    but even a params dict that somehow held a 'secret' key is masked. Guards the CLAUDE.md hard rule (never
+    but even a params dict that somehow held a 'secret' key is masked. Guards the AGENTS.md hard rule (never
     store/log a secret) AT the redaction boundary."""
     assert audit.redact({"secret": "PLAINTEXT-XYZ", "label": "ci"}) == {"secret": audit._REDACTED, "label": "ci"}
 
