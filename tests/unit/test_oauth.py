@@ -181,3 +181,34 @@ def test_preauth_bounds_are_the_documented_values() -> None:
     assert oauth._LEDGER.slots == 8
     assert (oauth._REGISTER_LIMIT.per_key, oauth._REGISTER_LIMIT.total) == (10, 60)
     assert (oauth._CONSENT_LIMIT.per_key, oauth._CONSENT_LIMIT.total) == (20, 240)
+
+
+class _OneRowConn:
+    """Records the statement take_code runs and answers it with one canned row."""
+
+    def __init__(self, row: tuple | None) -> None:
+        self.row = row
+        self.calls: list[tuple[str, tuple]] = []
+
+    def execute(self, sql: str, params: tuple) -> _OneRowConn:
+        self.calls.append((" ".join(sql.split()), params))
+        return self
+
+    def fetchone(self) -> tuple | None:
+        return self.row
+
+
+def test_take_code_consumes_by_hash_in_one_statement_that_checks_expiry() -> None:
+    """take_code() redeems a code with ONE `DELETE … WHERE code_hash = %s AND expires_at > now() RETURNING …`,
+    looked up by the code's hash, and maps the returned row; no row (unknown, used or expired) is None. Guards
+    single use and expiry both living in that one statement: a SELECT-then-DELETE would let two concurrent
+    redemptions of one code both mint a token, and a lookup by the raw code would mean storing it in clear."""
+    row = ("client-1", "team-a", "consume", "chal", "https://client.example/callback", "https://br0kr.example.com/mcp")
+    conn = _OneRowConn(row)
+    bound = oauth.take_code(conn, "the-code")
+    sql, params = conn.calls[0]
+    assert sql.startswith("DELETE FROM oauth_code WHERE code_hash = %s AND expires_at > now() RETURNING")
+    assert params == (oauth.hash_code("the-code"),)
+    assert bound == {"client_id": "client-1", "project_id": "team-a", "scope": "consume", "code_challenge": "chal",
+                     "redirect_uri": "https://client.example/callback", "resource": "https://br0kr.example.com/mcp"}
+    assert oauth.take_code(_OneRowConn(None), "the-code") is None

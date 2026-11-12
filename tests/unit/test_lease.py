@@ -1,16 +1,18 @@
-"""Unit tests for the lease lifecycle *policy* — the pure, no-I/O half of
-br0kr/lease.py (state classification, expiry math, the transition table).
+"""Unit tests for br0kr/lease.py without a database: the lifecycle *policy* (state classification, expiry
+math, the transition table) and the guard each compare-and-swap writes.
 
-The DB-coupled half (the guarded compare-and-swap transitions and their
-race-freedom) is proven against a real Postgres in scripts/harness_lease.py — that
-behaviour can't be asserted hermetically, so it stays out of this suite. What CAN
-drift silently here is the *policy* the SQL encodes (which states are live, when a
-lease is due, which edges are legal), so that is exactly what these guard.
+The race-freedom of the guarded transitions is proven against a real Postgres in scripts/harness_lease.py; that
+can't be asserted hermetically. What CAN drift silently here is the *policy* the SQL encodes (which states are
+live, when a lease is due, which edges are legal) and what each CAS statement says: the state it requires, what
+it sets and binds, that it commits, and that losing the race reads as False. These pin both, the second with a
+recording fake connection (review TEST-04).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Any
 
+import psycopg
 import pytest
 
 from br0kr import lease
@@ -244,3 +246,125 @@ def test_list_admitted_excludes_held_and_returns_placement_columns():
     out = lease.list_admitted(c, limit=5)
     assert "hold_reason IS NULL" in c.sql
     assert out[0].template_instance_id == 42 and out[0].storage_id == "fast" and out[0].template_id == "deb12"
+
+
+class _CasConn:
+    """A connection that records each statement and answers it with one canned RETURNING row (or rows), standing in
+    for Postgres so a CAS function's SQL and its win/lose reading can be checked without a database. Separate from
+    _Conn above because it also counts commits and rollbacks and can raise, which the CAS tests need."""
+
+    def __init__(self, row: Any = None, rows: list[Any] | None = None, raises: Exception | None = None) -> None:
+        self.row, self.rows, self.raises = row, rows or [], raises
+        self.sql: list[str] = []
+        self.params: list[tuple] = []
+        self.commits = self.rollbacks = 0
+
+    def execute(self, sql: str, params: tuple = ()) -> _CasConn:
+        self.sql.append(" ".join(sql.split()))
+        self.params.append(params)
+        if self.raises is not None:
+            raise self.raises
+        return self
+
+    def fetchone(self) -> Any:
+        return self.row
+
+    def fetchall(self) -> list[Any]:
+        return self.rows
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+_TTL = "expires_at = now() + make_interval(secs => ttl_seconds)"
+# (call, the state its WHERE requires, the state it sets, its bound params, what else its SET must write)
+_CAS = [
+    (lambda c: lease.begin_provisioning(c, 7, 9901, "lease-7"), "ADMITTED", "PROVISIONING", (9901, "lease-7", 7),
+     ("vmid = %s, name = %s", "cluster_id = (SELECT cluster_id FROM node WHERE node.id = lease.node_id)",
+      "hold_reason = NULL", "provisioning_at = now()", _TTL)),
+    (lambda c: lease.mark_active(c, 7), "PROVISIONING", "ACTIVE", (7,), ("active_at = now()", _TTL)),
+    (lambda c: lease.mark_released(c, 7), "RELEASING", "RELEASED", (7,), ()),
+    (lambda c: lease.mark_release_failed(c, 7), "RELEASING", "RELEASE_FAILED", (7,), ("released_reason = 'failed'",)),
+]
+_CAS_IDS = [case[2] for case in _CAS]
+
+
+@pytest.mark.parametrize(("call", "src", "dst", "params", "sets"), _CAS, ids=_CAS_IDS)
+def test_each_cas_transition_requires_its_source_state(call, src, dst, params, sets):
+    """Each forward or teardown transition is ONE guarded UPDATE: it sets the target state only `WHERE id = %s AND
+    state = '<source>'`, writes what that state needs (begin_provisioning: the vmid, the cluster the per-cluster vmid
+    index keys on, the start of the PROVISIONING budget, a fresh deadline; mark_active: a fresh deadline), binds its
+    values in order, returns the row it changed, and commits. Guards the guard itself (an UPDATE without the
+    source-state predicate would resurrect a lease the reaper had already moved on, RELEASING back to ACTIVE) and
+    the columns the rest of the broker reads from that one statement."""
+    conn = _CasConn(row=(7,))
+    assert call(conn) is True
+    assert len(conn.sql) == 1
+    sql = conn.sql[0]
+    assert sql.startswith("UPDATE lease SET state = '" + dst + "'"), sql
+    assert sql.endswith(f"WHERE id = %s AND state = '{src}' RETURNING id"), sql
+    head = sql.rsplit(" WHERE id = %s AND state", 1)[0]   # the SET (begin_provisioning's sub-select has a WHERE)
+    assert [f for f in sets if f not in head] == []
+    assert conn.params[0] == params
+    assert conn.commits == 1
+
+
+@pytest.mark.parametrize(("call", "src", "dst", "params", "sets"), _CAS, ids=_CAS_IDS)
+def test_a_cas_that_matches_no_row_reports_it_lost(call, src, dst, params, sets):
+    """When the guarded UPDATE changes no row (another writer moved the lease first), the call returns False and
+    still ends its transaction, so the caller backs off: the reconciler does not provision or activate a lease the
+    reaper owns, and the reaper does not double-free. Guards a refactor that reads success from the call returning
+    at all."""
+    conn = _CasConn(row=None)
+    assert call(conn) is False
+    assert conn.commits == 1
+
+
+def test_release_moves_only_a_live_lease():
+    """release() moves a lease to RELEASING only while it is in a live state, records the reason, commits, and
+    reports a lease already releasing or gone as False (a double release, or one racing the reaper, is a no-op).
+    Guards a release that re-opens a RELEASED or RELEASE_FAILED lease and frees its capacity twice."""
+    conn = _CasConn(row=(7,))
+    assert lease.release(conn, 7, "completed") is True
+    sql = conn.sql[0]
+    assert "SET state = 'RELEASING', released_reason = %s" in sql and f"state IN {lease._LIVE_SQL}" in sql
+    assert conn.params[0] == ("completed", 7) and conn.commits == 1
+    lost = _CasConn(row=None)
+    assert lease.release(lost, 7) is False and lost.commits == 1
+
+
+def test_claim_releasing_hands_each_row_to_one_reaper():
+    """claim_releasing() takes only RELEASING rows never handed out or handed out longer ago than the grace window,
+    fresh ones first, locks them with FOR UPDATE SKIP LOCKED inside the same statement so a concurrent reaper skips
+    them, stamps reclaim_at, counts the attempt, commits (releasing the row locks), maps each row in order, and
+    returns nothing when nothing is due. Guards the single-claimant teardown gate: without SKIP LOCKED or the grace
+    predicate two reapers (or two passes) would destroy one guest at once, and an uncommitted claim would hold its
+    locks so every other reaper skipped those rows."""
+    conn = _CasConn(rows=[(7, "n1", 9901, "lease-7", 1)])
+    claimed = lease.claim_releasing(conn, grace_seconds=30, limit=5)
+    sql = conn.sql[0]
+    assert "WHERE state = 'RELEASING'" in sql
+    assert "reclaim_at IS NULL OR reclaim_at < now() - make_interval(secs => %s)" in sql
+    assert "ORDER BY reclaim_at NULLS FIRST, id FOR UPDATE SKIP LOCKED LIMIT %s" in sql
+    assert "SET reclaim_at = now(), release_attempts = release_attempts + 1" in sql
+    assert sql.endswith("RETURNING l.id, l.node_id, l.vmid, l.name, l.release_attempts")
+    assert conn.params[0] == (30, 5) and conn.commits == 1
+    assert claimed == [lease.ClaimedLease(7, "n1", 9901, "lease-7", 1)]
+    assert lease.claim_releasing(_CasConn(rows=[])) == []
+
+
+def test_begin_provisioning_turns_a_vmid_collision_into_vmid_contended():
+    """A begin_provisioning whose vmid is already held in the cluster (the per-cluster unique index raises) rolls
+    its transaction back and raises VmidContended, leaving the lease ADMITTED for a retry with a fresh vmid; any
+    other database error propagates as itself. Guards the database backstop against two reconcilers stamping one
+    vmid (swallowing the error would read as a lost race, and not rolling back would poison a non-autocommit
+    connection), and a dead connection being misread as vmid contention."""
+    conn = _CasConn(raises=psycopg.errors.UniqueViolation("duplicate key"))
+    with pytest.raises(lease.VmidContended):
+        lease.begin_provisioning(conn, 7, 9901, "lease-7")
+    assert conn.rollbacks == 1 and conn.commits == 0
+    with pytest.raises(psycopg.OperationalError):
+        lease.begin_provisioning(_CasConn(raises=psycopg.OperationalError("connection lost")), 7, 9901, "lease-7")
