@@ -19,6 +19,10 @@ in the queue. No Proxmox, no VMs — pure ledger reads, safe to run unattended.
      tenant when project_id is given (a token sees only its own); a migration RESERVATION is flagged
      is_reservation and NOT cancellable/migratable; the action flags track state (ACTIVE compute-only →
      both; RELEASING → neither); the limit clamps like queue_view.
+  G. the dashboard parity reads (review UI-04) — list_networks gives each logical network its per-node bridges
+     with verified/quarantined state (a network no node declares lists []) and its template count, and rides
+     the overview; list_templates carries each template's logical_network_id; admin.list_discovery_dismissals
+     returns the roster newest first with exactly the dismissable kinds.
 
 Env: PGCONN (the throwaway ledger).
 """
@@ -31,7 +35,7 @@ from pathlib import Path
 import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import inventory, migrate
+from br0kr import admin, inventory, migrate, placement
 
 CONN = os.environ["PGCONN"]
 
@@ -41,8 +45,10 @@ def connect() -> psycopg.Connection:
 
 
 def reset(cur: psycopg.Cursor) -> None:
-    """Clear the ledger in FK-safe order (lease first removes every FK ref), so each run starts clean."""
-    for tbl in ("lease", "node", "cluster", "storage", "project"):
+    """Clear the ledger in FK-safe order (lease first removes every FK ref), so each run starts clean. A logical
+    network is the one seeded row no other delete cascades to (node takes network_node and discovery_dismissal
+    with it, cluster takes template)."""
+    for tbl in ("lease", "logical_network", "node", "cluster", "storage", "project"):
         cur.execute(f"DELETE FROM {tbl}")
 
 
@@ -97,6 +103,16 @@ def seed(cur: psycopg.Cursor) -> list[int]:
         _lease(cur, node_id="n3", req_cpu=1, req_mem_mb=512, storage_id="ceph", req_disk_gb=100, state="ACTIVE")
     # n9 unassigned: 1 ACTIVE
     _lease(cur, node_id="n9", req_cpu=1, req_mem_mb=512, state="ACTIVE")
+    # G (UI-04): 'lan' realised on n1 (verified) and n2 (quarantined), 'dmz' declared by no node; one template on
+    # lan, one undeclared; two dismissed findings an hour apart (the newer one names who dismissed it)
+    cur.execute("INSERT INTO logical_network(id, description) VALUES ('lan', 'office LAN'), ('dmz', NULL)")
+    cur.execute("INSERT INTO network_node(node_id, logical_network_id, bridge, verified_at, quarantined_at) VALUES "
+                "('n1', 'lan', 'vmbr0', now(), NULL), ('n2', 'lan', 'vmbr1', NULL, now())")
+    cur.execute("INSERT INTO template(id, cluster_id, vmid, logical_network_id) VALUES "
+                "('t-lan', 'clA', 9000, 'lan'), ('t-none', 'clA', 9001, NULL)")
+    cur.execute("INSERT INTO discovery_dismissal(kind, node_id, subject, note, dismissed_by, dismissed_at) VALUES "
+                "('unknown_pool', 'n1', 'local-zfs', 'scratch', NULL, now() - interval '1 hour'), "
+                "('declared_absent', 'n2', 'ceph', NULL, 'ops', now())")
 
     # The admission queue (PENDING — holds no capacity). Inserted in id order, but created_at is then
     # staggered INVERSE to id order (the LAST-inserted row is made the OLDEST), so ORDER BY created_at,id
@@ -156,6 +172,10 @@ def main() -> int:
         ta_leases = inventory.list_leases(c, project_id="team-a")
         tb_leases = inventory.list_leases(c, project_id="team-b")
         lease_lim = inventory.list_leases(c, limit=3)
+        nets = inventory.list_networks(c)
+        ov_nets = inventory.overview(c)["networks"]
+        templates = inventory.list_templates(c)
+        roster = admin.list_discovery_dismissals(c)
 
     # ── A: list_nodes — the CAPACITY_STATES FILTER boundary (every member pinned) ───
     n1 = _by(nodes, "node_id", "n1")
@@ -251,6 +271,25 @@ def main() -> int:
     check("leases_limit_clamped_no_db_error",
           len(lease_lim) == 3 and len(lease_neg) == 1,
           f"limit3={len(lease_lim)}/limit-5={len(lease_neg)} (want 3/1, clamped not errored)")
+
+    # ── G: the dashboard parity reads (UI-04) ──────────────────────────────────────
+    lan, dmz = _by(nets, "network_id", "lan"), _by(nets, "network_id", "dmz")
+    check("network_lists_each_node_bridge_and_its_state",
+          lan["nodes"] == [{"node_id": "n1", "bridge": "vmbr0", "verified": True, "quarantined": False},
+                           {"node_id": "n2", "bridge": "vmbr1", "verified": False, "quarantined": True}]
+          and lan["description"] == "office LAN" and lan["template_count"] == 1, f"lan={lan}")
+    check("network_no_node_declares_lists_empty",
+          dmz["nodes"] == [] and dmz["template_count"] == 0 and dmz["description"] is None, f"dmz={dmz}")
+    check("networks_ride_the_overview", ov_nets == nets and [x["network_id"] for x in nets] == ["dmz", "lan"])
+    check("template_carries_its_logical_network",
+          _by(templates, "template_id", "t-lan")["logical_network_id"] == "lan"
+          and _by(templates, "template_id", "t-none")["logical_network_id"] is None)
+    rows = roster["dismissals"]
+    check("dismissal_roster_newest_first_with_every_dismissable_kind",
+          [(r["kind"], r["node_id"], r["subject"], r["dismissed_by"]) for r in rows]
+          == [("declared_absent", "n2", "ceph", "ops"), ("unknown_pool", "n1", "local-zfs", None)]
+          and rows[1]["note"] == "scratch" and isinstance(rows[0]["dismissed_at"], str)
+          and roster["kinds"] == placement.dismissal_subject_fields(), f"roster={rows}")
 
     n = len(results)
     ok = all(results)

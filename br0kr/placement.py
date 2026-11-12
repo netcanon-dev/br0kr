@@ -1038,6 +1038,12 @@ _SUBJECT_FIELD: dict[str, str] = {
 DISMISSABLE_KINDS: frozenset[str] = frozenset(_SUBJECT_FIELD)
 
 
+def dismissal_subject_fields() -> dict[str, str]:
+    """Each dismissable kind -> the report-row field its dismissal `subject` is copied from (a copy of
+    _SUBJECT_FIELD), so a form that takes a finding's identity by hand can say what `subject` means per kind."""
+    return dict(_SUBJECT_FIELD)
+
+
 def discover_reachability(
     conn: psycopg.Connection[Any], registry: Any, *, cluster_id: str | None = None,
     on_progress: Callable[[], None] | None = None,

@@ -88,6 +88,9 @@ PAGE = """<!doctype html>
   .ff input{width:190px;background:#0b0f14;border:1px solid var(--line);color:var(--ink);
             border-radius:4px;padding:3px 6px} .ff input[readonly]{opacity:.55}
   .ferr{color:var(--bad);font-size:12px}
+  .ff input[type=checkbox]{width:auto}
+  .act.chip{margin:0;padding:1px 7px}
+  .form table{margin:4px 0 8px}
   /* the one status region for action results: bottom-right and ABOVE the #form-slot modal (z-index 1000), so a
      result reported from inside a modal is still seen. */
   #toast{position:fixed;right:16px;bottom:16px;z-index:1100;display:flex;flex-direction:column;gap:8px;
@@ -133,7 +136,10 @@ PAGE = """<!doctype html>
     <h2>Ledger — DR posture</h2><div id="ledger-err"></div><div class="cards" id="ledger"></div></section>
   <section id="clusters-sec"><h2>Clusters</h2><div class="cards" id="clusters"></div></section>
   <section id="nodes-sec"><h2>Nodes</h2><div id="nodes"></div></section>
+  <section id="networks-sec"><h2>Logical networks</h2><div id="networks"></div></section>
   <section id="storage-sec"><h2>Storage pools</h2><div class="cards" id="storage"></div></section>
+  <section id="discovery-sec" style="display:none"><h2>Discovery dismissals (operator)</h2>
+    <div id="discovery"></div></section>
   </div>
   <div class="tabpanel" data-tab="tenancy">
   <section id="projects-sec"><h2>Projects (tenant allowances)</h2><div class="cards" id="projects"></div></section>
@@ -262,6 +268,7 @@ function operatorReads(force){
   loadDownloads(due, on('images'));      // builds every due poll (the attention line), sources on Images only
   loadSettings();                 // the runtime settings editor (0021): loads once, retried after an error
   syncAudit();                    // the append-only audit trail (0023): loads once, then on demand
+  loadDismissals(on('capacity')); // the discovery-dismissal roster (0044), beside the storage pools
 }
 // ── client-side tabs: 4 section-groups share ONE page + ONE poll loop. render() still writes EVERY section
 //    each tick (cheap at homelab scale); a tab only toggles which .tabpanel is DISPLAYED. Operator sections
@@ -350,6 +357,7 @@ const REASON_HINT = {
   lease_queued: 'it is still waiting in the queue: cancel it instead',
   node_and_cluster: 'pick a node or a cluster, not both',
   storage_unbound: 'that storage pool is not bound to a cluster and PVE pool yet',
+  duplicate_pve_storage: 'another pool in that cluster is already bound to that PVE storage name',
 };
 // The settings editor's codes are kind:setting (br0kr/settings.py validate_patch).
 const SETTING_PROBLEM = {below_min:'is below its minimum', too_large:'is above its maximum',
@@ -666,6 +674,360 @@ async function clearPdm(i){
     if(r.ok && r.data && r.data.updated) poll();
     else notify('Clear failed: ' + why(r), 'err');
   }, true);
+}
+// ── storage placement, content and reachability (0031/0041), from the storage card. Placement binds a pool to its
+//    cluster and the storage name PVE uses; content declares what the pool may hold (a template build or a
+//    rebuild_source needs import + images, a clone needs images); a reachable-node chip opens that ONE pair to clear
+//    its quarantine or remove it, and '+ node' adds one (node/add, node/remove, quarantine/clear). One pair at a time,
+//    so a change never drops the other pairs the way the declarative /api/storage/nodes replace would. ──
+const CONTENT_TYPES = ['images', 'rootdir', 'import', 'iso', 'vztmpl', 'backup', 'snippets'];
+const contentChoices = s => CONTENT_TYPES.concat((s.content_types || []).filter(t => !CONTENT_TYPES.includes(t)));
+// one state word for a reachability pair (storage or network): quarantined = a post-clone check failed and fenced
+// it off; ✓ = a post-clone check passed; ? = declared, not verified yet
+const pairWord = p => p.quarantined ? 'quarantined' : (p.verified ? 'verified' : 'not verified yet');
+const pairState = p => p.quarantined
+  ? '<span style="color:var(--bad)" title="a post-clone check failed: fenced off until cleared">quarantined</span>'
+  : (p.verified ? '<span style="color:var(--ok)" title="verified by a post-clone check">✓</span>'
+                : '<span style="color:var(--warn)" title="declared, not verified yet">?</span>');
+let placementArmed = null;   // moving a pool that has reachable nodes to another cluster takes a second save
+                             // for THAT cluster (the one the warning named)
+function openPlacementForm(i){
+  if(paused) return; paused = true; placementArmed = null;   // one form at a time (suppresses the poll re-render)
+  const s = DATA.storage[i];
+  const opts = (DATA.clusters || []).map(c => `<option value="${esc(c.cluster_id)}"`
+    + `${c.cluster_id === s.cluster_id ? ' selected' : ''}>${esc(c.cluster_id)}</option>`).join('');
+  $('form-slot').innerHTML = `<div class="form"><h3>Placement · ${esc(s.storage_id)}</h3>
+    <label class="ff"><span>Cluster</span><select id="sp-cluster">`
+    + (s.cluster_id ? '' : '<option value="">pick a cluster</option>') + opts + `</select></label>
+    <label class="ff"><span>PVE storage name</span><input id="sp-pve" type="text" value="${esc(s.pve_name || '')}"
+      placeholder="blank = ${esc(s.storage_id)}"></label>
+    <p class="pill">Binds this pool to its cluster and to the storage name Proxmox uses for it. Reachable nodes and
+      content types are set separately on the card.</p>
+    <div class="erow"><button class="act" onclick="submitPlacement(${i})">save</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitPlacement(i){
+  const s = DATA.storage[i], cluster = $('sp-cluster').value, pve = $('sp-pve').value.trim();
+  if(!cluster){ $('form-err').textContent = 'Pick the cluster this pool belongs to.'; return; }
+  // the verb keeps the pool's reachable-node pairs on a re-bind, and they belong to the OLD cluster's nodes
+  const pairs = (s.reachable_nodes || []).length;
+  if(s.cluster_id && cluster !== s.cluster_id && pairs && placementArmed !== cluster){
+    placementArmed = cluster;
+    $('form-err').textContent = 'Moving this pool to ' + cluster + ' keeps its ' + pairs + ' reachable-node pair(s) '
+      + 'from ' + s.cluster_id + ': remove them on the card afterwards. Save again to move it.';
+    return;
+  }
+  const r = await postJSON('/api/storage/placement',
+    {storage_id:s.storage_id, cluster_id:cluster, pve_name:pve || null});
+  if(r.ok && r.data && r.data.updated){ closeForm(); notify('Placement saved for ' + s.storage_id + '.', 'ok'); }
+  else $('form-err').textContent = why(r);
+}
+let contentArmed = null;   // dropping images takes a second save of the SAME list (new clones onto it stop)
+function openContentForm(i){
+  if(paused) return; paused = true; contentArmed = null;
+  const s = DATA.storage[i], have = s.content_types || [];
+  const boxes = contentChoices(s).map((t, k) => `<label class="ff"><span>${esc(t)}</span>`
+    + `<input type="checkbox" id="sc-${k}"${have.includes(t) ? ' checked' : ''}></label>`).join('');
+  const now = s.content_types == null
+    ? 'Undeclared today: clones (while clone content enforcement is on), template builds and rebuilds onto this '
+      + 'pool are refused until it is declared.'
+    : 'Saving replaces the declared list.';
+  $('form-slot').innerHTML = `<div class="form"><h3>Content types · ${esc(s.storage_id)}</h3>${boxes}
+    <p class="pill">${now} A build or rebuild needs import and images; a clone needs images.</p>
+    <div class="erow"><button class="act" onclick="submitContent(${i})">save</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitContent(i){
+  const s = DATA.storage[i], picked = contentChoices(s).filter((t, k) => $('sc-' + k).checked);
+  if((s.content_types || []).includes('images') && !picked.includes('images') && contentArmed !== picked.join(',')){
+    contentArmed = picked.join(',');
+    $('form-err').textContent = 'Without images, new clones onto this pool are refused while clone content '
+      + 'enforcement is on. Save again to confirm.';
+    return;
+  }
+  const r = await postJSON('/api/storage/content', {storage_id:s.storage_id, content_types:picked});
+  if(r.ok && r.data && r.data.updated){ closeForm(); notify('Content types saved for ' + s.storage_id + '.', 'ok'); }
+  else $('form-err').textContent = why(r);
+}
+function openStorageNodeAdd(i){
+  if(paused) return;
+  const s = DATA.storage[i], have = (s.reachable_nodes || []).map(rn => rn.node_id);
+  const cand = (DATA.nodes || []).filter(n => n.cluster_id === s.cluster_id && !have.includes(n.node_id));
+  if(!cand.length){
+    notify('Every node in cluster ' + s.cluster_id + ' already reaches ' + s.storage_id + '.'); return; }
+  paused = true;
+  $('form-slot').innerHTML = `<div class="form"><h3>Add a reachable node · ${esc(s.storage_id)}</h3>
+    <label class="ff"><span>Node</span><select id="sn-node">`
+    + cand.map(n => `<option value="${esc(n.node_id)}">${esc(n.node_id)}</option>`).join('') + `</select></label>
+    <p class="pill">Declares that this node physically reaches the pool, so the broker may clone onto it from there.
+      The pair stays unverified until a clone over it passes the post-clone check.</p>
+    <div class="erow"><button class="act" onclick="submitStorageNodeAdd(${i})">add</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitStorageNodeAdd(i){
+  const s = DATA.storage[i], node = $('sn-node').value;
+  const r = await postJSON('/api/storage/node/add', {storage_id:s.storage_id, node_id:node});
+  if(r.ok && r.data && r.data.reason == null){
+    closeForm();
+    notify(r.data.added ? node + ' now reaches ' + s.storage_id + ' (unverified until a clone passes).'
+                        : node + ' already reaches ' + s.storage_id + '.', r.data.added ? 'ok' : 'info');
+  }
+  else $('form-err').textContent = why(r);
+}
+function openStoragePair(i, k){
+  if(paused) return; paused = true;
+  const s = DATA.storage[i], rn = s.reachable_nodes[k], sid = s.storage_id, nid = rn.node_id;
+  const state = rn.quarantined ? 'Quarantined: a post-clone check failed, so the broker does not clone onto this '
+      + 'pool from this node. Clear it once the node reaches the pool again.'
+    : (rn.verified ? 'Verified by a post-clone check.' : 'Declared, not verified yet.');
+  $('form-slot').innerHTML = `<div class="form"><h3>${esc(rn.node_id)} · ${esc(s.storage_id)}</h3>
+    <p class="pill">${state}</p>
+    <div class="erow">` + (rn.quarantined ? '<button class="act" id="pair-clear">clear quarantine</button>' : '')
+    + `<button class="act danger" id="pair-remove">remove this node</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+  if(rn.quarantined) $('pair-clear').onclick = () => clearStorageQuarantine(sid, nid);
+  $('pair-remove').onclick = () => removeStorageNode(sid, nid, false);
+}
+async function clearStorageQuarantine(sid, nid){
+  const r = await postJSON('/api/storage/quarantine/clear', {storage_id:sid, node_id:nid});
+  if(r.ok && r.data && r.data.cleared){
+    closeForm(); notify('Quarantine cleared: ' + nid + ' reaches ' + sid + ' again.', 'ok'); }
+  else $('form-err').textContent = why(r);
+}
+async function removeStorageNode(sid, nid, force){
+  const body = {storage_id:sid, node_id:nid};
+  if(force) body.force = true;
+  const r = await postJSON('/api/storage/node/remove', body);
+  if(r.ok && r.data && r.data.removed){
+    closeForm(); notify(nid + ' no longer reaches ' + sid + '.', 'ok'); return; }
+  if(!force && r.data && r.data.reason === 'pair_quarantined'){
+    // removing a quarantined pair drops its quarantine too: say so, and make the second click the force
+    $('form-err').textContent = 'This pair is quarantined. Removing it drops the quarantine as well, so adding '
+      + 'the node back later starts it unverified instead of fenced off.';
+    const b = $('pair-remove'); b.textContent = 'remove anyway'; b.onclick = () => removeStorageNode(sid, nid, true);
+    return;
+  }
+  $('form-err').textContent = why(r);
+}
+// ── logical networks (0039): a fleet-wide name for one L2 network (e.g. lan) that a template net0 is on, realised
+//    on each node by a concrete bridge. For a cross-node clone the placement gate resolves it to the target node
+//    bridge, so a node with no mapping (or a quarantined one) cannot take a cross-node clone of a template on it.
+//    A bridge NAME match proves nothing about L2: the operator checks it out of band before saving. ──
+const netsOf = nodeId => ((DATA && DATA.networks) || []).flatMap(ln => (ln.nodes || [])
+  .filter(m => m.node_id === nodeId).map(m => Object.assign({network_id:ln.network_id}, m)));
+const bridgePill = (label, m) => `<span class="pill">${esc(label)}→${esc(m.bridge)} ${pairState(m)}</span>`;
+function renderNetworks(){
+  const nets = (DATA && DATA.networks) || [];
+  const add = canEdit ? '<div class="toolbar"><button class="act" onclick="openNetworkForm()">+ add logical '
+    + 'network</button></div>' : '';
+  if(!nets.length){
+    $('networks').innerHTML = add + '<div class="empty">no logical networks: a cross-node clone of a template '
+      + 'needs its net0 on one</div>';
+    return;
+  }
+  const rows = nets.map((ln, i) => `<tr><td>${esc(ln.network_id)}</td>
+    <td class="pill">${ln.description ? esc(ln.description) : '—'}</td>
+    <td>${(ln.nodes || []).length ? ln.nodes.map(m => bridgePill(m.node_id, m)).join(' ')
+      : '<span style="color:var(--warn)">no node declares a bridge for it</span>'}</td>
+    <td class="num">${ln.template_count}</td>
+    ${canEdit ? `<td><button class="act ghost" onclick="deleteNetwork(${i})">delete</button></td>` : ''}
+    </tr>`).join('');
+  $('networks').innerHTML = add + `<table><thead><tr><th>Network</th><th>Description</th><th>Bridge per node</th>
+    <th class="num">Templates</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+function openNetworkForm(){
+  if(paused) return; paused = true;
+  $('form-slot').innerHTML = `<div class="form"><h3>Add logical network</h3>
+    <label class="ff"><span>Network id</span><input id="ln-id" type="text" placeholder="e.g. lan"></label>
+    <label class="ff"><span>Description (optional)</span><input id="ln-desc" type="text"></label>
+    <p class="pill">A fleet-wide name for one L2 network. Then set the bridge each node uses for it (Nodes,
+      bridges) and point templates at it (OS templates, network).</p>
+    <div class="erow"><button class="act" onclick="submitNetwork()">add</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitNetwork(){
+  const d = $('ln-desc').value.trim();
+  const r = await postJSON('/api/network/create', {network_id:$('ln-id').value.trim(), description:d || null});
+  if(r.ok && r.data && r.data.created) closeForm();   // closeForm() re-polls: the panel shows the new network
+  else $('form-err').textContent = why(r);
+}
+function deleteNetwork(i){
+  const ln = DATA.networks[i], q = (ln.nodes || []).filter(m => m.quarantined).length;
+  confirmModal('Delete logical network ' + ln.network_id + '? Its ' + (ln.nodes || []).length + ' node bridge '
+    + 'mapping(s) go with it' + (q ? ' (' + q + ' quarantined: deleting drops those quarantines too)' : '')
+    + ', and its ' + ln.template_count + ' template(s) lose their network: a cross-node clone of them is refused '
+    + 'until one is set again.', async () => {
+    const r = await postJSON('/api/network/delete', {network_id:ln.network_id});
+    if(r.ok && r.data && r.data.deleted) poll();
+    else notify('Delete failed: ' + why(r), 'err');
+  }, true);
+}
+function openBridgesForm(i){
+  if(paused) return; paused = true;
+  const n = DATA.nodes[i], nets = (DATA && DATA.networks) || [], ms = netsOf(n.node_id);
+  const rows = ms.map((m, k) => `<tr><td>${esc(m.network_id)}</td><td>${esc(m.bridge)}</td><td>${pairState(m)}</td>
+    <td>` + (m.quarantined ? `<button class="act ghost" id="nb-clear-${k}">clear quarantine</button> ` : '')
+    + `<button class="act danger" id="nb-del-${k}">remove</button></td></tr>`).join('');
+  const table = ms.length ? `<table><thead><tr><th>Network</th><th>Bridge</th><th>State</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>` : '<div class="empty">no bridges declared on this node</div>';
+  const add = nets.length ? `<label class="ff"><span>Logical network</span><select id="nb-net">`
+      + nets.map(ln => `<option value="${esc(ln.network_id)}">${esc(ln.network_id)}</option>`).join('')
+      + `</select></label>
+    <label class="ff"><span>Bridge on ${esc(n.node_id)}</span><input id="nb-bridge" type="text"
+      placeholder="e.g. vmbr0"></label>
+    <p class="pill">Sets the bridge this node uses for that network, replacing an earlier one; it stays unverified
+      until a cross-node clone passes the post-clone check. A matching bridge NAME proves nothing about the L2
+      network behind it: check that out of band first.</p>
+    <div class="erow"><button class="act" id="nb-save">save bridge</button>`
+    : '<p class="pill">No logical networks yet: add one in the Logical networks panel first.</p><div class="erow">';
+  $('form-slot').innerHTML = `<div class="form"><h3>Bridges · ${esc(n.node_id)}</h3>${table}${add}
+    <button class="act ghost" onclick="closeForm()">close</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+  ms.forEach((m, k) => {
+    if(m.quarantined) $('nb-clear-' + k).onclick = () => netPairAction(n.node_id, m.network_id, 'clear', k);
+    $('nb-del-' + k).onclick = () => netPairAction(n.node_id, m.network_id, 'delete', k, false);
+  });
+  if(nets.length) $('nb-save').onclick = () => saveBridge(n.node_id);
+}
+async function saveBridge(nodeId){
+  const net = $('nb-net').value, bridge = $('nb-bridge').value.trim();
+  if(!net || !bridge){ $('form-err').textContent = 'Pick a logical network and type the bridge name.'; return; }
+  const prev = netsOf(nodeId).find(m => m.network_id === net);   // a re-point keeps a quarantine (set_network_node)
+  const r = await postJSON('/api/network/node', {node_id:nodeId, logical_network_id:net, bridge:bridge});
+  if(r.ok && r.data && r.data.updated){
+    closeForm();
+    if(prev && prev.quarantined) notify(nodeId + ': ' + net + ' is now on ' + bridge + ' and still quarantined: '
+      + 'clear it once that bridge really is the ' + net + ' network.', 'warn');
+    else notify(nodeId + ': ' + net + ' is on ' + bridge + ' (unverified until a clone passes).', 'ok');
+  }
+  else $('form-err').textContent = why(r);
+}
+async function netPairAction(nodeId, net, what, k, force){
+  const clear = what === 'clear', body = {node_id:nodeId, logical_network_id:net};
+  if(force) body.force = true;
+  const r = await postJSON(clear ? '/api/network/quarantine/clear' : '/api/network/node/delete', body);
+  if(r.ok && r.data && (clear ? r.data.cleared : r.data.deleted)){
+    closeForm();
+    notify(clear ? 'Quarantine cleared: ' + nodeId + ' presents ' + net + ' again.'
+                 : nodeId + ' no longer declares a bridge for ' + net + '.', 'ok');
+    return;
+  }
+  if(!clear && !force && r.data && r.data.reason === 'pair_quarantined'){
+    // removing a quarantined pair drops its quarantine too: say so, and make the second click the force
+    $('form-err').textContent = 'The ' + net + ' bridge on ' + nodeId + ' is quarantined. Removing it drops the '
+      + 'quarantine as well, so declaring it again later starts it unverified instead of fenced off.';
+    const b = $('nb-del-' + k); b.textContent = 'remove anyway';
+    b.onclick = () => netPairAction(nodeId, net, 'delete', k, true);
+    return;
+  }
+  $('form-err').textContent = why(r);
+}
+// ── a template net0 network (0039) and its hand-modified mark (0040), from the template row ──
+function openTemplateNetForm(i){
+  if(paused) return; paused = true;
+  const t = DATA.templates[i], nets = (DATA && DATA.networks) || [];
+  const opts = '<option value="">none (a cross-node clone is refused)</option>' + nets.map(ln =>
+    `<option value="${esc(ln.network_id)}"${ln.network_id === t.logical_network_id ? ' selected' : ''}>`
+    + `${esc(ln.network_id)}</option>`).join('');
+  $('form-slot').innerHTML = `<div class="form"><h3>Network · ${esc(t.template_id)}</h3>
+    <label class="ff"><span>net0 logical network</span><select id="tn-net">${opts}</select></label>
+    <p class="pill">The network this template net0 is on. A clone onto another node is rewired to that node
+      bridge for this network, so a node without one cannot take it.</p>
+    <div class="erow"><button class="act" onclick="submitTemplateNet(${i})">save</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitTemplateNet(i){
+  const t = DATA.templates[i], net = $('tn-net').value;
+  const r = await postJSON('/api/template/network', {template_id:t.template_id, logical_network_id:net || null});
+  if(r.ok && r.data && r.data.updated) closeForm();
+  else $('form-err').textContent = why(r);
+}
+function toggleSourceDirty(i){
+  const t = DATA.templates[i], to = !t.source_dirty;
+  const msg = to ? 'Mark template ' + t.template_id + ' as hand-modified in Proxmox? A rebuild from its source is '
+      + 'then refused, so the change made inside the guest is not lost.'
+    : 'Clear the hand-modified mark on ' + t.template_id + '? A rebuild from its source is allowed again and '
+      + 'replaces the guest with a fresh build.';
+  confirmModal(msg, async () => {   // reversible either way: not a danger
+    const r = await postJSON('/api/template/source-dirty', {template_id:t.template_id, dirty:to});
+    if(r.ok && r.data && r.data.updated) poll();
+    else notify((to ? 'Mark' : 'Clear') + ' failed: ' + why(r), 'err');
+  });
+}
+// ── discovery dismissals (0044). The drift report (discover_reachability) reads every node live from Proxmox, so it
+//    runs where the PVE credential lives: an operator MCP client. This dashboard holds no PVE credential: it
+//    CONFIRMS what the report found (the storage card, the node bridges) and keeps the dismissal roster here, so a
+//    known-benign finding stops re-surfacing. A dismissal is reporting only; no placement decision reads it. ──
+let DISMISS = null;
+async function loadDismissals(go){
+  const sec = $('discovery-sec');
+  if(!canEdit){   // shown only when actions are unlocked; a lock drops the roster (operator notes) from the page
+    sec.style.display = 'none'; DISMISS = null; $('discovery').innerHTML = ''; return; }
+  sec.style.display = '';
+  if(go === false) return;   // not due this poll
+  const t = tok(), r = await opFetch('/api/discovery/dismissals');
+  if(!canEdit || tok() !== t) return;   // locked (or the token changed) while the read was out: drop the answer
+  if(r.ok){ DISMISS = r.data; renderDismissals(); }
+  else $('discovery').innerHTML = loadErr('the discovery dismissals', r);
+}
+function renderDismissals(){
+  const ds = (DISMISS && DISMISS.dismissals) || [];
+  const add = '<div class="toolbar"><button class="act" onclick="openDismissForm()">+ dismiss a finding</button>'
+    + '<span class="pill"> Drift is reported by discover_reachability (operator MCP), which reads Proxmox live; '
+    + 'this page holds no Proxmox credential. A dismissed finding stops showing in later reports and changes no '
+    + 'placement decision.</span></div>';
+  if(!ds.length){ $('discovery').innerHTML = add + '<div class="empty">no dismissed findings</div>'; return; }
+  const rows = ds.map((x, i) => `<tr><td>${esc(x.kind)}</td><td>${esc(x.node_id)}</td><td>${esc(x.subject)}</td>
+    <td class="pill">${x.note ? esc(x.note) : '—'}</td>
+    <td class="pill">${tdate(x.dismissed_at)}${x.dismissed_by ? ' · ' + esc(x.dismissed_by) : ''}</td>
+    <td><button class="act ghost" onclick="clearDismissal(${i})">clear</button></td></tr>`).join('');
+  $('discovery').innerHTML = add + `<table><thead><tr><th>Kind</th><th>Node</th><th>Subject</th><th>Note</th>
+    <th>Dismissed</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function openDismissForm(){
+  if(paused) return;
+  const kinds = (DISMISS && DISMISS.kinds) || {}, ks = Object.keys(kinds).sort();
+  if(!ks.length){ notify('The finding kinds have not loaded yet; try again in a moment.'); return; }
+  if(!(DATA.nodes || []).length){ notify('There are no nodes, so there is no finding to dismiss.'); return; }
+  paused = true;
+  $('form-slot').innerHTML = `<div class="form"><h3>Dismiss a discovery finding</h3>
+    <label class="ff"><span>Kind</span><select id="dd-kind">` + ks.map(k => `<option value="${esc(k)}">`
+      + `${esc(k)} (subject: ${esc(kinds[k])})</option>`).join('') + `</select></label>
+    <label class="ff"><span>Node</span><select id="dd-node">` + (DATA.nodes || []).map(n =>
+      `<option value="${esc(n.node_id)}">${esc(n.node_id)}</option>`).join('') + `</select></label>
+    <label class="ff"><span>Subject</span><input id="dd-subject" type="text" placeholder="from the report row"></label>
+    <label class="ff"><span>Note (optional)</span><input id="dd-note" type="text"></label>
+    <p class="pill">Copy the kind, node and subject from the report row; the subject is the field named next to
+      the kind.</p>
+    <div class="erow"><button class="act" onclick="submitDismiss()">dismiss</button>
+    <button class="act ghost" onclick="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`;
+}
+async function submitDismiss(){
+  const body = {kind:$('dd-kind').value, node_id:$('dd-node').value, subject:$('dd-subject').value.trim()};
+  const note = $('dd-note').value.trim();
+  if(note) body.note = note;
+  const r = await postJSON('/api/discovery/dismiss', body);
+  if(r.ok && r.data && r.data.reason == null){
+    closeForm(); loadDismissals();
+    if(!r.data.dismissed) notify('That finding was already dismissed.');
+  }
+  else $('form-err').textContent = why(r);
+}
+function clearDismissal(i){
+  const x = DISMISS.dismissals[i];
+  confirmModal('Clear the dismissal of ' + x.kind + ' on ' + x.node_id + ' (' + x.subject + ')? If the drift is '
+    + 'still there, the next report shows it again.', async () => {
+    const r = await postJSON('/api/discovery/dismissal/clear', {kind:x.kind, node_id:x.node_id, subject:x.subject});
+    if(r.ok && r.data && r.data.cleared) loadDismissals();
+    else notify('Clear failed: ' + why(r), 'err');
+  });
 }
 // ── agent tokens (operator-only; /api/tokens metadata is gated, fetched with the operator token) ──
 // `go === false`: not due this poll (operatorReads) — keep the panel as rendered. Called bare after an action.
@@ -1035,16 +1397,25 @@ function renderTemplates(){
   const gcount = t => canEdit ? ` · ${grantsFor(t.template_id).length} grant(s)` : '';
   const vis = t => t.public ? '<span class="ok">public</span>'
     : `<span class="pill" style="color:var(--warn)">⊘ private`+gcount(t)+`</span>`;
-  const tActs = i => canEdit ? `<div class="erow">`+
+  // the hand-modified mark matters only to a template with a recorded source (a rebuild could replace it), but
+  // a set mark can always be cleared
+  const dirtyBtn = (t,i) => (t.replicable || t.source_dirty) ? `<button class="act ghost" `+
+    `onclick="toggleSourceDirty(${i})">${t.source_dirty?'clear hand-modified':'mark hand-modified'}</button>` : '';
+  const tActs = (t,i) => canEdit ? `<div class="erow">`+
     `<button class="act ghost" onclick="openGrantForm(${i})">grants</button>`+
+    `<button class="act ghost" onclick="openTemplateNetForm(${i})">network</button>`+ dirtyBtn(t,i) +
     `<button class="act ghost" onclick="editItem('template',${i})">edit</button>`+
     `<button class="act ghost" onclick="delItem('template',${i})">delete</button></div>` : '';
+  const tnet = t => t.logical_network_id ? esc(t.logical_network_id) : '—';
+  const dirty = t => t.source_dirty ? ' <span class="pill" style="color:var(--warn)" '+
+    'title="hand-modified in Proxmox: a rebuild from its source is refused">✎ hand-modified</span>' : '';
   $('templates').innerHTML = addBtn('template','template') + grantsErrLine() + (tpl.length ? `<table><thead><tr>
-    <th>Template</th><th>Cluster</th><th class="num">vmid</th><th>Name</th><th>Visibility</th>${canEdit?'<th></th>':''}
-    </tr></thead><tbody>` + tpl.map((t,i) => `<tr>
-      <td>${esc(t.template_id)}</td><td class="pill">${esc(t.cluster_id)}</td>
+    <th>Template</th><th>Cluster</th><th class="num">vmid</th><th>Name</th><th>Network</th><th>Visibility</th>
+    ${canEdit?'<th></th>':''}</tr></thead><tbody>` + tpl.map((t,i) => `<tr>
+      <td>${esc(t.template_id)}${dirty(t)}</td><td class="pill">${esc(t.cluster_id)}</td>
       <td class="num">${t.vmid}</td><td class="pill">${t.name?esc(t.name):'—'}</td>
-      <td>${vis(t)}</td>${canEdit?'<td>'+tActs(i)+'</td>':''}</tr>`).join('')
+      <td class="pill">${tnet(t)}</td>
+      <td>${vis(t)}</td>${canEdit?'<td>'+tActs(t,i)+'</td>':''}</tr>`).join('')
     + '</tbody></table>' : '<div class="empty">no templates registered</div>');
 }
 // ── template instances (0032 physical copies): where each logical template actually lives (cluster/node/storage/
@@ -1916,37 +2287,48 @@ function render(d){
     ' <span class="pill" style="color:var(--warn)">⊘ cordoned</span>' : '';
   const nodeActs = (n,i) => canEdit ? `<div class="erow">`+
     `<button class="act ghost" onclick="toggleCordon(${i})">${n.cordoned?'uncordon':'cordon'}</button>`+
+    `<button class="act ghost" onclick="openBridgesForm(${i})">bridges</button>`+
     `<button class="act ghost" onclick="editItem('node',${i})">edit</button>`+
     `<button class="act ghost" onclick="delItem('node',${i})">delete</button></div>` : '';
   $('nodes').innerHTML = addBtn('node','node') + (d.nodes.length ? `<table><thead><tr>
-    <th>Node</th><th>Cluster</th><th>PVE node</th><th class="num">CPU</th><th class="num">Mem (GiB)</th>
-    <th class="num">Leases</th>${canEdit?'<th></th>':''}</tr></thead><tbody>` + d.nodes.map((n,i) =>
+    <th>Node</th><th>Cluster</th><th>PVE node</th><th>Bridges</th><th class="num">CPU</th>
+    <th class="num">Mem (GiB)</th><th class="num">Leases</th>${canEdit?'<th></th>':''}</tr></thead><tbody>`
+    + d.nodes.map((n,i) =>
       `<tr${n.cordoned?' style="opacity:.6"':''}>`+
       `<td>${esc(n.node_id)}${cordonBadge(n)}</td>`+
       `<td class="pill">${n.cluster_id?esc(n.cluster_id):'— unassigned'}</td>`+
       `<td class="pill">${n.pve_node?esc(n.pve_node):'<span style="color:var(--warn)">— capacity-only</span>'}</td>
+      <td>${netsOf(n.node_id).map(m => bridgePill(m.network_id, m)).join(' ') || '—'}</td>
       <td class="num">${cell(n.cpu_used, n.cpu_total, n.cpu_pct)}</td>
       <td class="num">${cell(gib(n.mem_mb_used), gib(n.mem_mb_total), n.mem_pct)}</td>
       <td class="num">${n.lease_count}</td>${canEdit?'<td>'+nodeActs(n,i)+'</td>':''}</tr>`).join('')
     + '</tbody></table>' : '<div class="empty">no nodes defined</div>');
-  // Storage — pool disk usage + the 0031 physical binding (cluster · PVE pool) and reachability map: which
-  // nodes may clone onto it (✓ = verified by a post-clone assertion, ? = declared-but-unverified, quarantined
-  // = a failed assertion fenced the pair off). Binding + reachability are DECLARED via the operator API
-  // (/api/storage/placement and /api/storage/nodes); this view surfaces the current state read-only.
+  renderNetworks();   // the logical networks (0039) each node bridge above maps to
+  // Storage — pool disk usage + the 0031 physical binding (cluster · PVE pool), the 0041 content types, and the
+  // reachability map: which nodes may clone onto it (pairState). An operator changes the binding and content from
+  // the card and opens a reachability chip to clear that pair quarantine or remove it (openStoragePair).
   $('storage').innerHTML = addBtn('storage','storage pool') + (d.storage.length ? d.storage.map((s,i) => {
     const bind = s.cluster_id ? esc(s.cluster_id)+' · '+esc(s.pve_name)
       : '<span style="color:var(--warn)">unbound</span>';
+    const content = s.content_types == null ? '<span style="color:var(--warn)">undeclared</span>'
+      : (s.content_types.length ? esc(s.content_types.join(', ')) : '<span style="color:var(--warn)">none</span>');
     const reach = (s.reachable_nodes && s.reachable_nodes.length)
-      ? s.reachable_nodes.map(rn => `<span class="pill">${esc(rn.node_id)} `
-        + (rn.quarantined ? '<span style="color:var(--bad)">quarantined</span>'
-           : rn.verified ? '<span style="color:var(--ok)">✓</span>'
-           : '<span style="color:var(--warn)">?</span>') + '</span>').join(' ')
+      ? s.reachable_nodes.map((rn,k) => canEdit
+          ? `<button class="act ghost chip" onclick="openStoragePair(${i},${k})" `
+            + `aria-label="${esc(rn.node_id)}, ${pairWord(rn)}">`
+            + `${esc(rn.node_id)} ${pairState(rn)}</button>`
+          : `<span class="pill">${esc(rn.node_id)} ${pairState(rn)}</span>`).join(' ')
       : '<span style="color:var(--warn)">none declared</span>';
+    const sActs = canEdit ? `<div class="erow"><button class="act ghost" onclick="openPlacementForm(${i})">placement`
+      + `</button><button class="act ghost" onclick="openContentForm(${i})">content</button>`
+      + (s.cluster_id ? `<button class="act ghost" onclick="openStorageNodeAdd(${i})">+ node</button>` : '')
+      + '</div>' : '';
     return resourceCard(s.storage_id, `${s.lease_count} active lease(s)`, [
       bar(s.disk_gb_used, s.disk_gb_total, s.disk_pct, 'Disk (GB)'),
       `<div class="lbl"><span>Cluster · PVE pool</span><span>${bind}</span></div>`,
+      `<div class="lbl"><span>Content</span><span>${content}</span></div>`,
       `<div class="lbl"><span>Reachable nodes</span><span>${reach}</span></div>`,
-    ], acts('storage',i));
+    ], acts('storage',i) + sActs);
   }).join('') : '<div class="empty">no shared storage pools</div>');
   // OS templates (catalog) — read + operator CRUD + per-project governance (public flag + grants, phase A3)
   renderTemplates();
@@ -2183,7 +2565,8 @@ async function renewLease(id){
 }
 // The panels the overview fills. Before the first good overview, a failed poll renders "could not load" into
 // each of them; after one, the panels keep the last good numbers and the header says how old they are.
-const PANELS = {clusters:'clusters', nodes:'nodes', storage:'storage pools', projects:'projects',
+const PANELS = {clusters:'clusters', nodes:'nodes', networks:'logical networks', storage:'storage pools',
+  projects:'projects',
   leases:'active leases', queue:'the admission queue', templates:'templates', instances:'template instances',
   replications:'template replications', migrations:'migrations'};
 let LAST_OK = null, STALE = false;   // LAST_OK: when the overview last loaded

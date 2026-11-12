@@ -69,7 +69,8 @@ and that a migration reservation is UNAFFECTED by the gate. Zero Proxmox, pure l
   X. HETEROGENEOUS RESOLVE (0039, PR-B) — the SAME logical net resolves to DIFFERENT bridges on n1 vs n2, and a
      cross-node pick to n1 resolves target_bridge to n1's OWN bridge (the heterogeneous-node case: net0 is rewritten to it,
      never the template's baked one). Proves the resolve keys on the identity, not the raw bridge name.
-  Y. NETWORK NARROWING (0039, PR-B) — delete_network_node un-declares a single (node, logical net) pair, so the
+  Y. NETWORK NARROWING (0039, PR-B) — delete_network_node un-declares a single (node, logical net) pair (a
+     QUARANTINED one only with force, review UI-04), so the
      next cross-node admit refuses network_unreachable fail-closed (the operator's immediate narrow).
   Z. CLONE CONTENT GATE (0042, PR-D) — the clone-path `images` gate behind the clone_content_enforcement knob:
      OFF admits an undeclared/incapable target (byte-identical to the pre-PR-D gate); ON fail-closes on an
@@ -685,6 +686,16 @@ def main() -> int:
         check("Y_delete_network_node_narrows_fail_closed",
               y_before.admitted and not y_after.admitted and y_after.reason == placement.NETWORK_UNREACHABLE,
               f"before={y_before.admitted} after={y_after.admitted}/{y_after.reason}")
+        # review UI-04 H-1: a QUARANTINED pair is not deleted without force (delete + re-declare would launder it)
+        admin.set_network_node(c, "n1", "lan", bridge="vmbr0"); c.commit()
+        c.execute("UPDATE network_node SET quarantined_at = now() WHERE node_id = 'n1'"); c.commit()
+        y_refused = admin.delete_network_node(c, "n1", "lan"); c.commit()
+        y_kept = c.execute("SELECT quarantined_at IS NOT NULL FROM network_node WHERE node_id = 'n1'").fetchone()
+        y_forced = admin.delete_network_node(c, "n1", "lan", force=True); c.commit()
+        y_gone = c.execute("SELECT 1 FROM network_node WHERE node_id = 'n1'").fetchone()
+        check("Y_quarantined_bridge_kept_unless_forced",
+              y_refused["reason"] == "pair_quarantined" and y_kept == (True,) and y_forced["deleted"]
+              and y_gone is None, f"refused={y_refused} kept={y_kept} forced={y_forced} gone={y_gone}")
 
     # ── Z (0042, PR-D): the clone-path `images` content gate, behind the clone_content_enforcement knob ──
     # A node-local full clone whose target (ask) pool 'fast' starts UNDECLARED. OFF (default) admits regardless;

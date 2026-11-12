@@ -216,8 +216,9 @@ exactly the containers whose environment changed.
 
 1. **Add.**
    - Declare the node with the dashboard's `POST /api/node/create`.
-   - For templated clones, also declare which pools reach it (`POST /api/storage/nodes`) and which bridge it gives
-     each logical network (`POST /api/network/node`).
+   - For templated clones, also declare which pools reach it (each Storage card's **+ node**, or
+     `POST /api/storage/node/add`) and which bridge it gives each logical network (the node's **bridges** dialog,
+     or `POST /api/network/node`).
    - The daemon rebuilds its node registry every `BR0KR_RELOAD_EVERY` ticks (about five minutes); the dashboard's
      `POST /api/reload` asks for it now.
 2. **Drain.**

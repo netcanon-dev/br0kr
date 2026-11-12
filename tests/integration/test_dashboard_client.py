@@ -450,14 +450,15 @@ def test_a_read_token_on_a_read_gated_server_keeps_the_reads(served_script: Path
 
 def test_operator_panels_load_every_third_poll_and_only_for_the_open_tab(served_script: Path) -> None:
     """Unlocked on the Capacity tab, the first poll checks the token once and loads the build list (the attention
-    line needs it on every tab), settings and the audit log once. The next three polls read only the overview
-    (which carries the fleet and ledger strips), plus the build list on the third. No agent tokens, operators,
-    grants or sources are read, since their tabs are closed. Switching to Security loads its panels at once. The
-    'acting as' header comes from the one token check. Guards the old nine reads every 5 seconds per unlocked
-    page."""
+    line needs it on every tab), settings and the audit log once, and the discovery-dismissal roster (its panel is
+    on Capacity). The next three polls read only the overview (which carries the fleet and ledger strips), plus
+    the build list and the roster on the third. No agent tokens, operators, grants or sources are read, since
+    their tabs are closed. Switching to Security loads its panels at once. The 'acting as' header comes from the
+    one token check. Guards the old nine reads every 5 seconds per unlocked page."""
     got = _run(served_script, "operator_cadence")
     first, nxt = got["first"], got["next"]
     assert first.count("/api/whoami") == 1 and "/api/template/builds" in first
+    assert first.count("/api/discovery/dismissals") == 1 and nxt.count("/api/discovery/dismissals") == 1
     assert first.count("/api/settings") == 1 and first.count("/api/audit") == 1
     assert not set(first) & {"/api/tokens", "/api/operators", "/api/template/grants", "/api/template/sources"}
     assert nxt.count("/api/overview") == 3 and nxt.count("/api/template/builds") == 1
@@ -508,3 +509,161 @@ def test_why_explains_codes_by_exact_entry_then_by_family(served_script: Path) -
     assert got["bare"] == "HTTP 502"
     assert got["fallback"] == "not renewable"
     assert got["noReason"] == "the server did not apply it (no reason given)"
+
+
+# ── review UI-04: the operator write routes the page had no control for. Each test drives the control as an
+#    operator would (open it, fill it, press the button) and asserts the exact request it sent. ──
+def test_a_storage_quarantine_is_cleared_from_the_storage_card(served_script: Path) -> None:
+    """Unlocked, a reachability chip on the storage card is a button; it opens that pair, and 'clear quarantine'
+    POSTs /api/storage/quarantine/clear with exactly the pool and node, closes the dialog and says it worked.
+    Guards the review's done-when (a quarantine can be cleared from the storage card) and a chip posting the
+    wrong pair."""
+    got = _run(served_script, "parity_storage_pair")
+    assert 'onclick="openStoragePair(0,0)"' in got["card"] and "quarantined" in got["card"]
+    assert "clear quarantine" in got["modal"] and "remove this node" in got["modal"]
+    assert got["cleared"]["posts"] == [{"path": "/api/storage/quarantine/clear",
+                                        "body": {"storage_id": "fast", "node_id": "n1"}}]
+    assert got["cleared"]["slot"] == ""
+    assert any(t["kind"].endswith("ok") and "Quarantine cleared" in t["text"] for t in got["cleared"]["toasts"])
+
+
+def test_removing_a_quarantined_storage_pair_takes_a_second_explicit_click(served_script: Path) -> None:
+    """'remove this node' on a quarantined pair first POSTs without force; the server refuses pair_quarantined
+    (remove + add would launder the quarantine), the dialog says the removal also drops the quarantine and the
+    button becomes 'remove anyway', and only that second click sends force:true. Guards the page forcing the
+    removal silently, or never offering it."""
+    got = _run(served_script, "parity_storage_pair")
+    assert "drops the quarantine" in got["refused"]["err"] and got["refused"]["button"] == "remove anyway"
+    assert got["removePosts"] == [
+        {"path": "/api/storage/node/remove", "body": {"storage_id": "fast", "node_id": "n1"}},
+        {"path": "/api/storage/node/remove", "body": {"storage_id": "fast", "node_id": "n1", "force": True}}]
+    assert got["slot"] == ""
+
+
+def test_dropping_images_from_a_pool_takes_a_second_save(served_script: Path) -> None:
+    """The content dialog opens with what the pool declares ticked (images and iso here). Unticking images (which
+    stops new clones onto the pool while clone content enforcement is on) and saving first warns and sends
+    nothing; the second save sends the rest. A fresh dialog that keeps images and adds import is sent on the
+    first save, in the dialog's order. Guards an operator emptying a clone target in one click, the warning
+    blocking an ordinary edit, and the dialog dropping a declared type the operator never touched."""
+    got = _run(served_script, "parity_storage_content")
+    assert got["ticked"] == [True, False, False, True] and "Saving replaces the declared list" in got["form"]
+    assert got["armed"]["posts"] == [] and "Save again to confirm" in got["armed"]["err"]
+    assert got["dropped"] == [{"path": "/api/storage/content",
+                               "body": {"storage_id": "fast", "content_types": ["iso"]}}]
+    assert got["kept"] == [{"path": "/api/storage/content",
+                            "body": {"storage_id": "fast", "content_types": ["images", "import", "iso"]}}]
+
+
+def test_placement_binds_a_pool_and_moving_it_across_clusters_takes_a_second_save(served_script: Path) -> None:
+    """The placement dialog pre-selects the pool's cluster and name. A blank name is sent as null (the id is the
+    name). Moving a pool that still has reachable-node pairs to another cluster first says those pairs stay
+    behind and sends nothing; the second save sends it. An unbound pool sends nothing until a cluster is picked,
+    and a refusal (duplicate_pve_storage) stays in the dialog with its meaning. Guards a cluster re-bind leaving
+    wrong-cluster reachability claims behind without a word, and the dialog closing on a refused save."""
+    got = _run(served_script, "parity_storage_placement")
+    assert 'value="c1" selected' in got["form"] and 'value="FastStorage"' in got["form"]
+    assert got["renamed"]["posts"] == [{"path": "/api/storage/placement",
+                                        "body": {"storage_id": "fast", "cluster_id": "c1", "pve_name": None}}]
+    assert got["renamed"]["slot"] == ""
+    assert got["armed"]["posts"] == [] and "keeps its 1 reachable-node pair(s) from c1" in got["armed"]["err"]
+    assert got["moved"] == [{"path": "/api/storage/placement",
+                             "body": {"storage_id": "fast", "cluster_id": "c2", "pve_name": "FastStorage"}}]
+    assert "pick a cluster" in got["unboundForm"]
+    assert got["unpicked"]["posts"] == [] and "Pick the cluster" in got["unpicked"]["err"]
+    assert "duplicate_pve_storage" in got["refused"] and "already bound" in got["refused"] and got["open"] != ""
+
+
+def test_add_node_offers_only_the_pools_cluster_nodes_not_yet_declared(served_script: Path) -> None:
+    """'+ node' offers the nodes of the pool's own cluster that do not already reach it (not n1, which does, nor
+    a node in another cluster) and POSTs /api/storage/node/add for the one picked. Guards a widen offering a node
+    the verb refuses node_wrong_cluster, or re-adding a declared pair. A pair the server already has (added:false,
+    no reason: a stale page) closes the dialog and says so as information, not as a failure."""
+    got = _run(served_script, "parity_storage_add_node")
+    assert 'value="n2"' in got["form"] and 'value="n1"' not in got["form"] and 'value="x9"' not in got["form"]
+    assert got["posts"] == [{"path": "/api/storage/node/add", "body": {"storage_id": "fast", "node_id": "n2"}}]
+    assert got["slot"] == ""
+    assert any(t["kind"].endswith("info") and "already reaches" in t["text"] for t in got["again"])
+
+
+def test_node_bridges_are_set_cleared_and_removed_from_the_node_table(served_script: Path) -> None:
+    """The node table shows each node's bridges (lan→vmbr0, quarantined) and the Logical networks panel lists the
+    network with that node's bridge. The bridges dialog saves a bridge (trimmed) through /api/network/node, and
+    since the pair was quarantined (a re-point keeps the quarantine) it warns that it still is; it clears a
+    quarantine through /api/network/quarantine/clear; removing the quarantined pair first POSTs without force,
+    the server refuses pair_quarantined, the dialog says the removal drops the quarantine and relabels the button,
+    and only that second click sends force:true. Guards the network arc staying curl-only, a dialog posting another
+    node's pair, and (review H-1) a one-click remove + re-add laundering a network quarantine."""
+    got = _run(served_script, "parity_bridges")
+    assert "lan→vmbr0" in got["table"] and "quarantined" in got["table"] and "n1→vmbr0" in got["panel"]
+    assert "clear quarantine" in got["modal"] and "proves nothing about the L2" in got["modal"]
+    assert any(t["kind"].endswith("warn") and "still quarantined" in t["text"] for t in got["saved"])
+    pair = {"node_id": "n1", "logical_network_id": "lan"}
+    assert got["posts"] == [{"path": "/api/network/node", "body": {**pair, "bridge": "vmbr1"}},
+                            {"path": "/api/network/quarantine/clear", "body": pair},
+                            {"path": "/api/network/node/delete", "body": pair},
+                            {"path": "/api/network/node/delete", "body": {**pair, "force": True}}]
+    assert "drops the quarantine" in got["refused"]["err"] and got["refused"]["button"] == "remove anyway"
+    assert got["refused"]["open"] != "" and got["slot"] == ""
+
+
+def test_logical_networks_are_created_and_deleted_from_their_panel(served_script: Path) -> None:
+    """The Logical networks panel creates a network (id trimmed, a blank description sent as null) and deletes
+    one behind a confirm that says what goes with it: its node bridge mappings (naming the quarantined ones, whose
+    quarantines the cascade drops) and its templates' network. Guards a delete that does not say it strands
+    cross-node clones of the templates on it, or that it clears quarantines."""
+    got = _run(served_script, "parity_networks_panel")
+    assert got["posts"] == [{"path": "/api/network/create", "body": {"network_id": "dmz", "description": None}},
+                            {"path": "/api/network/delete", "body": {"network_id": "lan"}}]
+    assert "1 node bridge" in got["confirm"] and "1 template(s) lose their network" in got["confirm"]
+    assert "1 quarantined: deleting drops those quarantines too" in got["confirm"]
+
+
+def test_a_templates_network_and_hand_modified_mark_are_set_from_its_row(served_script: Path) -> None:
+    """A template row shows its network and offers 'network' and, for a built template, 'mark hand-modified'.
+    Choosing no network sends logical_network_id null (which clears it); marking sends dirty:true behind a confirm
+    that says a rebuild from source is then refused. Guards the 0039/0040 template verbs staying curl-only."""
+    got = _run(served_script, "parity_template_controls")
+    assert ">lan<" in got["table"] and "mark hand-modified" in got["table"]
+    assert 'value="lan" selected' in got["form"]
+    assert "rebuild from its source is then refused" in got["confirm"]
+    assert got["posts"] == [
+        {"path": "/api/template/network", "body": {"template_id": "t1", "logical_network_id": None}},
+        {"path": "/api/template/source-dirty", "body": {"template_id": "t1", "dirty": True}}]
+
+
+def test_clearing_a_hand_modified_mark_says_a_rebuild_is_allowed_again(served_script: Path) -> None:
+    """A template marked hand-modified shows the mark and offers 'clear hand-modified'; clearing sends dirty:false
+    behind a confirm that says a rebuild from source replaces the guest again. Guards the toggle only ever setting
+    the mark, or clearing it without saying what that re-enables."""
+    got = _run(served_script, "parity_template_clear_dirty")
+    assert "✎ hand-modified" in got["table"] and "clear hand-modified" in got["table"]
+    assert "rebuild from its source is allowed again" in got["confirm"]
+    assert got["posts"] == [{"path": "/api/template/source-dirty", "body": {"template_id": "t1", "dirty": False}}]
+
+
+def test_discovery_dismissals_are_listed_cleared_and_added_by_an_operator(served_script: Path) -> None:
+    """Unlocked on the Capacity tab, the operator-only dismissal roster shows each dismissed finding; 'clear'
+    POSTs its exact (kind, node, subject); the dismiss form offers the kinds the server lists with the field each
+    subject comes from, and sends a trimmed subject and no note when the note is blank. Guards the 0044 dismiss
+    and clear verbs staying curl-only, and a clear un-suppressing a different finding."""
+    got = _run(served_script, "parity_dismissals")
+    assert got["shown"] == "" and "local-zfs" in got["roster"] and "scratch" in got["roster"]
+    assert "declared_absent (subject: storage_id)" in got["form"]
+    assert got["posts"] == [
+        {"path": "/api/discovery/dismissal/clear",
+         "body": {"kind": "unknown_pool", "node_id": "n1", "subject": "local-zfs"}},
+        {"path": "/api/discovery/dismiss", "body": {"kind": "declared_absent", "node_id": "n1", "subject": "fast"}}]
+
+
+def test_the_dismissal_roster_is_hidden_when_locked_and_names_its_read_failure(served_script: Path) -> None:
+    """The roster section stays hidden on a locked page (it is operator config), and locking an unlocked page drops
+    the roster from the page and from memory; a failed roster read renders 'could not load the discovery
+    dismissals' with the reason, never an empty roster. Guards the panel (and its operator notes) staying with a
+    viewer after lock, or a 503 reading as 'no dismissed findings'."""
+    locked = _run(served_script, "parity_dismissals_locked")
+    assert locked["never"] == "none" and "a private note" in locked["unlocked"]
+    assert locked["after"] == "" and locked["display"] == "none" and locked["roster"] is None
+    got = _run(served_script, "parity_dismissals_read_fails")["discovery"]
+    assert "could not load the discovery dismissals — ledger_unreachable" in got
+    assert "no dismissed findings" not in got

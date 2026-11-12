@@ -238,20 +238,23 @@ def test_template_row_shapes_the_catalog_entry():
     """A template catalog row carries the operator handle, its cluster + vmid, an optional name/description,
     the creation timestamp as ISO (or None), and the `public` visibility flag coerced to a real bool (phase
     A3). Guards a mis-shaped catalog entry the dashboard + the agent list_templates tool render — in
-    particular vmid coerced to int, a missing name/description kept as None (not ''), and `public` surfaced
-    so the dashboard can badge a private template."""
+    particular vmid coerced to int, a missing name/description kept as None (not ''), `public` surfaced
+    so the dashboard can badge a private template, and `logical_network_id` (0039, None = undeclared) so the
+    dashboard's network picker pre-selects the template's current net0 network instead of offering 'none'."""
     dt = datetime.datetime(2026, 6, 29, 9, 30, 0)
     out = inventory._template_row(("debian12", "clA", 9000, "Debian 12 cloud", "genericcloud + agent", dt, True,
-                                   "https://cloud.debian.org/images/x.qcow2", False))
+                                   "https://cloud.debian.org/images/x.qcow2", False, "lan"))
     assert out == {"template_id": "debian12", "cluster_id": "clA", "vmid": 9000,
                    "name": "Debian 12 cloud", "description": "genericcloud + agent",
-                   "public": True, "replicable": True, "source_dirty": False, "created_at": dt.isoformat()}
-    bare = inventory._template_row(("min", "clB", 9100, None, None, None, False, None, True))
+                   "public": True, "replicable": True, "source_dirty": False, "logical_network_id": "lan",
+                   "created_at": dt.isoformat()}
+    bare = inventory._template_row(("min", "clB", 9100, None, None, None, False, None, True, None))
     assert bare["name"] is None and bare["description"] is None and bare["created_at"] is None
     assert bare["vmid"] == 9100 and bare["public"] is False
     # SOURCE PROVENANCE (PR-6): `replicable` reflects source_url PRESENCE (never the raw URL — it may be
     # presigned; this read serves the open/tenant surface), `source_dirty` the hand-modification attestation.
     assert bare["replicable"] is False and bare["source_dirty"] is True   # no provenance, operator-flagged dirty
+    assert bare["logical_network_id"] is None                           # undeclared: no cross-node clone
 
 
 class _RecConn:
@@ -518,8 +521,9 @@ def test_overview_includes_template_instances(monkeypatch):
     Guards the panel's data source being dropped from the aggregate (the Images-tab instances section would
     silently render empty). The sub-readers are monkeypatched to sentinels — this asserts the WIRING + the exact
     key set, not each reader (each has its own test); the real query runs against Postgres in the gui-parity
-    harness. Additive: every prior key stays, so no existing overview consumer breaks."""
-    for fn in ("list_nodes", "list_clusters", "list_storage", "list_projects", "list_templates",
+    harness. Additive: every prior key stays, so no existing overview consumer breaks. `networks` (0039 logical
+    networks + each node's bridge, UI-04) rides the same aggregate for the node table and the networks panel."""
+    for fn in ("list_nodes", "list_clusters", "list_storage", "list_networks", "list_projects", "list_templates",
                "list_leases", "list_migrations"):
         monkeypatch.setattr(inventory, fn, lambda c, _f=fn: [_f])
     monkeypatch.setattr(inventory, "queue_view", lambda c, **k: {"depth": 0})
@@ -529,5 +533,44 @@ def test_overview_includes_template_instances(monkeypatch):
     ov = inventory.overview(object())
     assert ov["template_instances"] == [{"instance_id": 1, "bound": True}]
     assert ov["replications"] == [{"replication_id": 9}]
-    assert set(ov) == {"nodes", "clusters", "storage", "projects", "templates", "template_instances",
+    assert ov["networks"] == ["list_networks"]
+    assert set(ov) == {"nodes", "clusters", "storage", "networks", "projects", "templates", "template_instances",
                        "leases", "queue", "migrations", "replications"}
+
+
+def test_network_row_shapes_a_logical_network():
+    """A logical-network row (0039) carries its id, the optional description, how many templates' net0 are on it
+    (an int), and one {node_id, bridge, verified, quarantined} per node that declares a bridge for it; a network no
+    node declares has `nodes == []`, also when the driver hands back NULL. Guards the dashboard's Logical networks
+    panel, the node table's bridges and the template network picker reading a mis-shaped row: a missing node list
+    would crash the render, a dropped `quarantined` would show a fenced-off pair as healthy."""
+    pair = {"node_id": "n1", "bridge": "vmbr0", "verified": True, "quarantined": False}
+    out = inventory._network_row(("lan", "office LAN", 2, [pair]))
+    assert out == {"network_id": "lan", "description": "office LAN", "template_count": 2, "nodes": [pair]}
+    bare = inventory._network_row(("dmz", None, 0, None))
+    assert bare == {"network_id": "dmz", "description": None, "template_count": 0, "nodes": []}
+
+
+def test_list_networks_runs_one_read_and_ends_its_transaction():
+    """list_networks runs the one logical-network query and commits (a read never leaves a transaction open on the
+    dashboard's pooled connection), shaping each row with _network_row. Guards the panel's read holding a
+    transaction across the poll; the SQL itself runs against real Postgres in scripts/harness_inventory.py."""
+    class _Conn:
+        def __init__(self) -> None:
+            self.sqls: list[str] = []
+            self.commits = 0
+
+        def execute(self, sql: str, params: object = None) -> _Conn:
+            self.sqls.append(sql)
+            return self
+
+        def fetchall(self) -> list[tuple]:
+            return [("lan", None, 1, [])]
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    c = _Conn()
+    assert inventory.list_networks(c) == [{"network_id": "lan", "description": None, "template_count": 1,
+                                           "nodes": []}]
+    assert len(c.sqls) == 1 and "FROM logical_network" in c.sqls[0] and c.commits == 1

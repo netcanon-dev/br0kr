@@ -63,8 +63,10 @@ lock. If `deploy.sh` reports `password authentication failed`, the two passwords
 
 ## 4 · Register the fleet
 
-Every registration is a POST to the dashboard API with the dashboard token. Set two shell variables, then
-run the calls in order (each answers `"created": true` or `"updated": true`):
+Every registration is a POST to the dashboard API with the dashboard token. The dashboard's panels make the
+same calls once you unlock it with that token (a pool's reachable nodes and content types are on its Storage
+card); for a script, set two shell variables, then run the calls in order (each answers `"created": true` or
+`"updated": true`):
 
 ```bash
 D=http://localhost:8051; T="Authorization: Bearer <BR0KR_DASHBOARD_TOKEN>"

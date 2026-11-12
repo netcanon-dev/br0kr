@@ -403,12 +403,14 @@ missing or wrong one is 401. Setup: [docker-deploy.md §3](runbooks/docker-deplo
 | `/api/audit` | operator |
 | `/api/audit/export` | operator |
 | `/api/clusters` | read |
+| `/api/discovery/dismissals` | operator |
 | `/api/fleet` | read |
 | `/api/lease/status` | read |
 | `/api/leases` | read |
 | `/api/ledger` | read |
 | `/api/meta` | open |
 | `/api/migrations` | read |
+| `/api/networks` | read |
 | `/api/nodes` | read |
 | `/api/operators` | operator |
 | `/api/overview` | read |
@@ -477,7 +479,7 @@ recorded in the audit log.
 | `/api/storage/delete` | Delete a storage pool. |
 | `/api/storage/edit` | Edit a storage pool's size. |
 | `/api/storage/node/add` | ADD a SINGLE (storage, node) reachability pair — the one-confirm widen the operator runs on a `discover_reachability` `known_pool_new_node` finding. |
-| `/api/storage/node/remove` | REMOVE a SINGLE (storage, node) reachability pair — the single-pair un-declare, the twin of `delete_network_node`. |
+| `/api/storage/node/remove` | REMOVE a SINGLE (storage, node) reachability pair — the single-pair un-declare, the twin of `delete_network_node` (which has the same guard). |
 | `/api/storage/nodes` | Declare which nodes physically reach a pool (0031 `storage_node`) — the reachability the placement gate reads. |
 | `/api/storage/placement` | Bind (or re-bind) an EXISTING quota row's physical identity — for a pool created before 0031, or to correct a `pve_name`. |
 | `/api/storage/quarantine/clear` | Clear a (storage, node) reachability QUARANTINE — an operator asserting a pair the post-clone assertion fail-closed is reachable again. |

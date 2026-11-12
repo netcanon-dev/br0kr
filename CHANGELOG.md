@@ -36,6 +36,9 @@ resolve in this repository.
   (tier, parameters) and dashboard route from the code, and `tests/unit/test_api_reference.py` fails on drift.
 - **A CI job can lease a VM with only Python.** `scripts/br0kr_mcp_call.py` is a stdlib MCP client (`call`, `wait`);
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
+- **Dashboard controls for storage reachability, node bridges, template networks, discovery dismissals.** 14 operator
+  routes were curl-only (bearer in shell history); a test requires a page control per write route. Deleting a
+  quarantined node bridge now needs `force`, like a storage pair, so delete + re-add cannot launder it (UI-04).
 
 ### Changed
 - **One runner for the ledger harnesses: `bash scripts/run_harness.sh <name>... | --ci | --all`.** Copied wrappers

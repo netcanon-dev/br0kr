@@ -142,6 +142,8 @@ _ROUTES: dict[str, str] = {
     "/api/nodes": "nodes",
     "/api/clusters": "clusters",
     "/api/storage": "storage",
+    "/api/networks": "networks",
+    "/api/discovery/dismissals": "dismissals",
     "/api/projects": "projects",
     "/api/templates": "templates",
     "/api/template/instances": "template_instances",
@@ -167,11 +169,13 @@ _ROUTES.update(dict.fromkeys(ui_assets.ASSETS, "asset"))
 # test_dashboard.py proves this table matches it route by route, and a unit test requires every tag to have a row.
 GET_ACCESS: dict[str, str] = {
     "page": "open", "asset": "open", "health": "open", "meta": "open", "whoami": "open",
-    "overview": "read", "nodes": "read", "clusters": "read", "storage": "read", "projects": "read",
+    "overview": "read", "nodes": "read", "clusters": "read", "storage": "read", "networks": "read",
+    "projects": "read",
     "templates": "read", "template_instances": "read", "replications": "read", "leases": "read",
     "lease_status": "read", "queue": "read", "migrations": "read", "fleet": "read", "ledger": "read",
     "tokens": "operator", "operators": "operator", "grants": "operator", "sources": "operator",
     "builds": "operator", "settings": "operator", "audit": "operator", "audit_export": "operator",
+    "dismissals": "operator",
 }
 
 # tag → (connection → JSON-able dict). Each references the inventory function at CALL time (not bound at
@@ -181,6 +185,8 @@ _API: dict[str, Callable[[psycopg.Connection[Any]], dict[str, Any]]] = {
     "nodes": lambda c: {"nodes": inventory.list_nodes(c)},
     "clusters": lambda c: {"clusters": inventory.list_clusters(c)},
     "storage": lambda c: {"storage": inventory.list_storage(c)},
+    # 0039 logical networks + each node's bridge for them: the same open-read class as storage reachability.
+    "networks": lambda c: {"networks": inventory.list_networks(c)},
     "projects": lambda c: {"projects": inventory.list_projects(c)},
     "templates": lambda c: {"templates": inventory.list_templates(c)},
     "template_instances": lambda c: {"template_instances": inventory.list_template_instances(c)},
@@ -955,10 +961,13 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
     "/api/network/node": (_parse_network_node,
                           lambda c, **k: admin.set_network_node(
                               c, k["node_id"], k["logical_network_id"], bridge=k["bridge"])),
+    # A quarantined pair is refused without a strict-bool `force` (pair_quarantined): delete + re-declare would
+    # otherwise launder the quarantine, as /api/storage/node/remove already guards.
     "/api/network/node/delete": (lambda b: {"node_id": _req_str(b, "node_id"),
-                                            "logical_network_id": _req_str(b, "logical_network_id")},
+                                            "logical_network_id": _req_str(b, "logical_network_id"),
+                                            "force": _opt_bool(b, "force", False)},
                                  lambda c, **k: admin.delete_network_node(
-                                     c, k["node_id"], k["logical_network_id"])),
+                                     c, k["node_id"], k["logical_network_id"], force=k["force"])),
     "/api/network/quarantine/clear": (lambda b: {"node_id": _req_str(b, "node_id"),
                                                  "logical_network_id": _req_str(b, "logical_network_id")},
                                       lambda c, **k: admin.clear_network_node_quarantine(
@@ -1204,6 +1213,11 @@ def make_handler(
                 self._gated("sources", lambda c: {"sources": admin.list_template_sources(c)})
             elif tag == "builds":
                 self._gated("builds", lambda c: {"builds": build.list_builds(c)})
+            elif tag == "dismissals":
+                # the discovery-dismissal roster (0044): operator config with free-text notes, so operator-gated
+                # like sources/builds. Ledger-only: the dashboard holds no Proxmox credential, so the live drift
+                # report stays the operator MCP tool; this page confirms and dismisses from it.
+                self._gated("dismissals", admin.list_discovery_dismissals)
             elif tag == "settings":
                 self._gated("settings", _read_settings)
             elif tag == "audit":

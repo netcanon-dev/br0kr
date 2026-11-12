@@ -332,7 +332,7 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
     either grant is a `403` at `download-url`, surfaced as `build_acl_denied` / `rebuild_acl_denied` (NOT visible
     in `pveum acl list`). **Also,
     since 0041, each build/`rebuild_source` TARGET pool must DECLARE its PVE content types** via
-    `set_storage_content` (dashboard `POST /api/storage/content`, or `admin.set_storage_content`) — e.g.
+    `set_storage_content` (the dashboard Storage card's **content** button, or `admin.set_storage_content`) — e.g.
     `omv → import,images,rootdir`, `FastStorage → images,rootdir` — else the request is refused
     `storage_capability_undeclared` / `storage_not_import_capable` up front (an `import`-less pool can never be a
     build target). If your bridge lives in a custom SDN zone, grant `PVESDNUser` on that zone instead of
@@ -727,8 +727,8 @@ goes live, or new template admits refuse (`no_reachable_instance`). Existing ACT
    the dashboard **Storage** card shows each pool's binding; **Template instances** shows one seed per catalog
    template. On a multi-node cluster the daemon logs a LOUD `PLACEMENT PREFLIGHT` line + an `unbound_instances`
    fleet stat for each still-unbound seed.
-2. **Declare which nodes reach each pool** (dashboard → Storage → set reachable nodes; or the admin verb
-   `set_storage_nodes <pool> <node…>`). A pair is born UNVERIFIED; the post-clone assertion stamps it verified
+2. **Declare which nodes reach each pool** (dashboard → Storage card → **+ node**, one node at a time; or the
+   admin verb `set_storage_nodes <pool> <node…>`). A pair is born UNVERIFIED; the post-clone assertion stamps it verified
    on the first correct clone. Declare only nodes that PHYSICALLY reach the pool — over-declaring onto dir-type
    storage is caught at runtime (the guest lands wrong, the assertion releases it + quarantines the pair), but
    it is a transient wrong-pool write you want to avoid.
@@ -769,7 +769,9 @@ token env** (`PVE_TOKEN_SECRET`) to build drivers — otherwise it returns `chec
 point your operator MCP client at it (loopback `127.0.0.1:${OPERATOR_GATEWAY_PORT:-8082}`, or over `ssh -L`;
 [operator-tier.md §2](operator-tier.md)). The tenant `gateway`, the network-facing one Caddy and the tunnel route
 to, has no PVE token and does not serve the operator-only tools at all (review UX-02). Clear a
-false/stale quarantine with `clear_storage_node_quarantine`.
+false/stale quarantine with `clear_storage_node_quarantine`, or on the dashboard: click the pair's chip on the
+Storage card → **clear quarantine** (the dashboard holds no PVE token either, so it confirms what these reports
+find; it does not run them).
 
 **Scheduled drift reporting (PR-G, `discovery_interval_seconds`).** To catch drift *before* it bites — instead of
 remembering to run the verb — set the **`discovery_interval_seconds`** knob (operator Settings page, or the
@@ -789,7 +791,8 @@ indicates.
 **Silencing a known-benign finding (PR-H, `dismiss_discovery_finding`).** Some findings re-surface every run and
 are *expected* — most often a node's local scratch pools (`local`/`local-zfs`/`rpool`) reported as `unknown_pool`,
 which you'll never declare as shared template storage. **`dismiss_discovery_finding(kind, node_id, subject)`**
-(operator MCP verb, or the dashboard `/api/discovery/dismiss` route) suppresses one finding by the identity you
+(operator MCP verb, or the dashboard's *Discovery dismissals* panel on the Capacity tab, which also lists and
+clears them) suppresses one finding by the identity you
 copy from the report row — `kind` is the bucket name, `subject` is the row's discriminator (the `pve_name` for
 `unknown_pool`, the `storage_id` for the declared-pool buckets, the `logical_network_id` for the network buckets).
 The finding then drops out of its bucket (and the `discovery_drift` gauge) and moves to the report's `dismissed`

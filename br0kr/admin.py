@@ -753,7 +753,8 @@ def remove_storage_node(
     conn: psycopg.Connection[Any], storage_id: str, node_id: str, *, force: bool = False,
 ) -> dict[str, Any]:
     """REMOVE a SINGLE (storage, node) reachability pair (0041, PR-B) — the single-pair un-declare, the twin of
-    `delete_network_node`. **Quarantine-laundering guard:** a QUARANTINED pair is REFUSED without `force`
+    `delete_network_node` (which has the same guard). **Quarantine-laundering guard:** a QUARANTINED pair is
+    REFUSED without `force`
     (`pair_quarantined`) — else `remove` + `add_storage_node` would be a two-step bypass of the audited
     `clear_storage_node_quarantine` (remove drops the row, add re-creates it born-un-quarantined, silently
     laundering a fail-closed quarantine). `unknown_pair` if no such row. No cluster-coherence guard (removal of
@@ -874,6 +875,20 @@ def clear_discovery_dismissal(
             "reason": None if cleared else "unknown_dismissal"}
 
 
+def list_discovery_dismissals(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    """The discovery-dismissal roster (0044) for the dashboard: every dismissed finding (kind, node_id, subject,
+    the operator's note, `dismissed_by` when the MCP path recorded one, and when), newest first, plus `kinds`:
+    each dismissable kind -> the report-row field its `subject` comes from, so the page's dismiss form offers
+    exactly the kinds the verb accepts. Ledger-only: it never reads Proxmox (the dashboard holds no PVE
+    credential; the live drift report is the operator MCP tool `discover_reachability`). Read; does not mutate."""
+    rows = conn.execute(
+        "SELECT kind, node_id, subject, note, dismissed_by, dismissed_at FROM discovery_dismissal "
+        "ORDER BY dismissed_at DESC, id DESC").fetchall()
+    return {"dismissals": [{"kind": r[0], "node_id": r[1], "subject": r[2], "note": r[3], "dismissed_by": r[4],
+                            "dismissed_at": _iso(r[5])} for r in rows],
+            "kinds": placement.dismissal_subject_fields()}
+
+
 def create_logical_network(
     conn: psycopg.Connection[Any], network_id: str, *, description: str | None = None,
 ) -> dict[str, Any]:
@@ -960,22 +975,31 @@ def clear_network_node_quarantine(
 
 
 def delete_network_node(
-    conn: psycopg.Connection[Any], node_id: str, logical_network_id: str,
+    conn: psycopg.Connection[Any], node_id: str, logical_network_id: str, *, force: bool = False,
 ) -> dict[str, Any]:
     """UN-DECLARE a single (node, logical net) → bridge mapping (0039) — the narrowing 0038's declarative
     `set_node_bridges` gave for free (dropping a name deleted its row). Without it the only ways to narrow are the
     automatic quarantine (which requires a doomed cross-node clone to fail first) or `delete_logical_network`
     (fleet-wide collateral). Use this when a node's bridge for a net is decommissioned with no replacement: the
-    pair stops being admit-eligible immediately (fail-closed), so no lease wastes a clone against it. Reports
-    `unknown_pair` if no such row. Does not commit (caller owns the txn)."""
+    pair stops being admit-eligible immediately (fail-closed), so no lease wastes a clone against it.
+    **Quarantine-laundering guard** (review UI-04, the twin of `remove_storage_node`'s): a QUARANTINED pair is
+    REFUSED without `force` (`pair_quarantined`), else delete + `set_network_node` would re-create it born
+    un-quarantined, a two-step bypass of the audited `clear_network_node_quarantine` (`set_network_node` alone keeps
+    the quarantine on a re-point). Reports `unknown_pair` if no such row. Does not commit (caller owns the txn)."""
     row = conn.execute(
-        "DELETE FROM network_node WHERE node_id = %s AND logical_network_id = %s RETURNING node_id",
-        (node_id, logical_network_id)).fetchone()
+        "DELETE FROM network_node WHERE node_id = %s AND logical_network_id = %s "
+        + ("" if force else "AND quarantined_at IS NULL ")
+        + "RETURNING node_id", (node_id, logical_network_id)).fetchone()
     if row is None:
-        return {"node_id": node_id, "logical_network_id": logical_network_id, "deleted": False,
-                "reason": "unknown_pair"}
-    log.info("network_node declaration deleted: (%s, %s)", node_id, logical_network_id,
-             extra={"node_id": node_id, "logical_network": logical_network_id})
+        exists = conn.execute(
+            "SELECT quarantined_at FROM network_node WHERE node_id = %s AND logical_network_id = %s",
+            (node_id, logical_network_id)).fetchone()
+        # pair_quarantined only when the row really is quarantined (a pair inserted concurrently, born
+        # un-quarantined, is unknown_pair to this call; a re-run removes it), as in remove_storage_node
+        reason = "pair_quarantined" if exists is not None and exists[0] is not None else "unknown_pair"
+        return {"node_id": node_id, "logical_network_id": logical_network_id, "deleted": False, "reason": reason}
+    log.info("network_node declaration deleted%s: (%s, %s)", " (forced)" if force else "", node_id,
+             logical_network_id, extra={"node_id": node_id, "logical_network": logical_network_id})
     return {"node_id": node_id, "logical_network_id": logical_network_id, "deleted": True, "reason": None}
 
 

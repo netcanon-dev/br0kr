@@ -16,12 +16,51 @@ const vm = require('vm');
 const [, , scriptPath, scenarioName] = process.argv;
 
 // ── a minimal DOM. Every element the page asks for by id exists (created on first use). ──
+// A browser builds NEW elements from markup, so a form control starts from what its markup says (value, checked,
+// the selected option, a button's label) with no handler bound. The fake keeps one element per id across writes,
+// so hydrate() resets each control a write declares to its markup state: a scenario then sees what an operator
+// would (a pre-ticked checkbox stays ticked), and a handler bound to an earlier dialog cannot survive into the next.
+// An id'd element written empty (a dialog's error line) starts with no text. Limits: only markup that carries an
+// id="..." is hydrated (bare <option>s written into an existing select keep its old value), a textarea only loses
+// its handler, and only the four entities esc() emits are decoded.
+const unesc = s => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+function hydrate(html) {
+  if (!html || html.indexOf('id="') < 0) return;
+  const ctl = /<(input|select|button|textarea)\b([^>]*)>/g;
+  let m;
+  const empty = /<([a-z]+)\b([^>]*)><\/\1>/g;
+  while ((m = empty.exec(html))) {
+    const idm = /\bid="([^"]*)"/.exec(m[2]);
+    if (idm) document.getElementById(idm[1]).textContent = '';
+  }
+  while ((m = ctl.exec(html))) {
+    const idm = /\bid="([^"]*)"/.exec(m[2]);
+    if (!idm) continue;
+    const el = document.getElementById(idm[1]);
+    el.onclick = null;
+    if (m[1] === 'input') {
+      const v = /\bvalue="([^"]*)"/.exec(m[2]);
+      el.value = v ? unesc(v[1]) : '';
+      el.checked = /\schecked\b/.test(m[2]);
+    } else if (m[1] === 'select') {
+      const end = html.indexOf('</select>', m.index);
+      const opts = [...html.slice(m.index, end < 0 ? undefined : end).matchAll(/<option value="([^"]*)"([^>]*)>/g)];
+      const sel = opts.find(o => /\bselected\b/.test(o[2])) || opts[0];
+      el.value = sel ? unesc(sel[1]) : '';
+    } else if (m[1] === 'button') {
+      const end = html.indexOf('</button>', m.index + m[0].length);
+      el.textContent = end < 0 ? '' : html.slice(m.index + m[0].length, end);
+    }
+  }
+}
 class El {
   constructor(tag, id) {
-    this.tagName = tag; this.id = id || ''; this.innerHTML = ''; this.textContent = ''; this.className = '';
+    this.tagName = tag; this.id = id || ''; this._html = ''; this.textContent = ''; this.className = '';
     this.value = ''; this.style = {}; this.dataset = {}; this.children = []; this.parentNode = null;
     this.onclick = null; this.attrs = {}; this.classList = { toggle() {}, add() {}, remove() {} };
   }
+  get innerHTML() { return this._html; }
+  set innerHTML(v) { this._html = String(v); hydrate(this._html); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   remove() {
@@ -62,7 +101,8 @@ let routes = {};
 const calls = [];
 // A route may be a function of the request returning the response, or a promise of it (to hold a reply back).
 function fakeFetch(path, opts) {
-  calls.push({ path: String(path), method: (opts && opts.method) || 'GET' });
+  calls.push({ path: String(path), method: (opts && opts.method) || 'GET',
+    body: opts && opts.body ? JSON.parse(opts.body) : null });
   const route = routes[String(path).split('?')[0]];
   return Promise.resolve(typeof route === 'function' ? route(path, opts) : route).then(res => {
     if (!res) res = { status: 404, body: { error: 'not_found' } };
@@ -125,6 +165,7 @@ function healthy() {
     '/api/template/sources': { status: 200, body: { sources: [] } },
     '/api/template/builds': { status: 200, body: { builds: [] } },
     '/api/audit': { status: 200, body: { audit: [], next_before_id: null } },
+    '/api/discovery/dismissals': { status: 200, body: { dismissals: [], kinds: {} } },
   };
 }
 
@@ -148,7 +189,27 @@ const ok = body => ({ status: 200, body });
 const pathsSince = n => calls.slice(n).map(c => c.path.split('?')[0]);
 const pollTimer = () => timers.find(t => t.fn === run('poll'));
 const OPERATOR_READS = ['/api/tokens', '/api/operators', '/api/template/grants', '/api/template/sources',
-  '/api/template/builds', '/api/settings', '/api/audit'];
+  '/api/template/builds', '/api/settings', '/api/audit', '/api/discovery/dismissals'];
+// UI-04 fixtures: a pool whose one reachable node is quarantined, a logical network whose one node bridge is
+// quarantined, and a built template on that network
+const PARITY = () => ok({ ...OVERVIEW,
+  storage: [{ storage_id: 'fast', cluster_id: 'c1', pve_name: 'FastStorage', content_types: ['images', 'iso'],
+    disk_gb_used: 0, disk_gb_total: 100, disk_pct: 0, lease_count: 0,
+    reachable_nodes: [{ node_id: 'n1', verified: true, quarantined: true }] }],
+  networks: [{ network_id: 'lan', description: null, template_count: 1,
+    nodes: [{ node_id: 'n1', bridge: 'vmbr0', verified: false, quarantined: true }] }],
+  templates: [{ template_id: 't1', cluster_id: 'c1', vmid: 9000, name: 'debian', public: true, replicable: true,
+    source_dirty: false, logical_network_id: 'lan' }] });
+const posts = n => calls.slice(n).filter(c => c.method === 'POST').map(c => ({ path: c.path, body: c.body }));
+const pressSave = async () => {
+  const m = /<button class="act" onclick="([^"]*)">/.exec($('form-slot').innerHTML);
+  if (!m) throw new Error('the open dialog has no primary button with an inline handler');
+  await run(unesc(m[1])); await settle();
+};
+const click = async id => {
+  if (!$('form-slot').innerHTML.includes(`id="${id}"`)) throw new Error(`the open dialog has no #${id}`);
+  await run(`document.getElementById('${id}').onclick()`); await settle();
+};
 const strip = () => ({ html: $('attention').innerHTML, hidden: $('attention').hidden === undefined
   ? 'never rendered' : $('attention').hidden, images: $('badge-images').textContent,
   tenancy: $('badge-tenancy').textContent, tab: run('TAB') });
@@ -157,6 +218,181 @@ const FAILED_BUILD = (id, at) => ({ build_id: id, target_template_id: 'debian-' 
 async function confirmYes() { await run("document.getElementById('cm-ok').onclick()"); await settle(); }
 
 const SCENARIOS = {
+  async parity_storage_pair() {
+    await boot({ token: 't', routes: { '/api/overview': PARITY(),
+      '/api/storage/quarantine/clear': ok({ storage_id: 'fast', node_id: 'n1', cleared: true, reason: null }),
+      '/api/storage/node/remove': (path, opts) => JSON.parse(opts.body).force
+        ? ok({ storage_id: 'fast', node_id: 'n1', removed: true, reason: null })
+        : ok({ storage_id: 'fast', node_id: 'n1', removed: false, reason: 'pair_quarantined' }) } });
+    const card = $('storage').innerHTML;
+    run('openStoragePair(0, 0)');
+    const modal = $('form-slot').innerHTML, n = calls.length;
+    await click('pair-clear');
+    const cleared = { posts: posts(n), slot: $('form-slot').innerHTML, toasts: toasts() };
+    run('openStoragePair(0, 0)');
+    const m = calls.length;
+    await click('pair-remove');
+    const refused = { err: $('form-err').textContent, button: $('pair-remove').textContent };
+    await click('pair-remove');
+    return { card, modal, cleared, refused, removePosts: posts(m), slot: $('form-slot').innerHTML };
+  },
+  async parity_storage_content() {
+    await boot({ token: 't', routes: { '/api/overview': PARITY(),
+      '/api/storage/content': ok({ storage_id: 'fast', updated: true, reason: null }) } });
+    run('openContentForm(0)');
+    const form = $('form-slot').innerHTML, ticked = [0, 1, 2, 3].map(k => !!$('sc-' + k).checked), n = calls.length;
+    run("document.getElementById('sc-0').checked = false");   // untick images
+    await pressSave();
+    const armed = { err: $('form-err').textContent, posts: posts(n) };
+    await pressSave();      // the second save confirms it
+    const dropped = posts(n);
+    run('openContentForm(0)');                          // a fresh dialog: images + iso ticked again
+    run("document.getElementById('sc-2').checked = true");   // add import
+    const m = calls.length;
+    await pressSave();
+    return { form, ticked, armed, dropped, kept: posts(m) };
+  },
+  async parity_storage_placement() {
+    const over = PARITY().body;
+    over.clusters = over.clusters.concat([{ ...over.clusters[0], cluster_id: 'c2' }]);
+    over.storage = over.storage.concat([{ storage_id: 'loose', cluster_id: null, pve_name: null, content_types: null,
+      disk_gb_used: 0, disk_gb_total: 50, disk_pct: 0, lease_count: 0, reachable_nodes: [] }]);
+    await boot({ token: 't', routes: { '/api/overview': ok(over),
+      '/api/storage/placement': (path, opts) => JSON.parse(opts.body).pve_name === 'taken'
+        ? ok({ storage_id: 'loose', updated: false, reason: 'duplicate_pve_storage' })
+        : ok({ storage_id: 'fast', updated: true, reason: null }) } });
+    const n = calls.length;
+    run('openPlacementForm(0)');                         // bound to c1, named FastStorage
+    const form = $('form-slot').innerHTML;
+    run("document.getElementById('sp-pve').value = ''");
+    await pressSave();     // blank name: the id is the name
+    const renamed = { posts: posts(n), slot: $('form-slot').innerHTML };
+    const m = calls.length;
+    run('openPlacementForm(0)');
+    run("document.getElementById('sp-cluster').value = 'c2'");
+    await pressSave();     // it has a reachable node in c1: warn first
+    const armed = { err: $('form-err').textContent, posts: posts(m) };
+    await pressSave();
+    const moved = posts(m);
+    const q = calls.length;
+    run('openPlacementForm(1)');                         // unbound: nothing picked yet
+    const unboundForm = $('form-slot').innerHTML;
+    await pressSave();
+    const unpicked = { err: $('form-err').textContent, posts: posts(q) };
+    run("document.getElementById('sp-cluster').value = 'c1'; document.getElementById('sp-pve').value = 'taken'");
+    await pressSave();
+    return { form, renamed, armed, moved, unboundForm, unpicked, refused: $('form-err').textContent,
+      open: $('form-slot').innerHTML };
+  },
+  async parity_storage_add_node() {
+    const over = PARITY().body;
+    over.nodes = over.nodes.concat([{ ...over.nodes[0], node_id: 'n2' }, { ...over.nodes[0], node_id: 'x9',
+      cluster_id: 'other' }]);
+    await boot({ token: 't', routes: { '/api/overview': ok(over),
+      '/api/storage/node/add': (() => { let k = 0; return () => ok({ storage_id: 'fast', node_id: 'n2',
+        added: k++ === 0, reason: null }); })() } });
+    run('openStorageNodeAdd(0)');
+    const form = $('form-slot').innerHTML, n = calls.length;
+    run("document.getElementById('sn-node').value = 'n2'");
+    await pressSave();
+    const first = { posts: posts(n), slot: $('form-slot').innerHTML, toasts: toasts() };
+    run('openStorageNodeAdd(0)');                        // the stale page still offers n2; the server already has it
+    await pressSave();
+    return { form, ...first, again: toasts() };
+  },
+  async parity_bridges() {
+    await boot({ token: 't', routes: { '/api/overview': PARITY(),
+      '/api/network/node': ok({ node_id: 'n1', logical_network_id: 'lan', bridge: 'vmbr1', updated: true,
+        reason: null }),
+      '/api/network/quarantine/clear': ok({ node_id: 'n1', logical_network_id: 'lan', cleared: true, reason: null }),
+      '/api/network/node/delete': (path, opts) => JSON.parse(opts.body).force
+        ? ok({ node_id: 'n1', logical_network_id: 'lan', deleted: true, reason: null })
+        : ok({ node_id: 'n1', logical_network_id: 'lan', deleted: false, reason: 'pair_quarantined' }) } });
+    const table = $('nodes').innerHTML, panel = $('networks').innerHTML;
+    run('openBridgesForm(0)');
+    const modal = $('form-slot').innerHTML, n = calls.length;
+    run("document.getElementById('nb-bridge').value = ' vmbr1 '");   // nb-net shows lan, the only network
+    await click('nb-save');
+    const saved = toasts();
+    run('openBridgesForm(0)');
+    await click('nb-clear-0');
+    run('openBridgesForm(0)');
+    await click('nb-del-0');
+    const refused = { err: $('form-err').textContent, button: $('nb-del-0').textContent, open: $('form-slot').innerHTML };
+    await click('nb-del-0');
+    return { table, panel, modal, saved, refused, posts: posts(n), slot: $('form-slot').innerHTML };
+  },
+  async parity_networks_panel() {
+    await boot({ token: 't', routes: { '/api/overview': PARITY(),
+      '/api/network/create': ok({ logical_network_id: 'dmz', created: true, reason: null }),
+      '/api/network/delete': ok({ logical_network_id: 'lan', deleted: true, reason: null }) } });
+    run('openNetworkForm()');
+    run("document.getElementById('ln-id').value = ' dmz '; document.getElementById('ln-desc').value = ''");
+    const n = calls.length;
+    await pressSave();
+    run('deleteNetwork(0)');
+    const confirm = $('form-slot').innerHTML;
+    await confirmYes();
+    return { posts: posts(n), confirm };
+  },
+  async parity_template_controls() {
+    await boot({ token: 't', tab: 'images', routes: { '/api/overview': PARITY(),
+      '/api/template/network': ok({ template_id: 't1', updated: true, reason: null }),
+      '/api/template/source-dirty': ok({ template_id: 't1', updated: true, reason: null, source_dirty: true }) } });
+    const table = $('templates').innerHTML;
+    run('openTemplateNetForm(0)');
+    const form = $('form-slot').innerHTML, n = calls.length;
+    run("document.getElementById('tn-net').value = ''");
+    await pressSave();
+    run('toggleSourceDirty(0)');
+    const confirm = $('form-slot').innerHTML;
+    await confirmYes();
+    return { table, form, confirm, posts: posts(n) };
+  },
+  async parity_template_clear_dirty() {
+    const over = PARITY().body;
+    over.templates = [{ ...over.templates[0], source_dirty: true }];
+    await boot({ token: 't', tab: 'images', routes: { '/api/overview': ok(over),
+      '/api/template/source-dirty': ok({ template_id: 't1', updated: true, reason: null, source_dirty: false }) } });
+    const table = $('templates').innerHTML, n = calls.length;
+    run('toggleSourceDirty(0)');
+    const confirm = $('form-slot').innerHTML;
+    await confirmYes();
+    return { table, confirm, posts: posts(n) };
+  },
+  async parity_dismissals() {
+    await boot({ token: 't', routes: { '/api/discovery/dismissals': ok({ dismissals: [{ kind: 'unknown_pool',
+      node_id: 'n1', subject: 'local-zfs', note: 'scratch', dismissed_by: null,
+      dismissed_at: '2026-11-12T08:00:00+00:00' }], kinds: { unknown_pool: 'pve_name', declared_absent: 'storage_id' } }),
+      '/api/discovery/dismissal/clear': ok({ kind: 'unknown_pool', node_id: 'n1', subject: 'local-zfs', cleared: true,
+        reason: null }),
+      '/api/discovery/dismiss': ok({ kind: 'declared_absent', node_id: 'n1', subject: 'fast', dismissed: true,
+        reason: null }) } });
+    const shown = $('discovery-sec').style.display, roster = $('discovery').innerHTML, n = calls.length;
+    run('clearDismissal(0)');
+    await confirmYes();
+    run('openDismissForm()');
+    const form = $('form-slot').innerHTML;
+    run("document.getElementById('dd-kind').value = 'declared_absent'; document.getElementById('dd-node').value = 'n1';"
+      + "document.getElementById('dd-subject').value = ' fast '; document.getElementById('dd-note').value = ''");
+    await pressSave();
+    return { shown, roster, form, posts: posts(n) };
+  },
+  async parity_dismissals_locked() {
+    await boot({ routes: { '/api/discovery/dismissals': ok({ dismissals: [{ kind: 'unknown_pool', node_id: 'n1',
+      subject: 'local-zfs', note: 'a private note', dismissed_by: null, dismissed_at: '2026-11-12T08:00:00+00:00' }],
+      kinds: { unknown_pool: 'pve_name' } }) } });
+    const never = $('discovery-sec').style.display;
+    $('tok').value = 't'; run('unlock()'); await settle();
+    const unlocked = $('discovery').innerHTML;
+    run('lock()'); await settle();
+    return { never, unlocked, after: $('discovery').innerHTML, display: $('discovery-sec').style.display,
+      roster: run('DISMISS') };
+  },
+  async parity_dismissals_read_fails() {
+    await boot({ token: 't', routes: { '/api/discovery/dismissals': fail(503, 'ledger_unreachable') } });
+    return { discovery: $('discovery').innerHTML };
+  },
   async sources_unauthorized() {
     await boot({ token: 't', tab: 'images', routes: { '/api/template/sources': fail(401, 'unauthorized') } });
     return { downloads: $('downloads').innerHTML };

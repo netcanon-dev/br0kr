@@ -53,16 +53,17 @@ def test_every_api_route_has_a_dispatch_entry():
     reader in `_API`, so no route can resolve to a tag the handler then KeyErrors on. Guards a route added
     without its reader (or vice-versa) — a 500 on a path that advertises itself as live."""
     api_tags = {tag for path, tag in dashboard._ROUTES.items()
-                # operator-gated reads (tokens/operators/grants/sources/builds/settings/audit) + whoami + the
+                # operator-gated reads (tokens/operators/grants/sources/builds/dismissals/settings/audit) + whoami + the
                 # audit download + the per-lease status (needs a ?lease_id= query param) are handled specially
                 # in do_GET, not via the zero-arg _API table
                 # "asset" = the vendored UI files (br0kr/ui_assets.py) — static bytes, no _API reader
                 if tag not in ("page", "health", "meta", "whoami", "tokens", "operators", "grants", "sources",
-                               "builds", "settings", "audit", "audit_export", "lease_status", "asset")}
+                               "builds", "dismissals", "settings", "audit", "audit_export", "lease_status",
+                               "asset")}
     assert api_tags == set(dashboard._API)
     # "ledger" = the LEDGER's own Postgres replication posture (br0kr/ledgerhealth.py) — NOT the same
     # subject as "replications", which is TEMPLATE replication. Same open-read class as fleet/nodes.
-    assert api_tags == {"overview", "nodes", "clusters", "storage", "projects", "templates",
+    assert api_tags == {"overview", "nodes", "clusters", "storage", "networks", "projects", "templates",
                         "template_instances", "replications", "leases", "queue", "migrations", "fleet",
                         "ledger"}
     assert "audit" not in dashboard._API   # the audit trail is OPERATOR-gated, never on the open read surface
@@ -1274,3 +1275,81 @@ def test_the_overview_carries_the_fleet_and_ledger_strips_best_effort(monkeypatc
     out = dashboard._API["overview"](conn)
     assert out["fleet"] is None and out["fleet_error"] == "query_failed" and rolled == [1]
     assert out["ledger"]["readable"] is False and out["nodes"] == []
+
+
+# The write routes the page deliberately offers no control for, each with why. Every other POST route must be
+# called from the page, so an operator verb cannot ship curl-only again (review UI-04).
+_NO_PAGE_CONTROL = {
+    "/api/lease/release": "an alias for API clients: the page releases a live lease through /api/cancel",
+    "/api/quota": "the base-quota editor for API clients: the page edits a whole project through /api/project/edit",
+    "/api/storage/nodes": "the declarative replace: the page widens and narrows one pair at a time "
+                          "(/api/storage/node/add and /api/storage/node/remove), so one change never drops the others",
+}
+
+
+def test_every_write_route_has_a_page_control_except_the_named_ones():
+    """Review UI-04: every POST route in `_ACTIONS` has a call site in the client script (a quoted '/api/...'
+    literal on a line that is not a `//` comment), except the routes in `_NO_PAGE_CONTROL`, each with its reason;
+    and every exempt route still exists. This proves a call site exists; that a control on the page reaches it is
+    test_the_parity_controls_are_wired_into_the_page plus the node scenarios in test_dashboard_client.py. Guards an
+    operator write verb shipping curl-only again (the whole discovery arc did: an operator pasted the bearer into
+    shell history to clear a quarantine) and the exemption list turning into cover for a removed route."""
+    js = _script_block(dashboard.PAGE)
+    assert js is not None
+    code = "\n".join(line for line in js.splitlines() if not line.lstrip().startswith("//"))
+    called = set(re.findall(r"['\"`](/api/[a-z0-9/_-]+)(?=['\"`?])", code))
+    assert set(_NO_PAGE_CONTROL) <= set(dashboard._ACTIONS), "an exempt route no longer exists: drop it"
+    assert set(dashboard._ACTIONS) - called == set(_NO_PAGE_CONTROL)
+
+
+def test_network_and_dismissal_reads_are_routed_with_their_access(monkeypatch):
+    """/api/networks is an inventory read in the open class (shared-infra topology like the storage reachability
+    map, no tenant data) served from inventory.list_networks at call time; /api/discovery/dismissals is
+    operator-gated (operator config with free-text notes), handled in do_GET like sources/builds, never an _API
+    read. Guards the dismissal notes landing on the open read surface, or the networks panel reading the wrong
+    function."""
+    from br0kr import inventory
+    assert dashboard.route("/api/networks") == "networks" and dashboard.GET_ACCESS["networks"] == "read"
+    assert dashboard.route("/api/discovery/dismissals") == "dismissals"
+    assert dashboard.GET_ACCESS["dismissals"] == "operator" and "dismissals" not in dashboard._API
+    monkeypatch.setattr(inventory, "list_networks", lambda c: [{"network_id": "lan"}])
+    assert dashboard._API["networks"](object()) == {"networks": [{"network_id": "lan"}]}
+
+
+def test_the_parity_controls_are_wired_into_the_page():
+    """The UI-04 controls sit where an operator looks for them: the storage card offers placement, content and
+    '+ node' and turns each reachability chip into a button that opens the pair (quarantine clear / remove); the
+    node table has a Bridges column and a bridges dialog; a Logical networks panel sits in the Capacity tab and in
+    PANELS (so a failed first load names it); a template row offers network and the hand-modified toggle; the
+    operator-only dismissal roster loads with the operator panels for the Capacity tab. Source needles; what the
+    controls POST is proven in node by the parity_* scenarios of tests/integration/test_dashboard_client.py.
+    Guards a control dropped from render() while its route still exists."""
+    for needle in ('onclick="openPlacementForm(${i})"', 'onclick="openContentForm(${i})"',
+                   'onclick="openStorageNodeAdd(${i})"', 'onclick="openStoragePair(${i},${k})"',
+                   'onclick="openBridgesForm(${i})"', "<th>Bridges</th>", '<section id="networks-sec">',
+                   "networks:'logical networks'", 'onclick="openTemplateNetForm(${i})"',
+                   'onclick="toggleSourceDirty(${i})"', '<section id="discovery-sec" style="display:none">',
+                   "loadDismissals(on('capacity'))", "opFetch('/api/discovery/dismissals')"):
+        assert needle in dashboard.PAGE, needle
+
+
+def test_network_bridge_delete_takes_a_strict_force_flag(monkeypatch):
+    """/api/network/node/delete reads an optional strict-bool `force` (absent → False) and passes it to
+    admin.delete_network_node, which refuses a quarantined pair without it (review UI-04 H-1, the twin of
+    /api/storage/node/remove). A fuzzy value ("true", 1) is a 400, so a quarantine is never dropped on an
+    ambiguous body. Guards the route ignoring the flag (no way to remove a quarantined bridge) or coercing it."""
+    from br0kr import admin
+    parse, verb = dashboard._ACTIONS["/api/network/node/delete"]
+    seen: dict = {}
+    monkeypatch.setattr(admin, "delete_network_node",
+                        lambda c, node, net, *, force: seen.update(node=node, net=net, force=force) or {"deleted": True})
+    verb(object(), **parse({"node_id": "n1", "logical_network_id": "lan", "force": True}))
+    assert seen == {"node": "n1", "net": "lan", "force": True}
+    verb(object(), **parse({"node_id": "n1", "logical_network_id": "lan"}))
+    assert seen["force"] is False
+    assert parse({"node_id": "n1", "logical_network_id": "lan"}) == {
+        "node_id": "n1", "logical_network_id": "lan", "force": False}
+    assert parse({"node_id": "n1", "logical_network_id": "lan", "force": True})["force"] is True
+    for fuzzy in ("true", 1):
+        with pytest.raises(dashboard._Reject):
+            parse({"node_id": "n1", "logical_network_id": "lan", "force": fuzzy})

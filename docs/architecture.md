@@ -291,7 +291,13 @@ rejected as "node full" by the very lease it already created.
   from the same operator allowlist, bounded by a per-project disk quota (`project.max_template_disk_gb`, NULL =
   disabled) enforced reserve-then-settle under a `SELECT … FOR UPDATE` lock on the project row (race-safe — no
   concurrent overshoot) and settled to the actual imported disk size; the image is registered private + owned
-  + auto-granted to the requester (a per-tenant ceiling ABOVE admission, debiting no capacity scope). These
+  + auto-granted to the requester (a per-tenant ceiling ABOVE admission, debiting no capacity scope).
+  **Placement and discovery confirms (review UI-04):** the storage card binds a pool, declares its content types
+  and widens, narrows or un-quarantines ONE reachability pair at a time; the node table declares each node's
+  bridge per logical network (a Logical networks panel manages the names, from `inventory.list_networks`); a
+  template row sets its net0 network and hand-modified mark; an operator-gated roster lists and clears discovery
+  dismissals. The drift REPORT stays on the operator MCP gateway: the dashboard holds no PVE credential, so it
+  confirms what a report found rather than running one. These
   are privileged config
   mutations kept OUT of the
   agent gateway/MCP, dispatched through a data-driven action table; every POST is

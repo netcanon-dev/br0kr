@@ -148,7 +148,7 @@ _LIST_PROJECTS_ONE = _LIST_PROJECTS_TMPL.format(where="WHERE p.id = %s")
 # ONLY public + granted-to-it templates, while the operator/dashboard path passes neither and sees the whole
 # catalog. Ordered by cluster then id so the dashboard groups by cluster (a template vmid is per-cluster).
 _TEMPLATE_COLS = ("t.id, t.cluster_id, t.vmid, t.name, t.description, t.created_at, t.public, "
-                  "t.source_url, t.source_dirty")
+                  "t.source_url, t.source_dirty, t.logical_network_id")
 # The visibility predicate (phase A3): a template a tenant may SEE/select — public, or granted to it via the
 # project_template allowlist. Mirrors the gate in br0kr/auth.template_allowed so list + admission agree.
 _TEMPLATE_VISIBLE_PRED = (
@@ -388,14 +388,47 @@ def _template_row(row: tuple[Any, ...]) -> dict[str, Any]:
     and `source_dirty` (the hand-modification attestation — a rebuild would lose the in-guest fix, so it is
     refused source_hand_modified). The raw `source_url` is DELIBERATELY not surfaced (this read serves the
     OPEN/tenant surface, and a trusted-source URL can carry a presigned credential); only its PRESENCE is.
+    `logical_network_id` is the logical network its net0 is on (0039; None = undeclared, so a cross-node clone
+    of it is refused template_bridge_undeclared) — the dashboard's template network picker pre-selects it.
     Pure, so the catalog the dashboard + the agent list_templates tool render is testable without a DB."""
-    tid, cluster_id, vmid, name, description, created_at, public, source_url, source_dirty = row
+    (tid, cluster_id, vmid, name, description, created_at, public, source_url, source_dirty,
+     logical_network_id) = row
     return {
         "template_id": tid, "cluster_id": cluster_id, "vmid": int(vmid),
         "name": name, "description": description, "public": bool(public),
         "replicable": source_url is not None, "source_dirty": bool(source_dirty),
+        "logical_network_id": logical_network_id,
         "created_at": created_at.isoformat() if created_at is not None else None,
     }
+
+
+# Logical networks (0039): each fleet-global identity, the concrete bridge every node presents for it with that
+# pair's verified/quarantined state (as the storage reachability map shows a pool's nodes), and how many
+# templates' net0 point at it. What the dashboard's Logical networks panel, the node table's bridges and the
+# template network picker render from. Ordered by id; nodes by node id.
+_LIST_NETWORKS = """
+  SELECT ln.id, ln.description,
+         (SELECT count(*) FROM template t WHERE t.logical_network_id = ln.id) AS template_count,
+         COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+                    'node_id',     nn.node_id,
+                    'bridge',      nn.bridge,
+                    'verified',    nn.verified_at    IS NOT NULL,
+                    'quarantined', nn.quarantined_at IS NOT NULL) ORDER BY nn.node_id)
+           FROM network_node nn WHERE nn.logical_network_id = ln.id
+         ), '[]'::jsonb) AS nodes
+  FROM logical_network ln ORDER BY ln.id
+"""
+
+
+def _network_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    """Shape a logical-network row: its id + optional description, the number of templates whose net0 is on it,
+    and `nodes` — one {node_id, bridge, verified, quarantined} per node that declares a bridge for it (verified =
+    a post-clone net0 assertion passed over the pair; quarantined = one failed, so the pair is unreachable until
+    an operator clears it). Pure, so the panel's data is testable without a DB."""
+    nid, description, template_count, nodes = row
+    return {"network_id": nid, "description": description, "template_count": int(template_count),
+            "nodes": list(nodes or [])}
 
 
 # Template INSTANCES (0032): the physical copies of the logical templates — where each lives (cluster/node/
@@ -438,6 +471,14 @@ def list_nodes(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
     rows = conn.execute(_LIST_NODES).fetchall()
     conn.commit()
     return [_node_row(r) for r in rows]
+
+
+def list_networks(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
+    """Every logical network (0039) with its per-node bridges and template count (see _network_row). Read-only;
+    commits to end the read transaction."""
+    rows = conn.execute(_LIST_NETWORKS).fetchall()
+    conn.commit()
+    return [_network_row(r) for r in rows]
 
 
 def list_clusters(conn: psycopg.Connection[Any]) -> list[dict[str, Any]]:
@@ -689,14 +730,15 @@ def fleet_stats(conn: psycopg.Connection[Any], *, window_minutes: int = 60) -> d
 
 
 def overview(conn: psycopg.Connection[Any], *, queue_limit: int = 100) -> dict[str, Any]:
-    """The whole read-only picture in one call — nodes, clusters, storage, projects, templates + their physical
-    instances, leases, the queue, recent migrations, and recent replication jobs — so the dashboard renders a
-    full refresh from a single connection. Each sub-read commits its own txn (the reads are independent
+    """The whole read-only picture in one call — nodes, clusters, storage, logical networks, projects, templates +
+    their physical instances, leases, the queue, recent migrations, and recent replication jobs — so the dashboard
+    renders a full refresh from a single connection. Each sub-read commits its own txn (the reads are independent
     snapshots; nothing here needs them atomic — inventory is advisory, not a capacity decision). Read-only."""
     return {
         "nodes": list_nodes(conn),
         "clusters": list_clusters(conn),
         "storage": list_storage(conn),
+        "networks": list_networks(conn),
         "projects": list_projects(conn),
         "templates": list_templates(conn),
         "template_instances": list_template_instances(conn),

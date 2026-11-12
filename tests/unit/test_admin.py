@@ -699,7 +699,7 @@ def test_add_storage_node_is_additive_and_idempotent():
 
 
 def test_remove_storage_node_refuses_a_quarantined_pair_without_force():
-    """remove_storage_node (0041/PR-B) has the QUARANTINE-LAUNDERING guard delete_network_node lacks: without
+    """remove_storage_node (0041/PR-B) has the QUARANTINE-LAUNDERING guard (delete_network_node has its twin): without
     force the DELETE is gated `AND quarantined_at IS NULL`, so a quarantined pair can't be removed (which +
     add_storage_node would silently launder a fail-closed quarantine, bypassing the audited clear). No row →
     disambiguate unknown_pair (no such pair) vs pair_quarantined (exists but quarantined). force drops the guard.
@@ -919,7 +919,23 @@ def test_delete_network_node_undeclares_a_single_pair():
     collateral of delete_logical_network — the pair stops being admit-eligible immediately (fail-closed)."""
     assert admin.delete_network_node(_Seq(("nX",)), "nX", "lan") == {
         "node_id": "nX", "logical_network_id": "lan", "deleted": True, "reason": None}
-    assert admin.delete_network_node(_Seq(None), "nX", "lan")["reason"] == "unknown_pair"
+    assert admin.delete_network_node(_Seq(None, None), "nX", "lan")["reason"] == "unknown_pair"
+
+
+def test_delete_network_node_refuses_a_quarantined_pair_without_force():
+    """delete_network_node has remove_storage_node's QUARANTINE-LAUNDERING guard (review UI-04 H-1): without force
+    the DELETE is gated `AND quarantined_at IS NULL`, so a quarantined pair stays (delete + set_network_node would
+    otherwise re-create it born un-quarantined, bypassing the audited clear_network_node_quarantine); no row then
+    disambiguates pair_quarantined (it exists, quarantined) from unknown_pair. force drops the guard. Guards the
+    dashboard's one-click bridge remove laundering a fail-closed network quarantine."""
+    ok = _Seq(("nX",))
+    assert admin.delete_network_node(ok, "nX", "lan")["deleted"] is True
+    assert "AND quarantined_at IS NULL" in ok.sqls[0]
+    refused = admin.delete_network_node(_Seq(None, ("2026-11-12",)), "nX", "lan")
+    assert refused == {"node_id": "nX", "logical_network_id": "lan", "deleted": False, "reason": "pair_quarantined"}
+    forced = _Seq(("nX",))
+    assert admin.delete_network_node(forced, "nX", "lan", force=True)["deleted"] is True
+    assert "AND quarantined_at IS NULL" not in forced.sqls[0]
 
 
 def test_set_template_writes_public_even_for_an_in_use_template():
@@ -1283,3 +1299,37 @@ def test_validate_max_pinned_accepts_zero_and_up_rejects_bad():
     assert admin.validate_max_pinned(2 ** 40) == "max_pinned_too_large"
     assert admin.validate_max_pinned(True) == "invalid_max_pinned"
     assert admin.validate_max_pinned("2") == "invalid_max_pinned"
+
+
+def test_list_discovery_dismissals_shapes_the_roster_and_offers_every_dismissable_kind():
+    """The dismissal roster (0044) returns each row as {kind, node_id, subject, note, dismissed_by, dismissed_at as
+    ISO} in the query's order (newest first), and `kinds` maps EXACTLY the kinds dismiss_discovery_finding accepts
+    (placement.DISMISSABLE_KINDS) to the report field each one's subject comes from. Guards the dashboard's dismiss
+    form offering a kind the verb refuses (invalid_kind) or missing one it accepts, and a roster row losing a part
+    of its identity, which would make 'clear' post a different finding."""
+    from br0kr import placement
+    at = datetime.datetime(2026, 11, 12, 8, 0, 0, tzinfo=datetime.UTC)
+
+    class _Rows:
+        def __init__(self) -> None:
+            self.sqls: list[str] = []
+
+        def execute(self, sql: str, params: object = None) -> _Rows:
+            self.sqls.append(sql)
+            return self
+
+        def fetchall(self) -> list[tuple]:
+            return [("unknown_pool", "n1", "local-zfs", "node-local scratch", None, at),
+                    ("declared_absent", "n2", "fast", None, "ops", at)]
+
+    c = _Rows()
+    out = admin.list_discovery_dismissals(c)
+    assert out["dismissals"] == [
+        {"kind": "unknown_pool", "node_id": "n1", "subject": "local-zfs", "note": "node-local scratch",
+         "dismissed_by": None, "dismissed_at": at.isoformat()},
+        {"kind": "declared_absent", "node_id": "n2", "subject": "fast", "note": None, "dismissed_by": "ops",
+         "dismissed_at": at.isoformat()}]
+    assert set(out["kinds"]) == placement.DISMISSABLE_KINDS
+    assert out["kinds"]["unknown_pool"] == "pve_name" and out["kinds"]["declared_missing_bridge"] == \
+        "logical_network_id"
+    assert len(c.sqls) == 1 and "ORDER BY dismissed_at DESC" in c.sqls[0]
