@@ -18,7 +18,9 @@ server-side, only its **SHA-256 hash is stored**, and the plaintext is returned 
 characters, no prefix) — copy it immediately, it cannot be recovered.
 
 Mint one from the dashboard's **Security & Ops → Agent tokens** panel (the write actions require the dashboard
-to be running with `BR0KR_DASHBOARD_TOKEN` set). Pick the **tier** the agent needs:
+to be running with `BR0KR_DASHBOARD_TOKEN` set), or without the dashboard, with the ledger credential:
+`br0kr-admin token create --scope consume --label ci-runner --project team-a` (in the Compose stack,
+`docker compose run --rm gateway python -m br0kr.cli token create …`). Pick the **tier** the agent needs:
 
 | Tier | Bound to a project? | What it can call |
 |------|---------------------|------------------|

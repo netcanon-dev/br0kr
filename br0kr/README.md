@@ -3,8 +3,9 @@
 ## What it is
 
 The broker's Python package: the processes (`python -m br0kr.daemon`, `br0kr.mcp_server`, `br0kr.dashboard`,
-`br0kr.oauth`, `br0kr.migrate`) and the modules they share. The [module map](../docs/architecture.md#module-map) has
-one row per module: what it does, whether it writes the ledger or acts on Proxmox, and what proves it.
+`br0kr.oauth`, `br0kr.migrate`), the `br0kr.cli` token tool, and the modules they share. The
+[module map](../docs/architecture.md#module-map) has one row per module: what it does, whether it writes the
+ledger or acts on Proxmox, and what proves it.
 
 ## Architecture
 

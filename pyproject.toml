@@ -53,6 +53,7 @@ br0kr-migrate = "br0kr.migrate:main"
 br0kr-gateway = "br0kr.mcp_server:main"
 br0kr-daemon = "br0kr.daemon:main"
 br0kr-dashboard = "br0kr.dashboard:main"
+br0kr-admin = "br0kr.cli:main"
 
 [tool.hatch.version]
 path = "br0kr/__init__.py"

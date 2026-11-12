@@ -41,7 +41,10 @@ operator token ignores any `project_id` you pass and is always stored project-le
 `expires_in_days` sets its lifetime; without it the token expires in 90 days, and only `never_expires: true`
 mints one that never does (see rotation, below).
 
-**B. From Python** (an operator script against the ledger — e.g. during bootstrap):
+**B. Headless**, with the ledger credential: `br0kr-admin token create --scope operator --label ops-oncall`
+(in the Compose stack, `docker compose run --rm -T gateway python -m br0kr.cli token create …`). It validates,
+mints, audits (surface `cli`) and prints the secret once. Prefer it to calling the verbs from Python, as below:
+that validates and mints, but writes no audit row.
 
 ```python
 from br0kr import admin, db

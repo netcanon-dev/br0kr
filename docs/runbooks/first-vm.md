@@ -104,13 +104,18 @@ bare hostname/IP` (fix the row with `/api/node/edit` or `/api/cluster/edit`); th
 ## 5 · Mint the agent's token
 
 ```bash
-post /api/token/create '{"scope":"consume","label":"first-agent","project_id":"first"}'
+docker compose run --rm -T gateway \
+  python -m br0kr.cli token create --scope consume --label first-agent --project first
 ```
 
-**Proves it:** `{"token_id": 1, "secret": "…", "scope": "consume", "project_id": "first", "created": true, …}`.
-The `secret` is shown once; br0kr keeps only its hash. A `consume` token can lease, renew and release within
-project `first`, and nothing else. It expires in 90 days; add `"expires_in_days": N` to choose, or
-`"never_expires": true` for one that never does.
+That is `br0kr-admin` (the installed command's name), which needs only the ledger credential the stack already
+has; `-T` keeps stderr out of the JSON if a script captures it. The dashboard does the same:
+`post /api/token/create '{"scope":"consume","label":"first-agent","project_id":"first"}'`.
+
+**Proves it:** a JSON object with `"token_id": 1`, `"secret": "…"`, `"scope": "consume"`, `"project_id": "first"`
+and `"created": true`. The `secret` is shown once; br0kr keeps only its hash. A `consume` token can lease, renew
+and release within project `first`, and nothing else. It expires in 90 days; add `--days N` to choose, or
+`--never-expires` for one that never does (`expires_in_days` / `never_expires` in the dashboard's body).
 
 ## 6 · Lease the VM
 

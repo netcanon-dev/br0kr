@@ -296,7 +296,8 @@ pg-* included, so use the commands above here (and repeat them to redeploy).
 
 - **Register the actuation fleet** (so the daemon can build real VMs) — via the token-gated **dashboard**
   (Clusters / Nodes / Storage panels) or the equivalent `POST /api/{cluster,node,storage}/create` carrying
-  the `BR0KR_DASHBOARD_TOKEN` bearer (or, if you prefer, direct ledger `INSERT`s — config-as-data either way).
+  the `BR0KR_DASHBOARD_TOKEN` bearer. Both validate each row and record it in the audit trail; a direct ledger
+  `INSERT` would skip both, so don't. (Agent tokens also have a headless path: `br0kr-admin token`.)
   All `*_id`s (`cluster_id`, `node_id`, `storage_id`, `template_id`, `project_id`) are free-text primary keys —
   any non-empty string, and a space is legal (e.g. a project id `Settlement Hunter`):
   - **API shape (all `create`/`delete` verbs).** POST `application/json` with an `Authorization: Bearer

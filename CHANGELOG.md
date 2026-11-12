@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **`br0kr-admin token create|list|revoke`: the first token without the dashboard.** It needs only `PGCONN`,
+  validates, audits (surface `cli`) and prints the secret once; first-vm.md uses it (UX-05).
 - **`wait_for_lease`: one call waits server-side (up to 60 s) for a lease to be ready.** Agents polled
   `lease_status` turn after turn; the tool is async, so a wait never stalls the gateway (FEAT-03).
 - **One way to tell whether any tool call worked: `ok`, and a `reason` when false.** Agents met five failure

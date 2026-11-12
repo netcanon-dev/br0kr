@@ -195,6 +195,7 @@ PAGE = """<!doctype html>
         <option value="">any surface</option>
         <option value="dashboard">dashboard</option>
         <option value="mcp">mcp</option>
+        <option value="cli">cli</option>
       </select>
       <select id="af-outcome" aria-label="outcome" title="applied writes vs denied auth attempts vs refused admissions">
         <option value="">any outcome</option>

@@ -1556,8 +1556,9 @@ def force_fail_build(conn: psycopg.Connection[Any], build_id: int, reason: str |
 
 # ── per-project agent tokens (the MCP gateway's auth surface; operator-trust, no commit) ─────────────
 # An operator mints a bounded, per-project token (0008_api_tokens.sql); an agent presents the secret and
-# br0kr/auth.py resolves it. These verbs are the management surface, exposed ONLY through the dashboard's
-# operator-token-gated POSTs (never over MCP — an agent must not mint its own credential). The secret is
+# br0kr/auth.py resolves it. These verbs are the management surface, exposed through the dashboard's
+# operator-token-gated POSTs and `br0kr-admin token` (br0kr/cli.py, the ledger credential's holder); never
+# over MCP — an agent must not mint its own credential. The secret is
 # generated here, its HASH stored, and the plaintext returned ONCE (create_token); it is never persisted
 # in the clear and never read back. As with every admin verb, these do NOT commit (the caller owns the txn).
 _MAX_TOKEN_TTL_DAYS = 3650   # a 10-year ceiling — a sane bound, not a security control (revoke is the control)

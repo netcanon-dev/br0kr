@@ -458,7 +458,11 @@ Name the residual, why it's accepted, and what would close it.
   it and runs the raw `docker compose` command on a < 2.24 plugin is the residual (documented loudly,
   smoke-checkable). TLS still adds no per-request rotation; the token stays a shared secret to guard. (b) Minting a token is operator-trust: it is exposed only through the
   dashboard's `BR0KR_DASHBOARD_TOKEN`-gated surface (`br0kr/admin.py`, never over MCP), so the operator
-  token guards credential issuance — same trusted-net rule as the rest of the write surface. (c) The
+  token guards credential issuance — same trusted-net rule as the rest of the write surface — and headless
+  through `br0kr-admin token` (`br0kr/cli.py`, review UX-05), which authenticates as the holder of the ledger
+  credential `PGCONN`: the same trust as `br0kr-migrate`, held by someone who could already write the table.
+  It runs the same `validate_token`/`create_token`, records surface `cli`, and is covered by
+  `tests/unit/test_cli.py` and `scripts/harness_cli.py`. (c) The
   `provision` tier lets a token raise/lower its OWN project's quota via the `set_quota` MCP verb
   (`br0kr/gateway.set_quota`), but ONLY within an operator-set ceiling — the project `*_max` columns
   (migration 0009); a NULL ceiling per dimension means it is not self-raisable (capped at the current

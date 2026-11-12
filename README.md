@@ -39,7 +39,8 @@ tunnel, scaling and production hardening: [docs/runbooks/docker-deploy.md](docs/
 Without Docker, `pip install .` (Python 3.11+) puts the four services on `PATH`, each reading the ledger DSN
 from `PGCONN`: `br0kr-migrate` applies the schema (run it first; re-running is safe), `br0kr-daemon` is the
 reconciler (one holds the leader lock), `br0kr-gateway` serves agents over MCP (run as many as you like) and
-`br0kr-dashboard` serves the web dashboard on port 8051.
+`br0kr-dashboard` serves the web dashboard on port 8051. `br0kr-admin` (`token create|list|revoke`)
+mints the first agent token without the dashboard.
 
 ## Features
 

@@ -123,6 +123,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `auth.py` | Bearer token to principal; tier, project and lease-ownership checks. | writes `last_used_at` | — | `unit/test_auth.py`, `harness_auth.py` |
 | `build.py` | Template-download build jobs: guarded-CAS transitions and reads. | writes | — | `unit/test_build.py`, `harness_imgbuild.py` |
 | `bulk.py` | One per-lease verb over many ids, each committed or rolled back alone. | via the verb | — | `unit/test_bulk.py`, `harness_queue.py` |
+| `cli.py` | `br0kr-admin`: mints, lists and revokes agent tokens headless, validated and audited. | via admin, audit | — | `unit/test_cli.py`, `harness_cli.py` |
 | `cloudinit.py` | Pure VM-access policy: SSH key checks, cloud-init config, guest-IP pick. | — | — | `unit/test_cloudinit.py`, `harness_cloudinit.py` |
 | `daemon.py` | The leader's reconcile loop: provision, reap, promote, the jobs, the sweep, each tick. | via lease, admission, reaper, jobs | acts (build reclaim); via reconciler, sweeper | `unit/test_daemon.py`, `harness_daemon.py` |
 | `dashboard.py` | Stdlib HTTP server: read endpoints and the token-gated operator actions. | via admin, gateway, actas, settings, jobs | — | `unit/test_dashboard.py`, `integration/test_dashboard.py` |
@@ -216,8 +217,8 @@ Out of scope by decision, not by omission. Each has its reason, so a request for
   `max_queued` are the fair-share controls. A lease is never evicted to make room for another.
 - **VM lifecycle operations after ACTIVE** (resize, snapshot, console, reboot). The agent has SSH into its guest and
   Proxmox manages the VM; the broker's job is to reserve, hand over and tear down a fenced guest.
-- **A full operator CLI.** Operators use the dashboard and the operator-tier MCP verbs. The one headless verb planned
-  is the operator-token bootstrap.
+- **A full operator CLI.** Operators use the dashboard and the operator-tier MCP verbs. The one headless tool is
+  `br0kr-admin token`, which mints, lists and revokes tokens (review UX-05).
 - **A Terraform / Pulumi provider.** A lease is a short-lived reservation an agent asks for at run time, not declared
   infrastructure.
 
