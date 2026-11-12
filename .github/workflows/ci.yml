@@ -20,6 +20,12 @@ on:
   push:
     branches: [main]          # main — add 'master' if that's your default
   pull_request:
+  # Weekly, and on demand: the same jobs, with the harness job running EVERY ledger harness rather than the
+  # PR set, so a harness that rots (a seed the schema outgrew, a fake missing a new driver call) goes red within
+  # a week instead of waiting for someone to run it by hand (review TEST-02).
+  schedule:
+    - cron: '30 6 * * 1'      # Monday 06:30 UTC
+  workflow_dispatch:
 
 # Default-deny the GITHUB_TOKEN. Every job below is read-only (lint + tests);
 # none push to the repo, publish a package, or write a release. A compromised
@@ -32,7 +38,8 @@ permissions:
 # cancelled. Saves runner minutes; avoids an older commit's stale green racing
 # the new one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The event is part of the key, so the weekly run on main and a push to main never cancel each other.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -128,12 +135,12 @@ jobs:
   harness:
     # The race and saga proofs need a real Postgres: the unit suite stubs the
     # advisory locks and the CAS predicates, so a refactor that breaks them would
-    # otherwise go green here. scripts/run_ci_harnesses.sh holds and describes
-    # the set, and caps each harness's wall clock.
+    # otherwise go green here. scripts/_harness.py holds and describes the set
+    # (CI_SET), gives each harness a fresh database and caps its wall clock.
     name: harness — real Postgres
     runs-on: ubuntu-latest
-    # The set takes about 3 minutes on a 4-vCPU host; this is the backstop.
-    timeout-minutes: 15
+    # The PR set takes about 3 minutes on a 4-vCPU host, every harness about 8; these are the backstops.
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 30 || 15 }}
     services:
       postgres:
         image: postgres:16
@@ -153,6 +160,12 @@ jobs:
       PGPORT: '5432'
       PGUSER: postgres
       PGPASSWORD: broker
+      # The service container is a throwaway: the runner refuses a libpq server without this.
+      BR0KR_THROWAWAY_PG: '1'
+      # The lock is installed below; run with it instead of building the runner's venv.
+      BR0KR_HARNESS_PYTHON: python
+      # Pushes and PRs run the CI set; the weekly and manual runs run every ledger harness.
+      HARNESS_SET: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--all' || '--ci' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -170,7 +183,13 @@ jobs:
           pip install --require-hashes -r requirements.lock.txt   # the hashed lock (review SEC-03)
 
       - name: Run the real-Postgres harnesses (each on a fresh database)
-        run: bash scripts/run_ci_harnesses.sh
+        run: bash scripts/run_harness.sh "${HARNESS_SET}"
+
+      - name: Run ledger_ha in a container of its own (weekly; it restarts its server)
+        # The service container cannot be restarted by a step, so the run above skips ledger_ha; without the
+        # opt-in the runner starts a postgres container for it (the hosted runner has Docker).
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: env -u BR0KR_THROWAWAY_PG bash scripts/run_harness.sh ledger_ha
 
   alert-rules:
     # The shipped Prometheus rules: promtool checks them and runs their unit tests

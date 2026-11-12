@@ -344,7 +344,7 @@ below) and do the sweep dry-run before resuming teardown.
   Postgres with NO server-wide settings). The holder's network is cut without closing its sockets; a
   standby wins the lock of an idle br0kr session (keepalives) and of one mid-reply (`tcp_user_timeout`) in
   about a minute, while control sessions opened without br0kr's settings, idle and mid-reply, still hold
-  theirs (so it was the settings that freed the locks). `scripts/run_leader.sh` checks that
+  theirs (so it was the settings that freed the locks). `scripts/harness_leader.py` checks that
   `leader.holder` names the holding session for positive and negative lock keys.
 - **Operator-owned (standard Postgres ops):** the production replication TOPOLOGY itself —
   streaming replication, the failover controller (Patroni/etc.) + **single-primary fencing**, WAL

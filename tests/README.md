@@ -18,6 +18,7 @@ pwsh tests/validate.ps1          # Windows mirror (-Strict for CI)
 pip install -r tests/requirements-dev.txt
 pytest -m "not e2e and not slow"                 # the hermetic default (what the gate runs)
 pytest -m e2e                                    # reserved: no e2e tests yet (see the pyramid below)
+BR0KR_THROWAWAY_PG=1 PGHOST=... pytest -m harness   # the real-Postgres harness tier (opt-in, see below)
 pytest --cov=br0kr --cov-report=term-missing
 ```
 
@@ -28,6 +29,7 @@ pytest --cov=br0kr --cov-report=term-missing
 | **unit** | `unit` | pure functions, no I/O | none needed |
 | **integration** | `integration` | several modules wired together (daemon tick, reconciler, gateway verbs) against hermetic fakes: a fake PVE driver, a fake connection, no external network (a test may serve the real handler on a loopback socket) | the home-module seams |
 | **e2e** | `e2e` | **reserved, empty today.** The end-to-end proofs are the real-Postgres harnesses below and the live `scripts/live_*.py` runs against a Proxmox node; see [e2e/README.md](e2e/README.md) | opt-in — never in the hermetic default |
+| **harness** | `harness` | the real-Postgres ledger harnesses (`scripts/harness_*.py`), one item each, run on a database of its own | opt-in twice: `-m harness` **and** `BR0KR_THROWAWAY_PG=1` with a throwaway server; else every item skips |
 | *(orthogonal)* | `slow` | long-running; excluded from the fast subset | |
 
 Markers are declared in `pyproject.toml` (`--strict-markers` — a typo is an error).
@@ -35,11 +37,15 @@ Markers are declared in `pyproject.toml` (`--strict-markers` — a typo is an er
 ## Real-Postgres harnesses (`scripts/harness_*.py`)
 
 The race and saga invariants (the advisory-lock order, the lease CAS predicates) can only be proven
-against a real Postgres, so they live outside pytest as `scripts/harness_*.py` gates that print GO and
-exit 0. The CI set runs on every PR in `ci.yml`'s `harness` job via
-[`scripts/run_ci_harnesses.sh`](../scripts/run_ci_harnesses.sh), each on a fresh database in a
-throwaway `postgres:16` service container. The other harnesses still run by hand through their
-`scripts/run_*.sh` wrappers. To add one to CI, append its name to the script's `HARNESSES=(...)` line.
+against a real Postgres, so they are `scripts/harness_*.py` gates that print GO and exit 0. One runner runs
+them, each on a fresh database: `bash scripts/run_harness.sh <name>... | --ci | --all` starts its own
+throwaway `postgres:16` container (a unique name, an ephemeral port, so two runs on one host never collide).
+The CI set runs on every PR in `ci.yml`'s `harness` job, on a service container, and every harness weekly. The same harnesses are the
+pytest `harness` tier ([`harness/`](harness/)): `pytest -m harness` with `BR0KR_THROWAWAY_PG=1` and the
+libpq environment naming a throwaway server. Without both, every item skips, because every harness truncates
+its tables. The few harnesses that need more than one Postgres or a Proxmox node keep their own
+`scripts/run_<name>.sh`. To add a harness to CI, add its name to `CI_SET` in
+[`scripts/_harness.py`](../scripts/_harness.py); [scripts/README.md](../scripts/README.md) lists them all.
 
 ## Hermetic by default — the single mock seam
 
@@ -71,5 +77,6 @@ tests/
   integration/                 # the app driven as a black box, boundaries mocked
                                #   dashboard_client_harness.js: the dashboard client script as served, run
                                #   in node on a fake DOM + fake server (test_dashboard_client.py; self-skips w/o node)
+  harness/                     # the real-Postgres ledger harnesses as pytest items (opt-in: harness marker)
   e2e/                         # the real booted app (opt-in: e2e marker)
 ```

@@ -41,7 +41,8 @@ def connect() -> psycopg.Connection:
 
 
 def reset(cur: psycopg.Cursor) -> None:
-    for tbl in ("project_template", "lease", "template", "node", "cluster", "storage", "project"):
+    for tbl in ("project_template", "lease", "template_instance", "template", "node", "cluster", "storage",
+                "project"):
         cur.execute(f"DELETE FROM {tbl}")
 
 
@@ -59,6 +60,11 @@ def seed(cur: psycopg.Cursor) -> None:
     cur.execute("INSERT INTO template(id,cluster_id,vmid,name,public) VALUES ('priv','clA',9001,'Private',false)")
     # NO `public` column → relies on the migration DEFAULT (must be true / public):
     cur.execute("INSERT INTO template(id,cluster_id,vmid,name) VALUES ('defaulted','clA',9002,'Defaulted')")
+    # Each template's seed instance, as migration 0032 backfills one for every template a deployment had and
+    # create_template inserts one for every new template: since 0033 a templated admit clones only from a
+    # READY instance, and an unbound seed is usable on a one-node cluster (this one).
+    cur.execute("INSERT INTO template_instance (template_id, cluster_id, vmid, instance_state, origin) "
+                "SELECT id, cluster_id, vmid, 'READY', 'seed' FROM template")
 
 
 def allowed(template_id: str | None, project_id: str) -> tuple[bool, str | None]:

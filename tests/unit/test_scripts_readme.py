@@ -4,12 +4,16 @@ The harness catalogue used to live in the top-level README as a hand-kept list t
 directory, and the port each wrapper publishes was tracked nowhere in the repo, so a new harness could take a
 port another one already used. These tests read scripts/README.md and the scripts as text: every script must
 have a row, every row must name a script that exists, and every port a row states must be the port its wrapper
-publishes.
+publishes. Since review TEST-02 the plain harnesses run through scripts/run_harness.sh and have rows of their
+own with no port (the runner's containers take ephemeral ones); only the wrappers that remain fix ports.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -55,23 +59,36 @@ def _files() -> set[str]:
     return {p.name for p in _SCRIPTS.iterdir() if p.is_file() and p.suffix in (".sh", ".py")}
 
 
+def _runner() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("br0kr_harness_runner", _SCRIPTS / "_harness.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod   # dataclasses resolve their module through sys.modules
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_every_script_has_a_catalogue_row():
-    """Every wrapper, live proof and operator tool in scripts/ has its own row; a harness_<name>.py is covered by
-    its run_<name>.sh row, and a live_<name>.py by a run_live_<name>.sh row when one drives it. Guards a new
-    script landing with no line saying what it proves or how to run it."""
+    """Every harness, wrapper, live proof and operator tool in scripts/ has its own row; a harness with its own
+    wrapper is covered by its run_<name>.sh row, a live_<name>.py by a run_live_<name>.sh row when one drives it,
+    and the underscore helpers are described in the text. Guards a new script landing with no line saying what it
+    proves or how to run it."""
     rows = _rows()
+    text = _README.read_text(encoding="utf-8")
     missing = []
     for name in sorted(_files()):
         stem = name[:-len(".py")]
         wrapper = ("run_" + stem[len("harness_"):] if name.startswith("harness_") else "run_" + stem) + ".sh"
+        if name in rows:
+            continue
         if name.startswith(("harness_", "live_")) and name.endswith(".py") and wrapper in rows:
             continue
-        if name.startswith("harness_"):
-            missing.append(f"{name} (no row for it or for {wrapper})")
-        elif name != "_pgconn.sh" and name not in rows:
-            missing.append(name)
+        if name.startswith("_"):
+            if f"`{name}`" not in text:
+                missing.append(f"{name} (a helper: name it in the text)")
+            continue
+        missing.append(name)
     assert not missing, f"scripts/README.md has no row for: {missing}"
-    assert "`_pgconn.sh`" in _README.read_text(encoding="utf-8")   # the sourced helper is described, not tabled
 
 
 def test_every_catalogue_row_names_a_script_that_exists():
@@ -81,13 +98,15 @@ def test_every_catalogue_row_names_a_script_that_exists():
     assert not stale, f"scripts/README.md lists scripts that do not exist: {stale}"
 
 
-def test_every_ledger_harness_has_a_wrapper():
-    """Every harness_<name>.py is driven by a run_<name>.sh. Guards a harness that only its author knows how to
-    run (which Postgres, which port, which venv)."""
-    files = _files()
-    orphans = sorted(n for n in files if n.startswith("harness_")
-                     and "run_" + n[len("harness_"):-len(".py")] + ".sh" not in files)
-    assert not orphans, f"harnesses with no run_<name>.sh: {orphans}"
+def test_a_harness_row_is_for_a_harness_the_runner_runs():
+    """A harness_<name>.py row (read as "run it with run_harness.sh") names a harness the runner owns; one that
+    needs more than one Postgres is described by its wrapper's row instead. Guards the catalogue telling a reader
+    to run a standby or live-Proxmox proof through the runner, which refuses it."""
+    runner = _runner()
+    harness_rows = {n[len("harness_"):-len(".py")] for n in _rows() if n.startswith("harness_")}
+    assert harness_rows, "no harness rows found"
+    assert sorted(harness_rows - set(runner.ledger_harnesses())) == []
+    assert sorted(set(runner.ledger_harnesses()) - harness_rows) == []
 
 
 def test_port_cells_match_the_port_each_wrapper_publishes():
@@ -97,7 +116,7 @@ def test_port_cells_match_the_port_each_wrapper_publishes():
     column are read, so a number in another column (a runbook anchor) is never taken for a port."""
     wrong = []
     rows = {name: cells for name, cells in _rows().items() if "Port" in cells}
-    assert len(rows) > len(_rows()) // 2, "the catalogue's Port columns were not found"
+    assert "run_compose_smoke.sh" in rows and "run_harness.sh" in rows, "the catalogue's Port columns were not found"
     for name, cells in rows.items():
         stated = sorted(int(p) for p in re.findall(r"\b\d{4,5}\b", cells["Port"]))
         assigned = _assigned_ports(name) if name.endswith(".sh") else []

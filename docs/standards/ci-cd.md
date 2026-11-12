@@ -72,15 +72,19 @@ enforces most of them, and a PR that drops one should be rejected in review.
   - The PR gate runs `pytest -m "not e2e and not slow"` — fast, hermetic tiers
     only. Slow/e2e tiers (real browser, live service) run in a dedicated job or
     out-of-band so the gate stays quick.
-- **`harness` job** runs `scripts/run_ci_harnesses.sh` against a `postgres:16`
-  service container: the real-Postgres race and saga proofs. The unit suite stubs
-  the advisory locks and CAS predicates, so this job is what turns a broken lock
-  or a weakened CAS red. Each harness gets a fresh database and a wall-clock cap.
-  The set and what each harness proves are in the script (its header and its
-  `HARNESSES=(...)` line), and `tests/unit/test_repo_hygiene.py` checks every
-  entry names a real harness. Run it locally against any throwaway server (the
-  script header shows how); never point it at a real ledger, since every harness
-  truncates tables.
+- **`harness` job** runs `bash scripts/run_harness.sh --ci` against a
+  `postgres:16` service container: the real-Postgres race and saga proofs. The
+  unit suite stubs the advisory locks and CAS predicates, so this job is what
+  turns a broken lock or a weakened CAS red. Each harness gets a fresh database
+  and a wall-clock cap. The set is `CI_SET` in `scripts/_harness.py` (what each
+  harness proves is in scripts/README.md), and `tests/unit/test_harness_runner.py`
+  checks every entry names a real harness. The job sets `BR0KR_THROWAWAY_PG=1`:
+  the runner uses a server the libpq environment names only with that opt-in,
+  since every harness truncates tables. Locally, `bash scripts/run_harness.sh
+  --ci` starts its own throwaway container instead. The workflow also runs
+  weekly (and on manual dispatch); then this job runs every ledger harness
+  (`--all`, plus `ledger_ha` in a container of its own, since it restarts its
+  server), so one outside the PR set cannot rot unseen.
 - **`alert-rules` job** runs `scripts/check_alert_rules.sh`: `promtool check rules`
   and `promtool test rules` on `docker/prometheus/br0kr-alerts.yml`, in a
   digest-pinned Prometheus image with no network. The unit tests in

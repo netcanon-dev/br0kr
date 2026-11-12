@@ -3,9 +3,9 @@
 This pytest layer (marker `e2e`) is **empty on purpose**. The end-to-end proofs br0kr has today live
 elsewhere, because they need resources a pytest run should not assume:
 
-- **Real Postgres:** `scripts/harness_*.py`, each run by its `scripts/run_*.sh` against a throwaway
-  `postgres:16`; the CI `harness` job runs the race-critical set on every PR
-  (`scripts/run_ci_harnesses.sh`).
+- **Real Postgres:** `scripts/harness_*.py`, run by `scripts/run_harness.sh` against a throwaway
+  `postgres:16` (or as the opt-in pytest `harness` tier in `tests/harness/`); the CI `harness` job runs the
+  race-critical set on every PR (`bash scripts/run_harness.sh --ci`).
 - **A real Proxmox node:** `scripts/live_*.py` and the `*_live` harnesses, run by an operator against a
   test node.
 

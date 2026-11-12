@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-PR-3 observability-channel completion — proves against a REAL Postgres ledger the parts unit tests (fake
+The placement observability channel (shipped as template-sharing PR-3; this harness was harness_pr3.py) —
+proves against a REAL Postgres ledger the parts unit tests (fake
 connections) structurally cannot: that inventory.fleet_stats' new placement counts read the right rows under
 real SQL; that a DenialLog outcome='refused' row lands and is split out by audit.query's 'refused' filter
 (distinct from 'denied'); that verify_declarations quarantines a declared pair on real hard evidence + audits

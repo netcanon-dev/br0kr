@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Dashboard GUI-parity extras proven against a REAL Postgres ledger: the template-instance panel's data source
+"""The template-instance surface the dashboard renders (this harness was harness_gui_parity.py), proven
+against a REAL Postgres ledger: the template-instance panel's data source
 (inventory.overview carries `template_instances`) + the operator instance verbs the panel drives (bind / retire /
 delete via br0kr/admin.py), and the placement-health fleet counts the Capacity-tab tiles render
 (inventory.fleet_stats). This is a page-only PR (no schema); this harness proves the READ shapes + the verb

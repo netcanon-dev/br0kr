@@ -141,37 +141,27 @@ def test_archive_scan_passes_a_clean_lf_tree():
     assert unknown == []
 
 
-def _ci_harness_set() -> list[str]:
-    """The HARNESSES=(...) array in scripts/run_ci_harnesses.sh, the one place the CI set is declared."""
-    text = (_ROOT / "scripts" / "run_ci_harnesses.sh").read_text(encoding="utf-8")
-    lines = [ln for ln in text.splitlines() if ln.startswith("HARNESSES=(")]
-    assert len(lines) == 1, "run_ci_harnesses.sh must declare HARNESSES=(...) exactly once"
-    return lines[0][len("HARNESSES=("):].rstrip(")").split()
-
-
-def test_every_ci_harness_names_a_real_harness_script():
-    """Each name in the CI harness set resolves to an existing scripts/harness_<name>.py.
-
-    Guards a rename or deletion of a harness that leaves the CI entry dangling: the job would then die
-    on a missing file, or worse, a typo'd name would be read as "that proof is covered" when nothing ran.
-    """
-    names = _ci_harness_set()
-    assert names, "the CI harness set is empty"
-    missing = [n for n in names if not (_ROOT / "scripts" / f"harness_{n}.py").is_file()]
-    assert missing == []
-
-
 def test_ci_workflow_runs_the_harness_set_against_a_postgres_service():
-    """ci.yml's harness job starts a postgres service container and runs scripts/run_ci_harnesses.sh.
+    """ci.yml's harness job starts a postgres service container, declares it a throwaway and runs the CI set
+    through scripts/run_harness.sh on pushes and PRs, and every ledger harness on its weekly schedule (the CI set
+    itself, CI_SET in scripts/_harness.py, is checked against the harness files in test_harness_runner.py).
 
     Guards the job being dropped or rewired to something else during a workflow cleanup: the real-Postgres
     proofs (lock order, CAS predicates) are exactly what the stubbed unit suite cannot catch, so losing the
-    job would make CI green on the regressions it exists for."""
+    job would make CI green on the regressions it exists for. Without the opt-in the runner would refuse the
+    service container and the job would fail rather than quietly run nothing. Without the weekly full run, a
+    harness outside the CI set rots unseen (review TEST-02 found nine that had)."""
     ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "\n  harness:\n" in ci
-    job = ci.split("\n  harness:\n", 1)[1]
+    job = ci.split("\n  harness:\n", 1)[1].split("\n  alert-rules:\n", 1)[0]
     assert "image: postgres:" in job
-    assert "bash scripts/run_ci_harnesses.sh" in job
+    assert "BR0KR_THROWAWAY_PG: '1'" in job
+    assert 'bash scripts/run_harness.sh "${HARNESS_SET}"' in job
+    assert "&& '--all' || '--ci'" in job
+    assert "env -u BR0KR_THROWAWAY_PG bash scripts/run_harness.sh ledger_ha" in job   # skipped on the service
+    assert "  schedule:\n    - cron:" in ci.split("\npermissions:", 1)[0]
+    # the event in the concurrency key keeps the weekly run and a push to main from cancelling each other
+    assert "${{ github.ref }}-${{ github.event_name }}" in ci
 
 
 def test_workflows_verify_what_they_download():

@@ -164,6 +164,7 @@ markers = [
     "integration: components wired together with external I/O mocked (no live DB/network)",
     "e2e: full end-to-end flow — opt-in, excluded from the fast CI default",
     "slow: long-running; excluded from the fast pre-commit/CI subset",
+    "harness: a real-Postgres ledger harness (tests/harness/); runs only under -m harness with BR0KR_THROWAWAY_PG=1",
 ]
 
 # =============================================================================

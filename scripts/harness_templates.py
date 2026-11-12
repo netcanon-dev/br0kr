@@ -8,11 +8,15 @@ vmid CHECK). No Proxmox, no VMs, no admission path — pure ledger, safe to run 
   A. create_template on an existing cluster → created; read back; list_templates surfaces it.
   B. create with an unknown cluster → unknown_cluster from the PRE-CHECK (no FK abort).
   C. duplicate id → template_exists (no silent overwrite).
-  D. set_template edits the vmid/name; unknown_template / unknown_cluster reported.
+  D. set_template edits the label (name/description); a change to the FROZEN cluster/vmid (0032: the
+     binding lives on template_instance rows) is refused template_binding_frozen with nothing written, the name
+     included; unknown_template reported.
   E. list_templates(cluster_id=…) scopes to ONE cluster; the whole-catalog read returns all, ordered.
   F. delete_template → deleted; unknown_template on a vanished id.
   G. the vmid CHECK(>0) DB backstop rejects a direct non-positive insert.
-  H. ON DELETE CASCADE: deleting a cluster removes its catalog entries (a pointer, not capacity to keep).
+  H. delete_cluster refuses cluster_has_instances while the template's seed instance lives there; after the
+     decommission recipe (retire_instance, then delete_template_instance force) it deletes the cluster, and
+     ON DELETE CASCADE removes its catalog entries (a pointer, not capacity to keep).
 
 Env: PGCONN (the throwaway ledger).
 """
@@ -35,7 +39,8 @@ def connect() -> psycopg.Connection:
 
 
 def reset(cur: psycopg.Cursor) -> None:
-    for tbl in ("lease", "template", "node", "cluster", "storage", "project"):
+    for tbl in ("lease", "template_replication", "template_instance", "template", "node", "cluster", "storage",
+                "project"):
         cur.execute(f"DELETE FROM {tbl}")
 
 
@@ -87,17 +92,23 @@ def main() -> int:
     dup = _admin(lambda c: admin.create_template(c, "debian12", cluster_id="clB", vmid=9002))
     check("create_duplicate_refused", dup["reason"] == "template_exists")
 
-    # ── D: edit (vmid/name) + unknown reports ───────────────────────────────────────
-    _admin(lambda c: admin.set_template(c, "debian12", cluster_id="clA", vmid=9009, name="Debian 12.1"))
+    # ── D: edit the label; the frozen binding refuses, all-or-nothing; unknown reports ────────
+    frozen = _admin(lambda c: admin.set_template(c, "debian12", cluster_id="clA", vmid=9009, name="Debian 12.1"))
+    with connect() as c:
+        untouched = c.execute("SELECT vmid, name FROM template WHERE id='debian12'").fetchone()
+    check("set_template_vmid_frozen", frozen["reason"] == "template_binding_frozen"
+          and untouched == (9000, "Debian 12 cloud"), f"{frozen} {untouched}")
+    ren = _admin(lambda c: admin.set_template(c, "debian12", cluster_id="clA", vmid=9000, name="Debian 12.1",
+                                              description="genericcloud+agent"))
     with connect() as c:
         edited = c.execute("SELECT vmid, name FROM template WHERE id='debian12'").fetchone()
-    check("set_template_edits", edited == (9009, "Debian 12.1"), f"{edited}")
+    check("set_template_edits", ren["updated"] is True and edited == (9000, "Debian 12.1"), f"{ren} {edited}")
     check("set_template_unknown_template",
           _admin(lambda c: admin.set_template(c, "ghost", cluster_id="clA", vmid=9000))["reason"]
           == "unknown_template")
-    check("set_template_unknown_cluster",
+    check("set_template_cluster_frozen",
           _admin(lambda c: admin.set_template(c, "debian12", cluster_id="ghost", vmid=9000))["reason"]
-          == "unknown_cluster")
+          == "template_binding_frozen")
 
     # ── E: per-cluster scoping ──────────────────────────────────────────────────────
     _admin(lambda c: admin.create_template(c, "alpine", cluster_id="clB", vmid=9100, name="Alpine"))
@@ -129,15 +140,24 @@ def main() -> int:
         print(f"  (unexpected error on the CHECK probe: {exc})")
     check("db_check_rejects_nonpositive_vmid", db_check)
 
-    # ── H: ON DELETE CASCADE — deleting a cluster removes its catalog entries ─────────
-    with connect() as c:   # 'debian12' still lives on clA; delete clA and it should cascade away
-        before = c.execute("SELECT count(*) FROM template WHERE cluster_id='clA'").fetchone()[0]
-        c.commit()
-    _admin(lambda c: admin.delete_cluster(c, "clA"))
-    with connect() as c:
-        after = c.execute("SELECT count(*) FROM template WHERE cluster_id='clA'").fetchone()[0]
-        c.commit()
-    check("cluster_delete_cascades_templates", before >= 1 and after == 0, f"before={before} after={after}")
+    # ── H: decommission — refused while instances live there, then the cascade after the recipe ─
+    def _count(cluster: str) -> int:
+        with connect() as c:
+            return int(c.execute("SELECT count(*) FROM template WHERE cluster_id=%s", (cluster,)).fetchone()[0])
+
+    before = _count("clA")   # 'debian12' and its seed instance still live on clA
+    refused = _admin(lambda c: admin.delete_cluster(c, "clA"))
+    check("cluster_delete_refused_while_instances",
+          refused.get("deleted") is False and refused.get("reason") == "cluster_has_instances"
+          and _count("clA") == before >= 1, f"{refused} templates={_count('clA')}")
+    iid = cr["instance_id"]
+    retired = _admin(lambda c: admin.retire_instance(c, iid))
+    dropped = _admin(lambda c: admin.delete_template_instance(c, iid, force=True))
+    gone = _admin(lambda c: admin.delete_cluster(c, "clA"))
+    after = _count("clA")
+    check("cluster_delete_cascades_templates",
+          retired.get("retired") is True and dropped.get("deleted") is True and gone.get("deleted") is True
+          and after == 0, f"retire={retired} drop={dropped} delete={gone} before={before} after={after}")
 
     n = len(results)
     allok = all(results)

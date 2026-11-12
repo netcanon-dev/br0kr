@@ -1,135 +1,147 @@
 # scripts/ — the proofs and the operator tools
 
 What it is: the runnable evidence that br0kr does what its docs claim, plus the operator's tools for deploying
-and protecting a running broker. Most proofs start a throwaway Postgres, run one harness against the real
-`br0kr` modules and tear the database down; a few drive a real Proxmox node, and the stack smokes bring up the
-whole Docker Compose deployment. The unit and integration tests under [`tests/`](../tests/README.md) cover the
-code paths that need no database; the harnesses here cover what only a real ledger can prove: concurrency,
-locking, migrations and failover.
+and protecting a running broker. Most proofs are ledger harnesses: one `run_harness.sh` starts a throwaway
+Postgres, runs the named harnesses against the real `br0kr` modules, each on a database of its own, and tears it
+down. A few proofs need more (a standby, a network to cut, a real Proxmox node) and keep a wrapper of their own,
+and the stack smokes bring up the whole Docker Compose deployment. The unit and integration tests under
+[`tests/`](../tests/README.md) cover the code paths that need no database; the harnesses here cover what only a
+real ledger can prove: concurrency, locking, migrations and failover.
 
 ## Architecture
 
 | Kind | Files | What it is |
 |------|-------|------------|
-| Wrapper | `run_<name>.sh` | Starts `postgres:16` as a named container on a fixed host port, builds a venv, runs `harness_<name>.py` against it, removes both and exits with the harness's code. |
-| Harness | `harness_<name>.py` | Named checks against the ledger. Prints each check's result and a closing summary, and exits `0` only when every check passes: the exit code is what the wrapper and CI read. |
+| Runner | `run_harness.sh`, `_harness.py` | `run_harness.sh <name>...` (or `--ci`, `--all`) runs ledger harnesses, each on a fresh database. By default it starts its own `postgres:16` container under a unique name on an ephemeral `127.0.0.1` port, so two runs on one host never collide, and removes it at the end. `_harness.py` does the work: which harnesses it owns, the CI set, the verdict table. |
+| Harness | `harness_<name>.py` | Named checks against the ledger. Prints each check's result and a closing summary, and exits `0` only when every check passes: the exit code is what the runner and CI read. |
+| Wrapper | `run_<name>.sh` | Only for a harness that needs more than one Postgres or a Proxmox node: starts what it needs on fixed ports, runs `harness_<name>.py`, removes it all. `OWN_SETUP` in `_harness.py` lists these harnesses and what each needs. |
 | Live proof | `live_*.py`, and the wrappers under [Live proofs](#live-proofs-a-real-proxmox-node) | The same idea against a real Proxmox node: creates and destroys throwaway guests (vmids `99xx` by default). |
-| Stack smoke | `run_*_smoke.sh` | Brings up the Compose stack under a throwaway project and `.env`, checks it, takes it down. No Proxmox. |
-| CI runner | `run_ci_harnesses.sh` | Runs the harnesses in its `HARNESSES` list against an existing Postgres, one fresh database each. CI's `harness — real Postgres` job runs it. |
+| Stack smoke | `run_*_smoke.sh`, `run_standby_recovery.sh` | Brings up the Compose stack under a throwaway project and `.env`, checks it, takes it down. No Proxmox. |
 | Operator tool | `deploy.sh`, `tls-up.sh`, `backup_ledger.sh`, `restore_ledger.sh`, `bake_template_agent.sh` | Used on a running broker host; see the [operator tools](#operator-tools) table. |
 | Client and reference | `br0kr_mcp_call.py`, `gen_api_reference.py` | The CI client for the gateway, and the generator of the API reference; see [client and reference](#client-and-reference). |
 | Helper | `_pgconn.sh` | Sourced by the ledger tools: moves a DSN password into `PGPASSWORD` so it never reaches `argv`. |
 
-Run any proof from the repo root, for example `bash scripts/run_admission.sh`. Needs Docker and Python 3.11+;
-the live proofs also need `PVE_HOST`, `PVE_NODE`, `PVE_TOKEN_ID` and `PVE_TOKEN_SECRET` (each wrapper's header
-names what it reads).
+Run any proof from the repo root, for example `bash scripts/run_harness.sh admission`. Needs Docker and Python
+3.11+; the first run builds a venv from `requirements.lock.txt` (hash-checked) under `~/.cache/br0kr` and later
+runs reuse it (on a host without `flock`, such as macOS, do not start two first runs at once). The live proofs also need `PVE_HOST`, `PVE_NODE`, `PVE_TOKEN_ID` and `PVE_TOKEN_SECRET` (each
+wrapper's header names what it reads).
 
-## The CI set
+## The runner
 
 | Script | What it does | Port |
 |--------|--------------|------|
-| `run_ci_harnesses.sh` | Runs each harness in its `HARNESSES` list against a Postgres server named by the libpq environment (`PGHOST`, `PGPORT`, …), each in a fresh database, and fails if any is NO-GO. | — |
+| `run_harness.sh` | Runs the named ledger harnesses (`--ci`: the set CI runs on every PR, `CI_SET` in `_harness.py`; `--all`: every harness below, which CI runs weekly; `--list`: the names), each on a fresh database, and prints a GO/NO-GO table; exits `1` if any is NO-GO. With `BR0KR_THROWAWAY_PG=1` it uses the server the libpq environment names (`PGHOST`, `PGPORT`, …) instead of starting one: CI's service container. The opt-in is required because every harness truncates its tables. | — |
 
-## Ledger harnesses (throwaway Postgres, no Proxmox)
+The same harnesses are a pytest tier, `tests/harness/`: `pytest -m harness` with `BR0KR_THROWAWAY_PG=1` and the
+libpq environment naming a throwaway server runs each as one test item (see [tests/README.md](../tests/README.md)).
 
-Wrappers that share a port cannot run at the same time.
+## Ledger harnesses (`bash scripts/run_harness.sh <name>`)
+
+Each runs on a database of its own, so any of them can run at the same time as any other.
 
 ### Admission and capacity
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_admission.sh` | Concurrent requests for the last slot: exactly one is admitted; retries are idempotent. | 5439 |
-| `run_project_quota.sh` | Concurrent admits across many nodes race one tenant's budget and never exceed it. | 5451 |
-| `run_schedule.sh` | Concurrent cluster-wide placements fill a K-slot cluster with no double-book. | 5447 |
-| `run_queue.sh` | Concurrent promoters drain a one-slot queue: exactly one admits, in FIFO order. | 5452 |
-| `run_vmid_race.sh` | Reconcilers racing for one vmid never allocate it twice (fake PVE driver). | 5450 |
-| `run_fk_race.sh` | The foreign-key constraint names admission maps its errors from stay pinned. | 5464 |
-| `run_isolation.sh` | `db.connect()` pins `READ COMMITTED` even when the server default is `repeatable read`. | 5469 |
-| `run_cordon.sh` | A cordoned node takes no new provisioning and keeps its existing leases. | 5458 |
-| `run_cluster.sh` | The cluster dimension: per-cluster capacity and node-registry construction. | 5444 |
-| `run_cross_cluster.sh` | Cross-cluster admission widening for templated requests. | 5481 |
+| Harness | Proves |
+|---------|--------|
+| `harness_admission.py` | Concurrent requests for the last slot: exactly one is admitted; retries are idempotent. |
+| `harness_project_quota.py` | Concurrent admits across many nodes race one tenant's budget and never exceed it. |
+| `harness_schedule.py` | Concurrent cluster-wide placements fill a K-slot cluster with no double-book. |
+| `harness_queue.py` | Concurrent promoters drain a one-slot queue: exactly one admits, in FIFO order. |
+| `harness_vmid_race.py` | Reconcilers racing for one vmid never allocate it twice (fake PVE driver). |
+| `harness_fk_race.py` | The foreign-key constraint names admission maps its errors from stay pinned. |
+| `harness_isolation.py` | `db.connect()` pins `READ COMMITTED` even when the ledger's default is `repeatable read`. |
+| `harness_cordon.py` | A cordoned node takes no new provisioning and keeps its existing leases. |
+| `harness_cluster.py` | The cluster dimension: per-cluster capacity and node-registry construction. |
+| `harness_cross_cluster.py` | Cross-cluster admission widening for templated requests. |
 
 ### Leases, the daemon and the gateway
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_lease.sh` | Lease lifecycle and reaper under concurrency: guarded transitions, one teardown claimant; pinned leases survive expiry, and racers for the last pin slot get exactly one. | 5439 |
-| `run_gateway.sh` | The MCP gateway verbs, wired to a real ledger. | 5439 |
-| `run_cloudinit.sh` | The cloud-init (VM access) fields carry through admit, queue and lease. | 5457 |
-| `run_sweeper_watermark.sh` | The orphan sweep refuses to act on a stale (restored or lagging) ledger. | 5471 |
-| `run_migrate.sh` | The migration runner: create, idempotent re-run, evolve without data loss. | 5443 |
-| `run_migrate_lease.sh` | Cross-cluster lease migration: many migrations onto a one-slot target, exactly one wins (fake PDM). | 5448 |
-| `run_pdm.sh` | The PDM client against an in-process mock PDM. Needs no Postgres. | — |
+| Harness | Proves |
+|---------|--------|
+| `harness_lease.py` | Lease lifecycle and reaper under concurrency: guarded transitions, one teardown claimant; pinned leases survive expiry, and racers for the last pin slot get exactly one. |
+| `harness_gateway.py` | The MCP gateway verbs, wired to a real ledger. |
+| `harness_cloudinit.py` | The cloud-init (VM access) fields carry through admit, queue and lease. |
+| `harness_sweeper_watermark.py` | The orphan sweep refuses to act on a stale (restored or lagging) ledger. |
+| `harness_migrate.py` | The migration runner: create, idempotent re-run, evolve without data loss. |
+| `harness_migrate_lease.py` | Cross-cluster lease migration: many migrations onto a one-slot target, exactly one wins (fake PDM). |
+| `harness_pdm.py` | The PDM client against an in-process mock PDM. Needs no Postgres (it ignores the database it is given). |
 
 ### Leader election and ledger HA
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_leader.sh` | Single-writer leader election on the advisory lock. | 5440 |
-| `run_leader_blackhole.sh` | A leader whose host vanishes loses its locks in about a minute (a Docker network is cut). | — |
-| `run_ledger_ha.sh` | The client rides through a Postgres stop and restart, and fails fast on a misconfiguration. | 5444 |
-| `run_ha_failover.sh` | Two daemons keep a single writer across a real primary-to-standby failover. | 5445, 5446 |
-| `run_ledger_replication.sh` | The DR-posture signal sees a killed streaming standby. | 5492, 5493 |
+| Harness | Proves |
+|---------|--------|
+| `harness_leader.py` | Single-writer leader election on the advisory lock. |
+| `harness_ledger_ha.py` | The client rides through a Postgres stop and restart, and fails fast on a misconfiguration. It restarts its server, so the runner gives it a container of its own, on a fixed port that survives the restart. |
 
 ### Templates, placement and replication
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_templates.sh` | The OS-template catalog: create, edit, delete and the read surface. | 5459 |
-| `run_template_select.sh` | An agent's per-request `template_id` is validated against the target's cluster. | 5460 |
-| `run_governance.sh` | A private template is selectable only by a project it is granted to. | 5461 |
-| `run_template_seed.sh` | A template registered or built gets the instance its first lease clones from. | 5494 |
-| `run_storage.sh` | Storage placement and the reachability backfill (migration 0031). | 5475 |
-| `run_placement.sh` | The placement gate (migration 0033): a clone only from a reachable template instance. | 5476 |
-| `run_replication.sh` | The replication control plane: request-time eligibility refusals. | 5479 |
-| `run_replicate_data.sh` | The replication data plane: the full clone saga (fake PVE driver). | 5480 |
-| `run_rebuild_source.sh` | Replication that rebuilds from the template's recorded source (fake PVE driver). | 5482 |
-| `run_imgbuild.sh` | Operator template downloads: the source allowlist, the request gate, the build job. | 5462 |
-| `run_imgbuild_project.sh` | A project's own downloads under a race-safe reserve-then-settle disk quota. | 5463 |
-| `run_build_node_pick.sh` | The build node is picked by which nodes reach the build pool. | 5483 |
+| Harness | Proves |
+|---------|--------|
+| `harness_templates.py` | The OS-template catalog: create, edit, delete and the read surface. |
+| `harness_template_select.py` | An agent's per-request `template_id` is validated against the target's cluster. |
+| `harness_governance.py` | A private template is selectable only by a project it is granted to. |
+| `harness_template_seed.py` | A template registered or built gets the instance its first lease clones from. |
+| `harness_template_instances.py` | The template-instance surface the dashboard renders: the overview's instances, the bind/retire/delete verbs, the placement-health counts. |
+| `harness_storage.py` | Storage placement and the reachability backfill (migration 0031). |
+| `harness_placement.py` | The placement gate (migration 0033): a clone only from a reachable template instance. |
+| `harness_placement_observability.py` | The placement counters in `fleet_stats`, refused-admission rows, `verify_declarations` quarantine and the queue's blocked reason. |
+| `harness_replication.py` | The replication control plane: request-time eligibility refusals. |
+| `harness_replicate_data.py` | The replication data plane: the full clone saga (fake PVE driver). |
+| `harness_rebuild_source.py` | Replication that rebuilds from the template's recorded source (fake PVE driver). |
+| `harness_imgbuild.py` | Operator template downloads: the source allowlist, the request gate, the build job. |
+| `harness_imgbuild_project.py` | A project's own downloads under a race-safe reserve-then-settle disk quota. |
+| `harness_build_node_pick.py` | The build node is picked by which nodes reach the build pool. |
 
 ### Storage and network discovery
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_discovery.sh` | Storage-reachability discovery against fake PVE drivers. | 5484 |
-| `run_discovery_cadence.sh` | The daemon runs discovery on its cadence (migration 0043). | 5485 |
-| `run_dismissal.sh` | A dismissed discovery finding stays dismissed (migration 0044). | 5486 |
+| Harness | Proves |
+|---------|--------|
+| `harness_discovery.py` | Storage-reachability discovery against fake PVE drivers. |
+| `harness_discovery_cadence.py` | The daemon runs discovery on its cadence (migration 0043). |
+| `harness_dismissal.py` | A dismissed discovery finding stays dismissed (migration 0044). |
 
 ### Multi-disk leases
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_multidisk.sh` | The data-disk ledger table lands with its migration (0046). | 5487 |
-| `run_multidisk_admit.sh` | Admit, enqueue and promote debit each data disk on its own pool. | 5488 |
-| `run_multidisk_lockstep.sh` | Data-disk resolution stays in lockstep with placement. | 5489 |
-| `run_multidisk_actuate.sh` | The ledger effects the daemon applies when it attaches the disks. | 5490 |
-| `run_multidisk_request.sh` | The `data_disks` request surface, refused until the operator turns it on. | 5491 |
+| Harness | Proves |
+|---------|--------|
+| `harness_multidisk.py` | The data-disk ledger table lands with its migration (0046). |
+| `harness_multidisk_admit.py` | Admit, enqueue and promote debit each data disk on its own pool. |
+| `harness_multidisk_lockstep.py` | Data-disk resolution stays in lockstep with placement. |
+| `harness_multidisk_actuate.py` | The ledger effects the daemon applies when it attaches the disks. |
+| `harness_multidisk_request.py` | The `data_disks` request surface, refused until the operator turns it on. |
 
 ### The operator surface
 
-| Wrapper | Proves | Port |
-|---------|--------|------|
-| `run_admin.sh` | A lowered quota is seen by the next admit; existing leases are untouched. | 5454 |
-| `run_auth.sh` | Agent tokens: mint, resolve, revoke, expire, tier gating, lease ownership. | 5455 |
-| `run_provision.sh` | A `provision` token's self-raised quota stays within the ceiling and the node floor. | 5456 |
-| `run_node_decommission.sh` | A force-delete severs terminal history; a node with live or queued leases refuses. | 5465 |
-| `run_settings.sh` | Operator settings: resolve, override, validate. | 5467 |
-| `run_dashboard_actas.sh` | An operator's "create VM" debits the chosen project through admission. | 5473 |
-| `run_dashboard_extras.sh` | The operator's on-behalf-of download and the fleet-stats read. | 5474 |
-| `run_gui_parity.sh` | The inventory carries what the dashboard panels render. | 5478 |
-| `run_audit.sh` | An audit row round-trips with the token's identity and redacted parameters. | 5468 |
-| `run_audit_prune.sh` | The audit retention prune deletes in bounded batches. | 5470 |
-| `run_oauth.sh` | The OAuth shim: an authorization code becomes a resolvable agent token. | 5472 |
+| Harness | Proves |
+|---------|--------|
+| `harness_admin.py` | A lowered quota is seen by the next admit; existing leases are untouched. |
+| `harness_auth.py` | Agent tokens: mint, resolve, revoke, expire, tier gating, lease ownership. |
+| `harness_provision.py` | A `provision` token's self-raised quota stays within the ceiling and the node floor. |
+| `harness_node_decommission.py` | A force-delete severs terminal history; a node with live or queued leases refuses. |
+| `harness_settings.py` | Operator settings: resolve, override, validate. |
+| `harness_dashboard_actas.py` | An operator's "create VM" debits the chosen project through admission. |
+| `harness_dashboard_extras.py` | The operator's on-behalf-of download and the fleet-stats read. |
+| `harness_audit.py` | An audit row round-trips with the token's identity and redacted parameters. |
+| `harness_audit_prune.py` | The audit retention prune deletes in bounded batches. |
+| `harness_oauth.py` | The OAuth shim: an authorization code becomes a resolvable agent token. |
 
 ### Observability
 
+| Harness | Proves |
+|---------|--------|
+| `harness_inventory.py` | Aggregate inventory reads: a cluster roll-up with no lease-count multiplication, the queue view. |
+| `harness_health.py` | `/healthz` and `/metrics` over a real socket. |
+| `harness_slo.py` | Lease transition timestamps and the `fleet_stats` percentiles; the per-window query matches the old single pass and reads through the 0050 indexes. |
+
+## Harnesses with their own wrapper (more than one Postgres)
+
+Wrappers that share a port cannot run at the same time.
+
 | Wrapper | Proves | Port |
 |---------|--------|------|
-| `run_inventory.sh` | Aggregate inventory reads: a cluster roll-up with no lease-count multiplication, the queue view. | 5453 |
-| `run_health.sh` | `/healthz` and `/metrics` over a real socket. | 5449 |
-| `run_slo.sh` | Lease transition timestamps and the `fleet_stats` percentiles; the per-window query matches the old single pass and reads through the 0050 indexes. | 5466 |
-| `run_pr3.sh` | The placement counters in `fleet_stats` and the observability channel. | 5477 |
+| `run_leader_blackhole.sh` | A leader whose host vanishes loses its locks in about a minute (a Docker network is cut). | — |
+| `run_ha_failover.sh` | Two daemons keep a single writer across a real primary-to-standby failover. | 5445, 5446 |
+| `run_ledger_replication.sh` | The DR-posture signal sees a killed streaming standby. | 5492, 5493 |
 
 ## Live proofs (a real Proxmox node)
 
@@ -177,31 +189,40 @@ Each creates and destroys throwaway guests, so point it at a node you own and wa
 ## Adding a harness
 
 1. Write `harness_<name>.py`: a module docstring saying what it proves and why, one `check(name, ok, detail)`
-   per claim, the `GO`/`NO-GO` summary, and `sys.exit(main())`. Copy the shape of `harness_template_seed.py`.
-2. Write `run_<name>.sh` from `run_template_seed.sh`: change the container name and pick a port no row above
+   per claim, the `GO`/`NO-GO` summary, and `sys.exit(main())`. Read the database from `PGCONN` and apply the
+   migrations yourself; copy the shape of `harness_template_seed.py`.
+2. Add a row to the right table here. A unit test fails on a harness with no row, or a row with no harness.
+3. Run it: `bash scripts/run_harness.sh <name>`. Nothing else is needed for a harness that needs one Postgres
+   (or none): there is no port to pick and no wrapper to write.
+4. If it needs more (a standby, a network to cut, a Proxmox node), add it to `OWN_SETUP` in `_harness.py` with
+   what it needs, write `run_<name>.sh` from `run_ledger_replication.sh`, and give its row a port no row above
    uses (a unit test fails if a row's port is not the one its wrapper publishes).
-3. Add a row to the right table here. A unit test fails on a script with no row, or a row with no script.
-4. If the harness guards a property CI must hold on every PR, add `<name>` to `HARNESSES` in
-   `run_ci_harnesses.sh`; it must then run against a bare Postgres server named by the libpq environment.
+5. If the harness guards a property CI must hold on every PR, add `<name>` to `CI_SET` in `_harness.py`.
 
 ## Behaviour
 
 | Condition | Behaviour |
 |-----------|-----------|
 | Every check passes | A closing summary line (`GO`, `PASS` or `N/N checks passed`); exit code `0`. |
-| A check fails | The failing check is printed with its detail; exit code `1`. |
-| A run is interrupted | The multi-container wrappers and the smokes clean up on exit (a `trap`); a single-container wrapper removes its leftover container by name on its next run. |
-| The port is taken by something else | `docker run` fails before the harness starts. |
+| A check fails | The failing check is printed with its detail; exit code `1`. The runner's table marks it NO-GO and its run exits `1`. |
+| A harness hangs | The runner stops it (and anything it started) after `--timeout` seconds (default 420, or `PER_HARNESS_TIMEOUT`) and marks it NO-GO, timed out; the other harnesses still run. |
+| A run is interrupted | The runner removes its containers on exit, Ctrl-C and `SIGTERM`; after a `kill -9`, `docker ps -a --filter name=br0kr-harness-` lists what is left. The multi-container wrappers and the smokes clean up on exit (a `trap`). |
+| `PGHOST` is set but not `BR0KR_THROWAWAY_PG=1` | The runner ignores it, and every other inherited `PG*` setting, and starts its own container; the pytest tier skips. Only the opt-in puts harnesses on a server you name. |
+| A harness is skipped (`ledger_ha` on a server you named) | In a set (`--all`) it is reported and the run can still be GO; named on the command line, it fails the run, as does a run in which nothing ran. |
+| The runner cannot provide a database (no Docker, the container does not start) | Exit `2` with the reason; a harness that could not be given its database is a NO-GO line and the rest still run. |
+| A wrapper's port is taken by something else | `docker run` fails before the harness starts. |
 | A live proof's vmid is already in use | It aborts rather than touch a guest it did not create (`FENCE_VMID` picks another). |
 
 ## Testing notes
 
-Each harness is its own test: run its wrapper and read the `GO` line. `tests/unit/test_scripts_readme.py` keeps
-this catalogue honest: every script here has a row, every row names a script that exists, and every port cell
-matches the port its wrapper publishes.
+Each harness is its own test: run it and read the `GO` line. `tests/unit/test_harness_runner.py` pins the
+runner: every harness is run by it or has its own wrapper (never both), the CI set names real harnesses, an exit
+code becomes the right verdict, and a server is used only with the opt-in. `tests/unit/test_scripts_readme.py`
+keeps this catalogue honest: every script here has a row, every row names a script that exists, and every port
+cell matches the port its wrapper publishes.
 
 ## See also
 - [/README.md](../README.md) — the front door
 - [docs/status.md](../docs/status.md) — each feature's status and the harness that proves it
-- [tests/README.md](../tests/README.md) — the unit and integration layers
+- [tests/README.md](../tests/README.md) — the unit and integration layers, and the harness tier
 - [docs/standards/testing.md](../docs/standards/testing.md) — the test doctrine

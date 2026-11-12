@@ -38,6 +38,9 @@ resolve in this repository.
   a GitHub Actions example is in connecting-an-agent §6 (review FEAT-02).
 
 ### Changed
+- **One runner for the ledger harnesses: `bash scripts/run_harness.sh <name>... | --ci | --all`.** Copied wrappers
+  pinned shared ports; each run now owns a container on an ephemeral port, each harness a fresh database, and
+  CI runs all of them weekly; `pytest -m harness` too, only with `BR0KR_THROWAWAY_PG=1` (`test_harness_runner.py`).
 - **The bundled ledger's replication needs the password: its trust rule becomes scram** (SEC-05). Both ledger
   entrypoints convert an existing volume on its next start, keeping `pg_hba.conf.pre-sec05`; recreate both, as
   `deploy.sh` does. The standby authenticates with `PGPASSWORD`, so a rotated password reaches it on recreate.

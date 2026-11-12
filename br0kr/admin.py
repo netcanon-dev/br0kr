@@ -1115,28 +1115,21 @@ def set_template(
     conn: psycopg.Connection[Any], template_id: str, *, cluster_id: str, vmid: int,
     name: str | None = None, description: str | None = None, public: bool = True,
 ) -> dict[str, Any]:
-    """Edit a catalog entry (its cluster binding, vmid, label, and `public` visibility). Unknown cluster →
-    `unknown_cluster` (pre-checked); no such template → `unknown_template`. The caller MUST have validated
-    the vmid. Does NOT commit (the caller owns the txn).
+    """Edit a catalog entry's label and `public` visibility; its cluster and vmid are frozen. The caller passes
+    the CURRENT `cluster_id` and `vmid`; any other value is refused `template_binding_frozen` and nothing is
+    written, the label included. No such template → `unknown_template`. `name`, `description` and `public` are
+    all written on every edit, so pass the current values to keep them. Does NOT commit (the caller owns the txn).
 
-    The `public` flag (phase A3) is written on every edit — toggling a template private (public=False)
-    immediately starts gating it (a tenant without a grant is then refused `template_forbidden` on a NEW
-    request); toggling it public re-opens it to all. This is pure policy, NOT a placement change, so it is
-    ALWAYS allowed regardless of in-use state (it can never strand a lease — a running lease already has its
-    image). RE-POINTING is the only restricted edit: changing the `cluster_id` or `vmid` of a template that
-    a NON-TERMINAL lease references is refused `template_in_use` (pre-checked). The per-cluster binding is
-    validated only at admit time (a point-in-time read), then the daemon resolves the template's CURRENT
-    vmid live at clone time — so re-pointing an in-use template's cluster would make the daemon clone the new
-    (wrong-cluster) vmid onto the lease's already-bound node, a stuck-ADMITTED lease (the same hardening as
-    delete_template's in-use refusal; capacity safety is never at risk — a wrong-cluster vmid simply doesn't
-    exist on the host — but it strands the lease). A name/description/public-only edit (cluster_id + vmid
-    unchanged) is ALWAYS allowed, in use or not.
+    Why frozen (0032): the physical binding is a property of a `template_instance` row (managed by
+    `bind_instance_placement`/`register_template_instance`/`retire_instance`), not of the catalog row, so editing
+    it here would be a dead control that silently diverged from the instances; the refusal points the operator at
+    the instance verbs. It replaced the earlier `unknown_cluster` pre-check and the `template_in_use` re-point
+    refusal: the only cluster and vmid accepted are the current ones, which necessarily exist.
 
-    0032: `cluster_id` + `vmid` are now FROZEN. The physical binding is a property of a `template_instance`
-    row (managed by `bind_instance_placement`/`register_template_instance`/`retire_instance`), not the catalog
-    row — so editing it here is a dead control that would silently diverge from the instances. Any change to
-    cluster_id/vmid is refused `template_binding_frozen` (pointing the operator at the instance verbs); a
-    name/description/public-only edit is unaffected."""
+    The `public` flag (phase A3): toggling a template private (public=False) immediately starts gating it (a
+    tenant without a grant is then refused `template_forbidden` on a NEW request); toggling it public re-opens it
+    to all. This is pure policy, NOT a placement change, so it is allowed whatever the template's in-use state: it
+    can never strand a lease, which already has its image."""
     current = conn.execute("SELECT cluster_id, vmid FROM template WHERE id = %s", (template_id,)).fetchone()
     if current is None:
         return {"template_id": template_id, "updated": False, "reason": "unknown_template"}

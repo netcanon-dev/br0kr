@@ -3,7 +3,7 @@
 > **Status: dormant** (review FEAT-04). The driver and the lease-migration saga over it are built,
 > hermetically proven and constructed at runtime, but disabled (`BR0KR_MIGRATE_LIMIT=0`), and there is no
 > PDM in the fleet. Nothing more is planned until there is. **Decision trigger:** when PDM hardware arrives,
-> step 1 below (`scripts/run_pdm.sh` / `harness_pdm.py` pointed at the real box) is the first thing to run.
+> step 1 below (`scripts/harness_pdm.py`, run by `bash scripts/run_harness.sh pdm`, pointed at the real box) is the first thing to run.
 
 `br0kr/pdm.py` (the `PdmDriver`) talks to **Proxmox Datacenter Manager** for two things the
 per-cluster `pve.Pve` driver can't do: a fleet-wide **inventory** across clusters, and **remote

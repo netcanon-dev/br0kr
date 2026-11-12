@@ -3,15 +3,17 @@
 eligibility refusal matrix (gateway.request_replication → replication.plan_replication), the REQUESTED insert +
 the one-active dedup, the cancel CAS + its ownership scope, the status/list reads, the retention prune, and the
 delete_cluster decommission refusals. Control plane only — NO Proxmox, NO daemon: a REQUESTED job holds nothing
-and never advances here (the data plane ships in a later PR), so replication_enabled is always False.
+and never advances here (the data plane is proven by harness_replicate_data.py), and nothing here turns
+replication_enabled on, so it reads False.
 
   A. ELIGIBILITY MATRIX — each fail-closed refusal a request can hit, in order: unknown_template /
      unknown_cluster / unknown_storage / storage_unbound / storage_wrong_cluster / already_present /
-     no_replicable_source / storage_unreachable / source_unsized, plus mechanism_not_allowed and
-     mechanism_not_implemented (rebuild_source allowlisted but not built), and the governance/project gates
-     (unknown_project / template_forbidden).
+     no_replicable_source / storage_unreachable / source_unsized, plus the two mechanism gates:
+     mechanism_not_allowed (rebuild_source, implemented, but off the operator's allowlist) and
+     mechanism_not_implemented (a mechanism the operator allowlisted that the code does not have: refused
+     before any planner, no job written), and the governance/project gates (unknown_project / template_forbidden).
   B. HAPPY PATH — a valid clone_shared request creates a REQUESTED job stamped with the resolved source
-     instance + source node + size; replication_enabled is False (no data plane).
+     instance + source node + size; replication_enabled is False (nothing here enables it).
   C. ONE-ACTIVE — a duplicate request for the same (template, target cluster, target pool) → replication_in_progress.
   D. CANCEL — a REQUESTED job cancels → FAILED + guest_settled_at stamped; a second cancel → not_cancellable.
   E. OWNERSHIP — a tenant cancelling a job attributed to ANOTHER project → not_your_replication (no cancel).
@@ -151,13 +153,34 @@ def main() -> int:
           reason(template_id="private12", target_cluster_id="clA", target_storage_id="SlowStorage",
                  project_id="projX") == "template_forbidden")   # private, ungranted to projX
 
-    # mechanism_not_implemented: allowlist rebuild_source, then request it (allowed but not built)
+    # The mechanism gates. rebuild_source is IMPLEMENTED (0040) but must be allowlisted by the operator.
     with connect() as c:
-        settings.set_settings(c, {"replication_mechanisms": "clone_shared,rebuild_source"})
+        settings.set_settings(c, {"replication_mechanisms": "clone_shared"})
         c.commit()
-    check("mechanism_not_implemented",
+    check("rebuild_source_refused_unless_allowlisted",
           reason(template_id="debian12", target_cluster_id="clA", target_storage_id="SlowStorage",
-                 mechanism="rebuild_source") == "mechanism_not_implemented")
+                 mechanism="rebuild_source") == "mechanism_not_allowed")
+    # The knob is free-form, so an operator can allowlist a mechanism the code does not have: it must be refused
+    # fail-closed BEFORE any planner (without the gate it would fall through to the clone_shared planner) and
+    # write no job.
+    future = "future_mech"
+    check("future_mechanism_is_not_implemented", future not in replication.IMPLEMENTED_MECHANISMS)
+    with connect() as c:
+        settings.set_settings(c, {"replication_mechanisms": f"clone_shared,rebuild_source,{future}"})
+        c.commit()
+        jobs_before = c.execute("SELECT count(*) FROM template_replication").fetchone()[0]
+    r_future = req(template_id="debian12", target_cluster_id="clA", target_storage_id="SlowStorage",
+                   mechanism=future)
+    with connect() as c:
+        jobs_after = c.execute("SELECT count(*) FROM template_replication").fetchone()[0]
+    check("mechanism_not_implemented",
+          r_future.get("reason") == "mechanism_not_implemented" and r_future.get("requested") is False
+          and jobs_after == jobs_before, f"{r_future} jobs {jobs_before}->{jobs_after}")
+    # Allowlisted, rebuild_source clears both gates and reaches ITS planner, whose content gate refuses this
+    # pool (SlowStorage declares no content types). The full rebuild matrix is harness_rebuild_source.py.
+    check("rebuild_source_allowlisted_reaches_its_planner",
+          reason(template_id="debian12", target_cluster_id="clA", target_storage_id="SlowStorage",
+                 mechanism="rebuild_source") == "storage_capability_undeclared")
     with connect() as c:
         settings.set_settings(c, {"replication_mechanisms": None})   # clear back to the default
         c.commit()

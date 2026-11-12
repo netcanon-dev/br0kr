@@ -45,8 +45,10 @@ def check(name: str, cond: bool, extra: str = "") -> bool:
 
 
 class _FakeDriver:
-    """A pve.Pve stand-in: canned list_fenced, recorded fenced_destroy, empty clone-orphans. No Proxmox — the
-    S20 guard is entirely in the LEDGER read, so only the fenced list + destroy record matter here."""
+    """A pve.Pve stand-in: canned list_fenced, recorded fenced_destroy, no clone or replication orphans. No
+    Proxmox — the S20 guard is entirely in the LEDGER read, so only the fenced list + destroy record matter here.
+    It must answer every listing the sweep makes: a missing one (list_repl_orphans, added with the replication
+    reclaim) crashed this harness before any check ran."""
 
     def __init__(self, fenced: list[tuple[int, int]]) -> None:
         self._fenced = fenced
@@ -60,6 +62,9 @@ class _FakeDriver:
         return "destroyed"
 
     def list_clone_orphans(self) -> list[int]:
+        return []
+
+    def list_repl_orphans(self) -> list[tuple[int, int]]:
         return []
 
 

@@ -88,6 +88,7 @@ by the `e2e`/`slow` markers (§3) and lives in a dedicated, opt-in CI job.
 | **unit** | `unit` | pure functions — `in → out`, no I/O | none needed |
 | **integration** | `integration` | your CLI / API / app as a black box, shell-outs + network mocked | the home-module seams (§2) |
 | **e2e** | `e2e` | the real booted app (browser / subprocess / live deps) | opt-in only — **never** in the hermetic default |
+| **harness** | `harness` | a real-Postgres ledger harness (`scripts/harness_*.py`), one item each | opt-in twice: `-m harness` and `BR0KR_THROWAWAY_PG=1` naming a throwaway server |
 | *(orthogonal)* | `slow` | anything long-running | excluded from the fast subset |
 
 Markers are declared in `pyproject.toml` and enforced with `--strict-markers`, so a typo'd marker is an
@@ -100,6 +101,16 @@ pytest -m "not e2e and not slow"     # the hermetic default — local + CI
 pytest -m e2e                         # opt-in, dedicated CI job
 pytest --cov=br0kr --cov-report=term-missing
 ```
+
+**The harness tier.** The invariants only a real database can prove (lock order, CAS predicates, migrations,
+failover) are `scripts/harness_*.py` gates: each prints its checks and exits 0 for GO. `bash
+scripts/run_harness.sh <name>... | --ci | --all` is the one way to run the ones that need only a Postgres: it
+starts a throwaway container per run (unique name, ephemeral port) and gives each harness a fresh database.
+CI runs the `--ci` set on every PR and `--all` weekly. `pytest -m harness` runs the same harnesses as test items, and only when
+`BR0KR_THROWAWAY_PG=1` names a throwaway server: every harness truncates its tables, so a stray `PGHOST` is
+never enough. WHY a separate tier: these take minutes and need Docker, so they cannot sit in the 2-second
+hermetic default, but they are the proofs the project exists for, so they cannot live only in a maintainer's
+notes. See [scripts/README.md](../../scripts/README.md).
 
 ---
 

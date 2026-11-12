@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Real-Postgres proof that br0kr PINS READ COMMITTED at the db.connect() seam (review finding S06).
 
-Run by scripts/run_isolation.sh against a throwaway Postgres whose *server default* is
-`repeatable read` — the hostile config that would silently reopen the admission-floor
+It first makes its throwaway database default to `repeatable read` (ALTER DATABASE ... SET
+default_transaction_isolation, which every new session on that database inherits, exactly as it would
+a server-wide default) — the hostile config that would silently reopen the admission-floor
 double-allocation race (under REPEATABLE READ the post-advisory-lock capacity re-read reuses a
 snapshot frozen before the lock wait, so a committed competitor is invisible and two last-slot
-admits both fit). This harness proves the fix holds against exactly that server:
+admits both fit). This harness proves the fix holds against exactly that ledger:
 
-  1. the raw server really defaults to 'repeatable read' (the config under test is what we think);
+  1. a raw session on it really defaults to 'repeatable read' (the config under test is what we think);
   2. db.connect() yields a session at 'read committed' regardless (the pin overrides the default);
   3. that holds INSIDE a real non-autocommit transaction (the admit() path, not just autocommit);
   4. db.assert_read_committed() passes on the pinned connection and RAISES on the raw one (so the
      boot canary the daemon/gateway rely on actually fires on a mis-isolated ledger).
 
-No Proxmox, no VMs, no schema — this exercises only the connection seam (br0kr/db.py).
+No Proxmox, no VMs, no schema — this exercises only the connection seam (br0kr/db.py). Run it with
+`bash scripts/run_harness.sh isolation`.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ import sys
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 from br0kr import db
 
@@ -33,12 +36,18 @@ def main() -> int:
     dsn = db.dsn()
     ok = True
 
-    # 1. The server default really is the hostile 'repeatable read' (else this harness proves nothing).
+    # 0. Make the hostile default: this database's sessions start at 'repeatable read' from now on.
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        name = raw.execute("SELECT current_database()").fetchone()[0]
+        raw.execute(sql.SQL("ALTER DATABASE {} SET default_transaction_isolation = 'repeatable read'")
+                    .format(sql.Identifier(name)))
+
+    # 1. A raw session really defaults to the hostile 'repeatable read' (else this harness proves nothing).
     with psycopg.connect(dsn, autocommit=True) as raw:
         raw_level = _isolation(raw)
-    print(f"[1] raw server default isolation: {raw_level!r}")
+    print(f"[1] raw session default isolation: {raw_level!r}")
     if raw_level != "repeatable read":
-        print("    FAIL: harness expected the server to DEFAULT to 'repeatable read' (check run_isolation.sh -c)")
+        print("    FAIL: the database's default_transaction_isolation did not take (expected 'repeatable read')")
         ok = False
 
     # 2. db.connect() pins read committed despite that server default.

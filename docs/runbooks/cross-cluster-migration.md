@@ -138,7 +138,7 @@ button on the migrations panel). It is the confirm-safe sibling of the build-sid
   (`tests/unit/test_migration.py`, `tests/integration/test_migration.py`). The full saga + its
   **race-freedom** — AND the **daemon wiring** (the leader's `_migrate` tick step, routed per source
   cluster, disabled at `migrate_limit=0` / no-PDM) — are proven against a **real Postgres ledger + a fake
-  PDM actuator** (`scripts/harness_migrate_lease.py` / `scripts/run_migrate_lease.sh`, group I): happy-path
+  PDM actuator** (`scripts/harness_migrate_lease.py`, `bash scripts/run_harness.sh migrate_lease`, group I): happy-path
   capacity exactly conserved; **M concurrent migrations onto a 1-slot target → exactly one wins, the target
   never over-committed**; idempotent resume creates exactly one reservation; fence refusal / no-capacity /
   reservation-lost all abort with the lease untouched. The PDM REST path itself is separately proven by

@@ -159,7 +159,7 @@ def main() -> int:
         raised = False
         try:
             c.execute("INSERT INTO storage(id,total_gb,cluster_id,pve_name) "
-                      "VALUES ('Fast3',500,'sam','FastStorage')")
+                      "VALUES ('Fast3',500,'lab1','FastStorage')")
             c.commit()
         except psycopg.errors.UniqueViolation:
             raised = True
@@ -195,7 +195,7 @@ def main() -> int:
         _apply_through(c, V_0031 - 1)          # through 0030, so BOTH 0031 + 0032 backfills run on the seed
         _mk_cluster(c, "lab1"); _mk_node(c, "pve1", "lab1")
         c.execute("INSERT INTO storage(id,total_gb) VALUES ('FastStorage',500)")
-        c.execute("INSERT INTO template(id,cluster_id,vmid) VALUES ('debian12','sam',9900)")
+        c.execute("INSERT INTO template(id,cluster_id,vmid) VALUES ('debian12','lab1',9900)")
         c.commit()
         migrate.apply_pending(c)               # 0031 (single-node → FastStorage bound + verified) + 0032 (seed)
         inst = c.execute("SELECT id, node_id, storage_id, vmid, instance_state, origin "

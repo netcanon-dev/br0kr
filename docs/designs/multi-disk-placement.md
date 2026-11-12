@@ -13,7 +13,7 @@ See also: [../architecture.md](../architecture.md), [../../SECURITY.md](../../SE
 
 ## 0. Plan status (BUILT — the five-PR arc is code-complete)
 
-The **five-PR arc has shipped** (§9); the last migration is **0047**, the next free harness port is **:5492**.
+The **five-PR arc has shipped** (§9); the last migration is **0047**, harnesses take no fixed port (since review TEST-02 they run through `scripts/run_harness.sh`).
 Multi-disk is deployed to the deploy host and the request surface is armed behind the `multi_disk_enabled` knob (the
 final go-live flip is the operator's deliberate gesture). Three PRs were deliberate pause points (PR-1's
 migration; PR-2's double-allocation debit-floor edit; PR-5's knob flip **and** its additive knob migration).

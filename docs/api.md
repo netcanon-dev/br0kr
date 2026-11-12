@@ -486,7 +486,7 @@ recorded in the audit log.
 | `/api/template/create` | Register a cloneable OS template in the catalog. |
 | `/api/template/delete` | Remove a catalog entry. |
 | `/api/template/download` | Download a net-new OS image on behalf of `project_id` (act-as), debiting THAT project's template-disk quota — the operator-chosen-project mirror of the MCP `request_template_download` tool (which binds the project from the token). |
-| `/api/template/edit` | Edit a catalog entry (its cluster binding, vmid, label, and `public` visibility). |
+| `/api/template/edit` | Edit a catalog entry's label and `public` visibility; its cluster and vmid are frozen. |
 | `/api/template/grant` | Grant a project the right to select a (typically non-public) catalog template. |
 | `/api/template/network` | Point (or clear) the LOGICAL NETWORK a template's net0 is on — the identity the placement gate resolves to the placement node's bridge (and rewrites net0 to) before admitting a CROSS-NODE clone of this template. |
 | `/api/template/revoke` | Revoke a project's grant for a template. |

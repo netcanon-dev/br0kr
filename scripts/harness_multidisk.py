@@ -6,10 +6,12 @@ BOTH debit a data disk's bytes exactly like a boot disk — the fail-safe-orderi
 BEFORE the arc's admit writer ships. Also proves the table's shape: the (lease_id, disk_index) PK, the
 CHECK constraints, and the ON DELETE CASCADE from lease.
 
-No Proxmox, no VMs — pure ledger. Seeds two pools (poolA 1000 GB, poolB 500 GB), one ACTIVE lease whose
-BOOT disk is 100 GB on poolA, and two DATA disks (200 GB on poolB, 50 GB on poolA — the second SHARES the
-boot pool, so its bytes must SUM with the boot's). Expected headroom: poolA = 1000-100-50 = 850,
-poolB = 500-200 = 300; used_gb: poolA = 150, poolB = 200. A PENDING lease's data disk must NOT count.
+No Proxmox, no VMs — pure ledger. Seeds three pools (poolA 1000 GB, poolB 500 GB, poolC 100 GB), one ACTIVE
+lease whose BOOT disk is 100 GB on poolA, and three DATA disks (200 GB on poolB, 50 GB on poolA — which SHARES
+the boot pool, so its bytes must SUM with the boot's — and 10 GB on poolC, referenced by nothing else so the
+storage-FK delete check isolates the data-disk FK). Expected headroom: poolA = 1000-100-50 = 850,
+poolB = 500-200 = 300; used_gb: poolA = 150, poolB = 200. A PENDING lease's data disk must NOT count. The schema
+checks hold at any later schema: they ask that 0046 is applied and its columns exist, not that it is the newest.
 
 Env: PGCONN.
 """
@@ -53,21 +55,24 @@ def main() -> int:
         migrate.apply_pending(conn)
         conn.commit()
 
-        # --- schema landed at 46, table shape as designed ---
-        schema = conn.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]
-        check("schema is 46", schema == 46)
+        # --- migration 0046 landed (at any later schema), table shape as designed ---
+        applied = migrate.applied_versions(conn)
+        name46 = conn.execute("SELECT name FROM schema_migrations WHERE version = 46").fetchone()
+        check("migration 0046 applied",
+              46 in applied and name46 is not None and name46[0] == "0046_lease_data_disk.sql")
+        check("fresh ledger migrated to this build's required schema", max(applied) == migrate.required_schema())
         check("lease_data_disk table exists",
               conn.execute("SELECT to_regclass('public.lease_data_disk')").fetchone()[0] is not None)
         cols = {r[0] for r in conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name='lease_data_disk'").fetchall()}
-        check("cols = design §3",
-              cols == {"lease_id", "disk_index", "storage_id", "req_disk_gb", "clone_storage_id", "device_key"})
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='lease_data_disk'").fetchall()}
+        check("cols include design §3",
+              {"lease_id", "disk_index", "storage_id", "req_disk_gb", "clone_storage_id", "device_key"} <= cols)
 
-        # migration idempotency: a second apply is a clean no-op, schema unchanged
-        migrate.apply_pending(conn)
+        # migration idempotency: a second apply applies nothing and leaves the applied set unchanged
+        second = migrate.apply_pending(conn)
         conn.commit()
-        check("migration idempotent (re-apply no-ops)",
-              conn.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 46)
+        check("migration idempotent (re-apply no-ops)", second == [] and migrate.applied_versions(conn) == applied)
 
         # --- seed: cluster/node/two pools/one ACTIVE lease + two data disks ---
         conn.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
@@ -106,24 +111,29 @@ def main() -> int:
                   _used_gb(cur).get("poolB") == 200)
 
         # --- CHECK constraints + PK (each in its own aborting sub-txn) ---
-        def _rejects(label: str, sql: str, params: tuple = ()) -> None:
+        # Each probe must raise the error of the constraint it names: a different one (an index that collides
+        # with a seeded row's PK, say) would otherwise pass a check whose constraint had been dropped.
+        def _rejects(label: str, expected: type[psycopg.errors.Error], sql: str, params: tuple = ()) -> None:
             try:
                 with conn.transaction():
                     conn.execute(sql, params)
                 check(label, False)   # should have raised
-            except psycopg.errors.Error:
+            except expected:
                 check(label, True)
+            except psycopg.errors.Error as e:
+                check(f"{label} (wrong error: {type(e).__name__})", False)
 
-        _rejects("req_disk_gb <= 0 rejected (CHECK)",
-                 "INSERT INTO lease_data_disk(lease_id,disk_index,storage_id,req_disk_gb) VALUES (%s,3,'poolA',0)", (lid,))
-        _rejects("disk_index < 1 rejected (CHECK — boot is index 0 on lease.*)",
-                 "INSERT INTO lease_data_disk(lease_id,disk_index,storage_id,req_disk_gb) VALUES (%s,0,'poolA',10)", (lid,))
-        _rejects("duplicate (lease_id,disk_index) rejected (PK)",
-                 "INSERT INTO lease_data_disk(lease_id,disk_index,storage_id,req_disk_gb) VALUES (%s,1,'poolA',10)", (lid,))
-        _rejects("unknown storage_id rejected (FK, insert direction)",
-                 "INSERT INTO lease_data_disk(lease_id,disk_index,storage_id,req_disk_gb) VALUES (%s,9,'ghost',10)", (lid,))
+        E = psycopg.errors
+        dd = "INSERT INTO lease_data_disk(lease_id,disk_index,storage_id,req_disk_gb) VALUES (%s,%s,%s,%s)"
+        # index 4: free (1-3 are seeded), so only the CHECK can reject it
+        _rejects("req_disk_gb <= 0 rejected (CHECK)", E.CheckViolation, dd, (lid, 4, "poolA", 0))
+        _rejects("disk_index < 1 rejected (CHECK — boot is index 0 on lease.*)", E.CheckViolation, dd,
+                 (lid, 0, "poolA", 10))
+        _rejects("duplicate (lease_id,disk_index) rejected (PK)", E.UniqueViolation, dd, (lid, 1, "poolA", 10))
+        _rejects("unknown storage_id rejected (FK, insert direction)", E.ForeignKeyViolation, dd,
+                 (lid, 9, "ghost", 10))
         _rejects("storage delete under a referencing data disk rejected (lease_data_disk FK NO ACTION)",
-                 "DELETE FROM storage WHERE id = 'poolC'")
+                 E.ForeignKeyViolation, "DELETE FROM storage WHERE id = 'poolC'")
 
         # --- ON DELETE CASCADE: deleting the lease removes its data-disk rows ---
         conn.execute("DELETE FROM lease WHERE id = %s", (lid,))
@@ -133,7 +143,7 @@ def main() -> int:
         with conn.cursor() as cur:
             check("after boot-lease delete, poolA back to full 1000", _avail(cur, "poolA") == 1000)
 
-    print(f"\nGO {_passed}/{_total}")
+    print(f"\n{'GO' if _passed == _total else 'NO-GO'} {_passed}/{_total}")
     return 0 if _passed == _total else 1
 
 

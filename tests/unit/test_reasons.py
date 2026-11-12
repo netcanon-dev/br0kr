@@ -240,6 +240,8 @@ _UNTESTED = {
     reasons.UNNAMED_PLACEMENT_REFUSAL: "a guard for a placement refusal without a reason, which resolve_placement "
                                        "never returns",
     reasons.TARGET_VANISHED: "a delete racing the replicate insert, between the plan and the row (FK race fallback)",
+    reasons.TEMPLATE_NOT_ON_CLUSTER: "reserved: the cross-cluster widening retired it and no code produces it (see "
+                                     "docs/reference/reason-codes.md); only a stale harness still asserted it",
 }
 
 

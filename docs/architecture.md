@@ -179,7 +179,7 @@ rejected as "node full" by the very lease it already created.
   are reclaimed destroy-first on the stamped node; `force_fail_replication` is the operator escape hatch; a
   level-triggered waiter sweep rejects a lease parked behind a FAILED job; a `(template, target)` cooldown
   (0035) throttles a failing target. Proven on real Postgres + a fake PVE driver
-  (`scripts/harness_replicate_data.py`, :5480). See
+  (`scripts/harness_replicate_data.py`). See
   [designs/template-sharing-cross-cluster.md](designs/template-sharing-cross-cluster.md) §5.
 - **`rebuild_source` mechanism + template SOURCE PROVENANCE (PR-6; `db/migrations/0040`, `br0kr/replication.py`,
   `br0kr/pve.py`, `br0kr/build.py`).** The SECOND replication mechanism, for a target cluster where no shared
@@ -193,7 +193,7 @@ rejected as "node full" by the very lease it already created.
   `no_replication_path` (no reaching node). `admin.set_template_source_dirty` / MCP `mark_template_source_dirty`
   is the attestation verb; `inventory.list_templates` surfaces `replicable` + `source_dirty`. Also retrofits
   `template_build.error` redaction. Both mechanisms need the `replication_mechanisms` knob allowlist (default
-  `clone_shared`); the engine stays OFF by default. Proven `scripts/harness_rebuild_source.py` (:5482); not
+  `clone_shared`); the engine stays OFF by default. Proven `scripts/harness_rebuild_source.py`; not
   live-verified (PR-7). See §5.2/§10.14.
 - **Gateway (`br0kr/gateway.py` + `br0kr/mcp_server.py`)** — the agent-facing control plane.
   `gateway.py` is transport-agnostic verbs (`request_lease`/`renew_lease`/`release_lease`/
@@ -485,7 +485,7 @@ provisioner. Both reaper claims use `FOR UPDATE SKIP LOCKED` so many instances r
 double-claiming; `claim_releasing` adds a `reclaim_at` grace window so a teardown in flight isn't
 re-handed-out on the next pass.
 
-> **Empirically established (`scripts/harness_lease.py`, `bash scripts/run_lease.sh`, and on every PR in
+> **Empirically established (`scripts/harness_lease.py`, `bash scripts/run_harness.sh lease`, and on every PR in
 > CI's `harness` job), not assumed — GO:** renew vs N reapers → **renewed XOR expired**; release vs N reapers → **exactly one**
 > into RELEASING; activate vs N reapers → **ACTIVE XOR RELEASING, never resurrected**; `claim_expired`,
 > `claim_releasing` AND `claim_provisioning_stale` under C reapers → **each lease claimed once**; a lease
@@ -605,7 +605,7 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
      (`BR0KR_MIGRATE_LIMIT=0`): the operator TRIGGER is the dashboard OR the `migrate_lease` operator-tier MCP
      verb (#47 — only an `operator` token, never a tenant one), and `migration_status` is a lease-scoped MCP
      read (an operator token may watch any). It is **not live-proven**: when PDM hardware arrives, the first
-     step is `scripts/run_pdm.sh` against it, then a live cross-cluster proof, then enabling it. See
+     step is `scripts/harness_pdm.py` (`bash scripts/run_harness.sh pdm`) against it, then a live cross-cluster proof, then enabling it. See
      [runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
 
 10. ⏳ Push notification of lease state changes (webhooks). Until then `wait_for_lease` waits server-side, at

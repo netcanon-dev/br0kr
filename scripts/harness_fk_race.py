@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 FK-race hardening — proven against a REAL Postgres: a scope/saga parent (node/storage/project/template/
-cluster, or a migration target node) deleted BETWEEN admit/enqueue/request_migration's under-lock pre-check
+cluster, the 0033 placement stamps' template instance or clone storage, a 0046 data disk's pool, or a migration
+target node) deleted BETWEEN admit/enqueue/request_migration's under-lock pre-check
 and the INSERT trips that column's foreign key. The hardening catches the ForeignKeyViolation and returns the
 SAME clean unknown_* reason the pre-check gives (never an uncaught exception escaping to the agent/MCP).
 
@@ -11,7 +12,9 @@ SQL (admission._INSERT, admission._ENQUEUE_INSERT, the migration saga insert) wi
 non-existent id (a faithful proxy for "deleted mid-flow": the FK fires identically whether the parent never
 existed or was just deleted) and asserting the violated constraint maps to the expected reason. If a future
 migration renamed a constraint, the mapped reason would silently become the 'stale_reference' fallback and a
-check here would FAIL — the drift guard.
+check here would FAIL — the drift guard. Every constraint in admission._FK_REASON must be exercised here (a
+closing check), and the admit INSERT's placeholder count must match what this harness passes, so a migration
+that adds a lease column or a mapped FK turns this harness red with a named check instead of a crash.
 
 Env: PGCONN (the throwaway ledger).
 """
@@ -52,9 +55,10 @@ def seed(cur: psycopg.Cursor) -> int:
     return int(row[0])
 
 
-def _lease_params(idem, *, node, storage, project, template):
-    # admission._INSERT positional order: idem, node, cpu, mem, storage, disk, project, ssh, ci, ip, tmpl, ttl
-    return (idem, node, 1.0, 1024, storage, 0, project, None, None, None, template, 900)
+def _lease_params(idem, *, node, storage, project, template, instance=None, clone_storage=None):
+    # admission._INSERT positional order (0033+): idem, node, cpu, mem, storage, disk, project, ssh, ci, ip,
+    # template, template_instance_id, clone_storage_id, ttl
+    return (idem, node, 1.0, 1024, storage, 0, project, None, None, None, template, instance, clone_storage, 900)
 
 
 def main() -> int:
@@ -65,6 +69,10 @@ def main() -> int:
         print(f"[{name}] {'PASS' if cond else 'FAIL'}{('  ' + extra) if extra else ''}")
 
     print("=== FK-race hardening — constraint→reason map pinned on real Postgres ===\n")
+    covered: set[str] = set()   # the constraint names a check below really tripped
+    shape = _lease_params("shape", node=None, storage=None, project=None, template=None)
+    check("admit_insert_shape_matches", admission._INSERT.count("%s") == len(shape),
+          f"_INSERT has {admission._INSERT.count('%s')} placeholders, this harness passes {len(shape)}")
     with connect() as c:
         migrate.apply_pending(c)
         cur = c.cursor()
@@ -72,17 +80,19 @@ def main() -> int:
         lease_id = seed(cur)
         c.commit()
 
-    def lease_fk(name: str, *, node, storage, project, template, expect: str) -> None:
+    def lease_fk(name: str, *, node, storage, project, template, expect: str, instance=None,
+                 clone_storage=None) -> None:
         """Run the REAL admit INSERT with one parent missing; assert the FK maps to `expect`."""
         with connect() as c:
             try:
                 c.execute(admission._INSERT,
                           _lease_params(f"fk-{name}", node=node, storage=storage, project=project,
-                                        template=template))
+                                        template=template, instance=instance, clone_storage=clone_storage))
                 c.rollback()
                 check(name, False, "no ForeignKeyViolation raised — the parent existed?!")
             except psycopg.errors.ForeignKeyViolation as exc:
                 c.rollback()
+                covered.add(exc.diag.constraint_name or "")
                 got = admission._fk_reason(exc)
                 check(name, got == expect, f"{exc.diag.constraint_name} -> {got} (want {expect})")
 
@@ -95,6 +105,24 @@ def main() -> int:
              expect="unknown_project")
     lease_fk("admit_template_gone", node="nA", storage=None, project=None, template="GONE",
              expect="unknown_template")
+    # the 0033 placement stamps: the resolved instance, or the clone's storage, deleted before the INSERT
+    lease_fk("admit_instance_gone", node="nA", storage=None, project=None, template=None, instance=999999,
+             expect="unknown_template_instance")
+    lease_fk("admit_clone_storage_gone", node="nA", storage=None, project=None, template=None,
+             clone_storage="GONE", expect="no_reachable_clone_storage")
+
+    # ── the 0046 data-disk child row (the REAL _INSERT_DATA_DISK): its DATA pool deleted before the INSERT ─
+    with connect() as c:
+        try:
+            c.execute(admission._INSERT_DATA_DISK, (lease_id, 1, "GONE", 10))
+            c.rollback()
+            check("data_disk_storage_gone", False, "no ForeignKeyViolation raised")
+        except psycopg.errors.ForeignKeyViolation as exc:
+            c.rollback()
+            covered.add(exc.diag.constraint_name or "")
+            got = admission._fk_reason(exc)
+            check("data_disk_storage_gone", got == "unknown_storage",
+                  f"{exc.diag.constraint_name} -> {got} (want unknown_storage)")
 
     # ── the enqueue (PENDING, scheduled) INSERT: the cluster FK (node NULL, cluster set) ─
     with connect() as c:
@@ -107,6 +135,7 @@ def main() -> int:
             check("enqueue_cluster_gone", False, "no ForeignKeyViolation raised")
         except psycopg.errors.ForeignKeyViolation as exc:
             c.rollback()
+            covered.add(exc.diag.constraint_name or "")
             got = admission._fk_reason(exc)
             check("enqueue_cluster_gone", got == "unknown_cluster",
                   f"{exc.diag.constraint_name} -> {got} (want unknown_cluster)")
@@ -135,6 +164,10 @@ def main() -> int:
 
     check("unknown_constraint_is_stale_reference",
           admission._fk_reason(_Exc()) == "stale_reference")  # type: ignore[arg-type]
+
+    # ── every constraint admission maps was really tripped above (a new mapped FK needs a check here) ─
+    untested = sorted(set(admission._FK_REASON) - covered)
+    check("every_mapped_constraint_exercised", not untested, f"untested: {untested}" if untested else "")
 
     n = len(results)
     allok = all(results)

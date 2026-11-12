@@ -116,7 +116,7 @@ it. The harnesses themselves are catalogued in [scripts/README.md](../scripts/RE
   agent watches its own lease via the MCP `migration_status` read. `br0kr/migration.py` +
   [docs/runbooks/cross-cluster-migration.md](runbooks/cross-cluster-migration.md).
 - ✅ `wait_for_lease`: an agent waits for its lease server-side (at most 60 s a call) instead of polling
-  `lease_status` (review FEAT-03). The two dormant items above wait for PDM hardware; when it exists, the first step is `bash scripts/run_pdm.sh`
+  `lease_status` (review FEAT-03). The two dormant items above wait for PDM hardware; when it exists, the first step is `bash scripts/run_harness.sh pdm`
   pointed at the real box.
 - Not planned, with the reasons: see [Non-goals](architecture.md#non-goals) (other backends, a cloud
   burst tier, runner autoscaling, priority or preemption, VM lifecycle operations, a full CLI, IaC providers).
