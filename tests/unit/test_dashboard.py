@@ -371,6 +371,35 @@ def test_the_page_meets_the_accessibility_floor():
     assert sizes and min(sizes) >= 11, sorted(sizes)[:3]
 
 
+def test_every_colour_comes_from_the_root_palette():
+    """Every colour the page uses is named once, in the :root palette block, as a spec token with the old dark
+    value as its fallback; no rule, inline style or script writes a hex colour or an rgba() literal. Native
+    controls follow the chosen mode (color-scheme), and buttons use the spec's AA pairings (accent-emphasis +
+    on-accent, danger-emphasis + white) rather than a fixed text colour that only works in one mode. Guards
+    review UI-07: about a dozen hardcoded dark literals (input wells, ghost buttons, the warning banner, the modal
+    backdrop, button text) kept light mode unreadable, so the mode buttons had to stay hidden."""
+    page = dashboard.PAGE
+    style = page[page.index("<style>"):page.index("</style>")]
+    start = style.index("  :root{")
+    end = style.index("color-scheme:light dark}", start) + len("color-scheme:light dark}")
+    palette, outside = style[start:end], style[:start] + style[end:] + page[page.index("</style>"):]
+    # a hex colour in a value (not an id such as #add-node, not an entity such as &#8212;), a colour function, a
+    # named colour on a colour property, or an inline opacity (the dimming that fails contrast in light mode)
+    assert not re.findall(r"(?<=[:,\s(])#[0-9a-fA-F]{3,8}(?![\w-])", outside), "a hex colour outside the palette"
+    assert not re.findall(r"\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix)\(", outside), "a colour function"
+    assert not re.findall(r"(?:color|background|border(?:-[a-z]+)?|outline(?:-color)?)\s*:\s*"
+                          r"(?:white|black|red|green|blue|gr[ae]y|yellow|orange|purple|silver)\b", outside)
+    assert not re.findall(r"style=[\"'][^\"']*opacity", page), "an inline opacity: grey the text with --mut instead"
+    for name in ("--btn:var(--nc-accent-emphasis,", "--on-btn:var(--nc-on-accent,", "--btn-bad:var(--nc-danger-emphasis,",
+                 "--well:var(--nc-surface-2,", "--ghost:var(--nc-border,", "--scrim:var(--nc-scrim,",
+                 "--shadow:var(--nc-shadow-md,", "--shadow-lg:var(--nc-shadow-lg,", "--banner:rgba(var(--nc-warn-rgb,"):
+        assert name in palette, name
+    assert ':root[data-nc-mode="light"]{color-scheme:light} :root[data-nc-mode="dark"]{color-scheme:dark}' in style
+    assert ".act.danger{background:var(--btn-bad);color:var(--on-btn-bad)}" in style
+    assert "::placeholder{color:var(--mut);opacity:1}" in style and "tr.cordoned>td{color:var(--mut)}" in style
+    assert "#theme-menu .ncp-mode[aria-checked=true]:focus-visible{outline-color:var(--on-btn)}" in style
+
+
 def test_page_uses_client_side_tabs_grouped_into_four_panels():
     """The dashboard is no longer one long scroll: the ~13 sections are grouped into FOUR client-side tabs
     (Capacity / Tenancy / Images / Security & Ops) that share ONE page + ONE poll loop. A tab only toggles which

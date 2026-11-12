@@ -89,9 +89,10 @@ capacity counts / ids / queue state — keep it on a trusted network or behind t
 gateway (SECURITY.md C3); it never reads or exposes a secret or a cluster's connection config.
 
 The dashboard chrome is themed by the shared netcanon-dev UI spec (`netcanon-dev/ui-design-spec`,
-pinned at tag `v0.2.1`, vendored + sha256-gated in `br0kr/ui_assets.py`); pick a palette with the
-swatch strip in the header — the choice persists per browser. Dark-only for now: light mode stays
-off until the page's hardcoded dark literals are migrated (see the CHANGELOG entry).
+pinned at tag `v0.2.1`, vendored + sha256-gated in `br0kr/ui_assets.py`). Open **Theme** in the header to
+pick a palette and a mode: **Light**, **Dark**, or **Auto**, which follows the system. The choice persists per
+browser, and the page opens dark until you pick. Every colour the page uses comes from the spec's tokens, so
+each palette works in both modes; the buttons use the spec's pairings, which meet WCAG AA contrast in both.
 
 **Read-auth is opt-in.** To harden a less-trusted network, set `BR0KR_DASHBOARD_READ_TOKEN` (in `.env`) to
 require a bearer on the inventory reads too — the operator token below ALSO satisfies it (operator ⊇

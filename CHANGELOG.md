@@ -43,6 +43,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The dashboard has a light mode: Theme now offers Light, Dark and Auto.** A dozen hardcoded dark colours kept it
+  off; every colour is now a spec token and the buttons use the spec's AA pairings (UI-07, docker-deploy.md).
 - **Red now means "cannot be put back", and each confirm names its action.** Releasing a running VM was grey and
   row-only deletes red; a bulk cancel counts its VMs, and a settings save shows the diff and sends only it (UI-06).
 - **One runner for the ledger harnesses: `bash scripts/run_harness.sh <name>... | --ci | --all`.** Copied wrappers

@@ -7,7 +7,8 @@ filesystem reads at request time, no packaging data-files, nothing fetched from 
 VENDORED — DO NOT EDIT THE PAYLOADS BY HAND. Source: netcanon-dev/ui-design-spec, tag v0.2.1
 (commit 1c4af32911e0ddc370a4a3049112adb4e35e8f7f) — see that repo's dist/README.md for the
 integration contract, and the compat shim's own header (BR0KR_COMPAT_CSS below) for the
-br0kr-specific caveats (dark-first; the light-mode literal migration is a named follow-up).
+br0kr-specific caveats. Its "light mode is NOT free" caveat is historical: review UI-07 moved
+every page colour onto the spec tokens, and the page now offers Light / Auto / Dark.
 tests/unit/test_ui_assets.py sha256-gates these constants byte-for-byte, so a hand-edit, an
 editor re-wrap, or a stripped trailing space fails the suite instead of silently forking br0kr
 off the spec deliverable it claims to pin.
@@ -705,7 +706,7 @@ code, kbd, pre, samp { font-family: var(--nc-mono); }
 """
 
 # dist/compat/br0kr.css — remaps the PAGE's 9 legacy :root vars (--bg/--card/--ink/…) onto the
-# nc-* tokens; must load AFTER netcanon-ui.css (its header carries the caveats).
+# nc-* tokens; must load AFTER netcanon-ui.css (its header's dark-literal caveat predates UI-07).
 BR0KR_COMPAT_CSS = r"""/* compat/br0kr.css — remaps br0kr's existing :root vars onto the unified nc-* tokens.
    Include AFTER netcanon-ui.css. `:root[data-nc-theme]` outranks br0kr's own `:root` block
    (now in br0kr/dashboard_page.py — the PAGE string moved there 2026-07-09; all 9 var names

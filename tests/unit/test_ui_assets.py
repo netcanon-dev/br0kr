@@ -48,15 +48,17 @@ def test_asset_table_paths_route_and_the_page_references_them():
         assert path in dashboard.PAGE
 
 
-def test_page_ships_dark_first_ocean_and_the_compact_picker():
-    """The <html> tag carries the shim's dark-first doctrine (data-nc-theme="ocean"
-    data-nc-mode="dark" — light mode stays blocked by the PAGE's hardcoded dark literals until
-    the named follow-up migrates them) and the header carries the COMPACT picker (swatches only:
-    no Light/Auto buttons to walk a user into the broken light mode) inside a COLLAPSIBLE <details>
-    disclosure (the swatches show only when the "Theme" summary is opened — a popover that never
-    reflows the header). Guards the default flipping, the full picker landing before the literal
-    migration, or the picker escaping its collapsible wrapper back into always-on header clutter."""
+def test_page_ships_dark_first_ocean_and_the_full_picker():
+    """The <html> tag still defaults to the shim's dark-first doctrine (data-nc-theme="ocean"
+    data-nc-mode="dark"; a stored choice overrides it at boot), and the header carries the FULL picker
+    (swatches AND the Light / Auto / Dark buttons) inside a COLLAPSIBLE <details> disclosure (a popover
+    that never reflows the header). The compact picker hid the mode buttons while the page's hardcoded
+    dark literals made light mode unreadable; review UI-07 moved every colour into the token palette
+    (test_dashboard.py::test_every_colour_comes_from_the_root_palette), so light mode is now offered.
+    Guards the default flipping, the mode buttons going missing again, or the picker escaping its
+    collapsible wrapper back into always-on header clutter."""
     assert '<html lang="en" data-nc-theme="ocean" data-nc-mode="dark">' in dashboard.PAGE
-    # the compact picker is WRAPPED in the collapsible disclosure (not bare in the header)
-    assert '<details id="theme-menu"><summary>Theme</summary><nc-theme-picker compact></nc-theme-picker></details>' \
+    # the full picker is WRAPPED in the collapsible disclosure (not bare in the header)
+    assert '<details id="theme-menu"><summary>Theme</summary><nc-theme-picker></nc-theme-picker></details>' \
         in dashboard.PAGE
+    assert "<nc-theme-picker compact>" not in dashboard.PAGE

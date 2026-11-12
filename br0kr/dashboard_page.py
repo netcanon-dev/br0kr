@@ -19,8 +19,23 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>br0kr — capacity</title>
 <style>
+  /* THE palette: every colour the page uses is named here and nowhere else (a test keeps colours out of the
+     rules). The first nine are the legacy names the vendored compat sheet (br0kr.css) maps onto the spec's tokens;
+     the rest read a spec token (netcanon-ui.css: per theme, per light/dark mode) directly, each with the old dark
+     value as its fallback for a page whose stylesheet did not load. Buttons use the spec's pairings, which meet
+     AA contrast in both modes: accent-emphasis + on-accent, danger-emphasis + white. */
   :root{--bg:#0f1419;--card:#1a2129;--ink:#e6edf3;--mut:#8b949e;--line:#2d333b;
-        --ok:#2ea043;--warn:#d29922;--bad:#da3633;--accent:#58a6ff}
+        --ok:#2ea043;--warn:#d29922;--bad:#da3633;--accent:#58a6ff;
+        --btn:var(--nc-accent-emphasis,#58a6ff);--on-btn:var(--nc-on-accent,#0b0f14);
+        --btn-bad:var(--nc-danger-emphasis,#da3633);--on-btn-bad:#ffffff;
+        --ghost:var(--nc-border,#30363d);--well:var(--nc-surface-2,#0b0f14);
+        --scrim:var(--nc-scrim,rgba(0,0,0,.55));--banner:rgba(var(--nc-warn-rgb,210,153,34),.1);
+        --shadow:var(--nc-shadow-md,0 8px 24px rgba(0,0,0,.45));
+        --shadow-lg:var(--nc-shadow-lg,0 12px 40px rgba(0,0,0,.55));
+        --grad-a:var(--nc-grad-a,#1f6feb);--grad-b:var(--nc-grad-b,#39c5cf);
+        color-scheme:light dark}
+  /* native controls (selects, date pickers, scrollbars) follow the chosen mode; with none chosen, the system's */
+  :root[data-nc-mode="light"]{color-scheme:light} :root[data-nc-mode="dark"]{color-scheme:dark}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);
     font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
   header{display:flex;align-items:baseline;gap:16px;padding:16px 24px;border-bottom:1px solid var(--line)}
@@ -33,19 +48,20 @@ PAGE = """<!doctype html>
     font-size:12px;color:var(--mut);padding:4px 9px;border:1px solid var(--line);border-radius:6px}
   #theme-menu>summary::-webkit-details-marker{display:none}
   #theme-menu>summary::before{content:"";width:11px;height:11px;border-radius:50%;
-    background:linear-gradient(135deg,var(--nc-grad-a,#1f6feb),var(--nc-grad-b,#39c5cf))}
-  #theme-menu[open]>summary{color:var(--ink);border-color:var(--nc-accent,#4493f8)}
+    background:linear-gradient(135deg,var(--grad-a),var(--grad-b))}
+  #theme-menu[open]>summary{color:var(--ink);border-color:var(--accent)}
   /* z-index 200: ABOVE the sticky tab nav (nav#tabnav is z-index:100 with a solid bg, or it paints OVER the
      popover), BELOW the #form-slot modal (z-index:1000). */
   #theme-menu>nc-theme-picker{position:absolute;right:0;top:calc(100% + 6px);z-index:200;background:var(--card);
-    border:1px solid var(--line);border-radius:8px;padding:10px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+    border:1px solid var(--line);border-radius:8px;padding:10px;box-shadow:var(--shadow);
+    width:max-content;max-width:min(340px,calc(100vw - 32px))}
   main{padding:20px 24px;max-width:1200px;margin:0 auto}
   section{margin:0 0 28px} h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;
     color:var(--mut);border-bottom:1px solid var(--line);padding-bottom:6px;margin:0 0 12px}
   .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px}
   .card h3{margin:0 0 4px;font-size:15px} .card .meta{color:var(--mut);font-size:12px;margin-bottom:10px}
-  .bar{height:8px;background:#0b0f14;border-radius:4px;overflow:hidden;margin:3px 0 2px}
+  .bar{height:8px;background:var(--ghost);border-radius:4px;overflow:hidden;margin:3px 0 2px}
   .bar>span{display:block;height:100%} .lbl{display:flex;justify-content:space-between;font-size:12px;color:var(--mut)}
   .lbl b{color:var(--ink);font-weight:600}
   table{width:100%;border-collapse:collapse;font-size:13px}
@@ -54,13 +70,12 @@ PAGE = """<!doctype html>
   td.num{text-align:right;font-variant-numeric:tabular-nums} .pill{font-size:11px;color:var(--mut)}
   .empty{color:var(--mut);font-style:italic;padding:8px 0} .err{color:var(--bad)}
   .qdepth{font-size:22px;font-weight:700} .qdepth.zero{color:var(--mut)}
-  .act{font:inherit;font-size:11px;background:var(--accent);color:#0b0f14;border:0;border-radius:4px;
-       padding:3px 9px;cursor:pointer;margin-top:8px} .act.ghost{background:#30363d;color:var(--ink)}
-  /* dark text on the danger red, as on the accent buttons: white on the theme's red is ~3.3:1, under AA */
-  .act.danger{background:var(--bad);color:#0b0f14}
+  .act{font:inherit;font-size:11px;background:var(--btn);color:var(--on-btn);border:0;border-radius:4px;
+       padding:3px 9px;cursor:pointer;margin-top:8px} .act.ghost{background:var(--ghost);color:var(--ink)}
+  .act.danger{background:var(--btn-bad);color:var(--on-btn-bad)}
   td .act,.erow .act{margin-top:0}
   #actions{margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px}
-  #actions input{background:#0b0f14;border:1px solid var(--line);color:var(--ink);border-radius:4px;padding:3px 6px}
+  #actions input{background:var(--well);border:1px solid var(--line);color:var(--ink);border-radius:4px;padding:3px 6px}
   .ok{color:var(--ok)}
   /* words for a screen reader only: what a glyph or a colour says to everyone else */
   .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);
@@ -75,25 +90,29 @@ PAGE = """<!doctype html>
   nav#tabnav button:hover{color:var(--ink)}
   nav#tabnav button.active{background:var(--card);color:var(--accent);border-color:var(--line)}
   .warn{font-size:11px;color:var(--bad);border:1px solid var(--bad);border-radius:3px;padding:0 4px;margin-left:5px}
-  .banner{background:#2a1e12;border:1px solid var(--warn);color:#f0c674;border-radius:6px;
-          padding:8px 12px;margin:0 0 12px;font-size:12px} .banner b{color:var(--warn)}
+  .banner{background:var(--banner);border:1px solid var(--warn);color:var(--ink);border-radius:6px;
+          padding:8px 12px;margin:0 0 12px;font-size:12px} .banner b{color:inherit}
   .qf{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:5px 0;font-size:12px}
-  .qf input{width:96px;background:#0b0f14;border:1px solid var(--line);color:var(--ink);
+  .qf input{width:96px;background:var(--well);border:1px solid var(--line);color:var(--ink);
             border-radius:4px;padding:2px 6px}
   .erow{display:flex;gap:6px;margin-top:10px;align-items:center;flex-wrap:wrap}
   .toolbar{margin:0 0 12px}
   /* when a form is open, #form-slot is a centered MODAL over the page (a form opened from a panel lower down
      stays in view instead of rendering off-screen at the top) — dismiss with cancel/done or Escape. */
-  #form-slot:not(:empty){position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.55);display:flex;
+  #form-slot:not(:empty){position:fixed;inset:0;z-index:1000;background:var(--scrim);display:flex;
     align-items:flex-start;justify-content:center;padding:48px 16px;overflow-y:auto}
   .form{background:var(--card);border:1px solid var(--accent);border-radius:8px;padding:14px;
-    max-width:440px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.55)}
+    max-width:440px;width:100%;box-shadow:var(--shadow-lg)}
   .form h3{margin:0 0 8px;font-size:14px}
   .ff{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:6px 0;font-size:12px}
-  .ff input{width:190px;background:#0b0f14;border:1px solid var(--line);color:var(--ink);
-            border-radius:4px;padding:3px 6px} .ff input[readonly]{opacity:.55}
+  .ff input{width:190px;background:var(--well);border:1px solid var(--line);color:var(--ink);
+            border-radius:4px;padding:3px 6px} .ff input[readonly]{color:var(--mut)}   /* AA in both modes */
   .ferr{color:var(--bad);font-size:12px}
   .ff input[type=checkbox]{width:auto}
+  ::placeholder{color:var(--mut);opacity:1}   /* the browser's own grey misses AA on the input well */
+  tr.cordoned>td{color:var(--mut)}   /* greyed text, not opacity: its badge says why; its buttons stay whole */
+  /* the spec's mode buttons draw focus in the accent colour, which vanishes on the checked (accent) one */
+  #theme-menu .ncp-mode[aria-checked=true]:focus-visible{outline-color:var(--on-btn)}
   .act.chip{margin:0;padding:1px 7px}
   .form table{margin:4px 0 8px}
   /* the one status region for action results: bottom-right and ABOVE the #form-slot modal (z-index 1000), so a
@@ -102,7 +121,7 @@ PAGE = """<!doctype html>
     max-width:min(440px,calc(100vw - 32px))}
   .toast-item{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;background:var(--card);
     border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:6px;padding:8px 10px;
-    font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+    font-size:12px;box-shadow:var(--shadow)}
   .toast-item.ok{border-left-color:var(--ok)} .toast-item.warn{border-left-color:var(--warn)}
   .toast-item.err{border-left-color:var(--bad)} .toast-item .act{margin-top:0;flex:none}
   /* the "needs attention" strip: above every tab, empty (and so invisible) when nothing needs a look */
@@ -113,8 +132,8 @@ PAGE = """<!doctype html>
   .att-x{font:inherit;font-size:12px;background:transparent;color:var(--mut);border:0;cursor:pointer;
     margin-left:-4px;padding:0 4px}
   nav#tabnav .badge:not(:empty){margin-left:6px;font-size:11px;border-radius:999px;padding:0 6px;
-    background:var(--bad);color:#0b0f14}
-  nav#tabnav #badge-tenancy:not(:empty){background:var(--accent);color:#0b0f14}
+    background:var(--btn-bad);color:var(--on-btn-bad)}
+  nav#tabnav #badge-tenancy:not(:empty){background:var(--btn);color:var(--on-btn)}
 </style>
 <link rel="stylesheet" href="/assets/v0.2.1/netcanon-ui.css">
 <link rel="stylesheet" href="/assets/v0.2.1/br0kr.css">
@@ -123,7 +142,7 @@ PAGE = """<!doctype html>
 <header>
   <h1>br0kr</h1><span class="sub">capacity &amp; queue</span>
   <span id="actions"></span><span id="whoami" class="pill"></span><span id="status">connecting…</span>
-  <details id="theme-menu"><summary>Theme</summary><nc-theme-picker compact></nc-theme-picker></details>
+  <details id="theme-menu"><summary>Theme</summary><nc-theme-picker></nc-theme-picker></details>
 </header>
 <nav id="tabnav" aria-label="sections"><div role="tablist" aria-label="dashboard sections">
   <button role="tab" id="tab-capacity" aria-controls="panel-capacity" data-tab="capacity"
@@ -767,7 +786,11 @@ function closeForm(){
 // mode (also paused) is unaffected.
 document.addEventListener('keydown', e => {
   const slot = $('form-slot');
-  if(slot.innerHTML === '') return;
+  if(slot.innerHTML === ''){   // no dialog: Escape closes the Theme popover, if open, back onto its summary
+    const tm = $('theme-menu');
+    if(e.key === 'Escape' && tm && tm.open){ tm.open = false; const s = tm.querySelector('summary'); if(s) s.focus(); }
+    return;
+  }
   if(e.key === 'Escape'){ closeForm(); return; }
   if(e.key !== 'Tab') return;
   const all = focusables(slot), i = all.indexOf(document.activeElement);
@@ -2532,7 +2555,7 @@ function render(d){
     <th>Node</th><th>Cluster</th><th>PVE node</th><th>Bridges</th><th class="num">CPU</th>
     <th class="num">Mem (GiB)</th><th class="num">Leases</th>${canEdit?TH_ACTS:''}</tr></thead><tbody>`
     + d.nodes.map((n,i) =>
-      `<tr${n.cordoned?' style="opacity:.6"':''}>`+
+      `<tr${n.cordoned?' class="cordoned"':''}>`+
       `<td>${esc(n.node_id)}${cordonBadge(n)}</td>`+
       `<td class="pill">${n.cluster_id?esc(n.cluster_id):'— unassigned'}</td>`+
       `<td class="pill">${n.pve_node?esc(n.pve_node):'<span style="color:var(--warn)">— capacity-only</span>'}</td>
