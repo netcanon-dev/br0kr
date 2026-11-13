@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-The reach-based build-node pick (daemon._build_node_and_driver + build.reaching_build_nodes, PR-A2) on a REAL
+The reach-based build-node pick (tick_builds.build_node_and_driver + build.reaching_build_nodes, PR-A2) on a REAL
 Postgres ledger + a REAL NodeRegistry — the daemon-layer proof (conn + registry) the pure-DB content tests
 (fake connections, PR-A) structurally cannot give: that the DB reach SQL and the Python served-set intersection
 AGREE on real rows, so a template build actuates on a node that can actually reach its target pool instead of the
@@ -41,6 +41,7 @@ import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from br0kr import admin, build, daemon as daemon_mod, migrate, nodes, placement  # noqa: E402
+from br0kr import tick_builds
 
 CONN = os.environ["PGCONN"]
 
@@ -106,7 +107,7 @@ def main() -> int:
 
         def pick(served: dict[str, str], job: build.BuildJob):
             d.registry = _registry(served)
-            return d._build_node_and_driver(c, job)
+            return tick_builds.build_node_and_driver(d, c, job)
 
         # ── A: the DB reach half returns the un-cordoned ∩ un-quarantined ids, id-ordered; None if unmodeled ──
         check("A_reach_omv_excludes_quarantined_and_cordoned",

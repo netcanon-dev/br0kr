@@ -94,7 +94,7 @@ pool (a mismatch raises `pve.DataDiskMisplaced` → `data_disk_cross_provision_d
 `qm set` volume is created in place). `provision_lease`'s boot assertion now reads the CAPTURED boot device via
 `disk_storage` (not `pick_boot_disk` on a polluted post-attach config — finding #1); the ACTIVE outcome carries
 the attached `(disk_index, storage_id, device_key)`. The daemon threads `data_disk_plan` through
-`_resolve_clone_target` (now a 7-tuple) into `provision_lease`, and `_record_provision_outcome` late-stamps
+`tick_provision.resolve_clone_target` (now a 7-tuple) into `provision_lease`, and `tick_provision.record_provision_outcome` late-stamps
 each disk's `clone_storage_id` + `device_key` (`lease.stamp_data_disk_device`) + marks each (data pool, node)
 pair verified on ACTIVE, or `quarantine_pair`s the expected pool's LEDGER storage id (the `storage_node` FK
 target — `DataDiskMisplaced` carries it; the PVE name would violate the FK and abort the tick) on a mismatch (a
@@ -383,7 +383,7 @@ budget), and a raising read costs exactly what it did pre-hardening (one GET, th
 never settles within the budget likewise degrades to the same fail-soft skip — never a false mismatch, never a
 teardown of a healthy guest.
 
-On success, `daemon._record_provision_outcome` stamps `placement.mark_verified` for **each** `(data_pool,
+On success, `tick_provision.record_provision_outcome` stamps `placement.mark_verified` for **each** `(data_pool,
 placement_node)` pair; on a detected mismatch it `quarantine_pair`s the offending pair. So the assertion doubles
 as the runtime-reachability verify/quarantine seam for data pools — reusing the whole existing lifecycle, no new
 machinery. Because data disks are *created* on their pool (not moved), a mismatch is nearly impossible; the

@@ -63,6 +63,11 @@ with push_context(run_id=generate_correlation_id(), op="reconcile"):
     do_work()                  # nested logs tagged too
 ```
 
+The daemon's reconcile tick is one example: each tick runs under
+`run_id`, `op="reconcile_tick"` and `tick=<n>`, and each of its steps adds
+`step=<name>` (the row's name in `br0kr/tick_steps.py`), so a tick's log lines
+can be split by step without parsing messages.
+
 > **Gotcha (load-bearing):** a `threading.Thread` does **not** inherit the
 > parent's context by default — it starts empty. A worker function must
 > re-establish context on its **first line** (`set_context(run_id=…, worker=…)`).

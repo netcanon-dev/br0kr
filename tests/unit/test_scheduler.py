@@ -410,7 +410,7 @@ def test_promote_scheduled_definitive_reason_short_circuits(monkeypatch):
 def test_promote_scheduled_holds_time_mutable_wall_when_copy_in_scope(monkeypatch):
     """The PROMOTE twin of the schedule() time-mutable-wall exception (round-2 fix): when every candidate refuses
     no_reachable_instance but a usable copy of the template EXISTS in scope (its node merely full/cordoned, so
-    filtered from the snapshot before the loop), promote_scheduled returns `no_capacity` so daemon._promote HOLDS
+    filtered from the snapshot before the loop), promote_scheduled returns `no_capacity` so tick_queue.promote HOLDS
     the FIFO line — NOT the non-holding placement wall that would let younger same-lane asks leapfrog the queued
     lease to queue_timeout. Guards that the two twins classify the identical state consistently."""
     calls = _stub_promote(monkeypatch,

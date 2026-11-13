@@ -136,7 +136,7 @@ button on the migrations panel). It is the confirm-safe sibling of the build-sid
 - **Proven — hermetic.** The saga's pure verdicts + every orchestration branch (commit / abort / retry,
   reservation-lost, fence-mismatch, crash-resume) are unit/integration tested
   (`tests/unit/test_migration.py`, `tests/integration/test_migration.py`). The full saga + its
-  **race-freedom** — AND the **daemon wiring** (the leader's `_migrate` tick step, routed per source
+  **race-freedom** — AND the **daemon wiring** (the leader's `tick_copies.migrate` tick step, routed per source
   cluster, disabled at `migrate_limit=0` / no-PDM) — are proven against a **real Postgres ledger + a fake
   PDM actuator** (`scripts/harness_migrate_lease.py`, `bash scripts/run_harness.sh migrate_lease`, group I): happy-path
   capacity exactly conserved; **M concurrent migrations onto a 1-slot target → exactly one wins, the target
@@ -145,7 +145,7 @@ button on the migrations panel). It is the confirm-safe sibling of the build-sid
   `scripts/harness_pdm.py`.
 - **Done — the pre-wire.** A `Pdm` is now **constructed at runtime** from cluster config (`br0kr/remotes.py`,
   applying the same C11 discipline as the PVE driver: `nodes.valid_pve_host`-validated `pdm_endpoint`, PDM
-  token secret resolved from the env by name via migration `0018`, never stored). The daemon's `_migrate`
+  token secret resolved from the env by name via migration `0018`, never stored). The daemon's `tick_copies.migrate`
   step drives `run_pending_routed` on a **dedicated NON-autocommit connection** (the reserve step's
   `admit()` holds a `pg_advisory_xact_lock` spanning its read+insert, which the daemon's autocommit work
   conn would release — `run_migration_step` guards against this and raises loudly). The operator trigger is

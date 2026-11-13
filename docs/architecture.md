@@ -29,7 +29,7 @@ operators ─── HTTPS ───────────────► dashb
                                        ▼
 Postgres ledger, the only state ── pg-primary ── streaming replication ──► pg-standby (hot)
                                        ▲ one session advisory lock (leader.py): one leader
-daemon.py ── the leader ticks: provision, reap, promote, jobs, sweep; other daemons wait
+daemon.py ── the leader ticks (tick_steps.py): provision, reap, promote, jobs, sweep; others wait
                                        │ PVE REST; every guest carries its lease's fence tag
                                        ▼
 Proxmox clusters ── pve.py, one driver per node                      PDM ── pdm.py, dormant
@@ -125,7 +125,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `bulk.py` | One per-lease verb over many ids, each committed or rolled back alone. | via the verb | — | `unit/test_bulk.py`, `harness_queue.py` |
 | `cli.py` | `br0kr-admin`: mints, lists and revokes agent tokens headless, validated and audited. | via admin, audit | — | `unit/test_cli.py`, `harness_cli.py` |
 | `cloudinit.py` | Pure VM-access policy: SSH key checks, cloud-init config, guest-IP pick. | — | — | `unit/test_cloudinit.py`, `harness_cloudinit.py` |
-| `daemon.py` | The leader's reconcile loop: provision, reap, promote, the jobs, the sweep, each tick. | via lease, admission, reaper, jobs | acts (build reclaim); via reconciler, sweeper | `unit/test_daemon.py`, `harness_daemon.py` |
+| `daemon.py` | The leader's reconcile loop: leadership, connections, health; each tick runs the step table. | via the tick steps | via the tick steps | `unit/test_daemon.py`, `harness_daemon.py` |
 | `dashboard.py` | Stdlib HTTP server: read endpoints and the token-gated operator actions. | via admin, gateway, actas, settings, jobs | — | `unit/test_dashboard.py`, `integration/test_dashboard.py` |
 | `dashboard_page.py` | The dashboard's one HTML page: its CSS and the polling client script. | — | — | `unit/test_dashboard.py`, `integration/test_dashboard_client.py` |
 | `db.py` | The one connection seam: READ COMMITTED pin, keepalives, retry, pools. | — | — | `unit/test_db.py`, `harness_ledger_ha.py` |
@@ -138,6 +138,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `ledgerhealth.py` | The ledger's replication posture (slots, standbys) for metrics and the dashboard. | reads | — | `unit/test_ledgerhealth.py`, `harness_ledger_replication.py` |
 | `logging_setup.py` | One logging configure point: JSON or text, correlation ids, secret redaction. | — | — | `unit/test_redaction.py`, `unit/test_logging_file_fallback.py` |
 | `mcp_server.py` | The MCP adapter: authorizes each tool call, then calls the gateway or admin verb. | via gateway, admin | reads | `unit/test_mcp_server.py` |
+| `metrics_snapshot.py` | The daemon's cached ledger read behind its `/metrics`, and the `/readyz` probe. | reads | — | `integration/test_daemon.py` |
 | `metrics.py` | Labelled Prometheus counters and summaries, and the `/metrics` listener. | — | — | `unit/test_metrics.py`, `integration/test_metrics_listener.py` |
 | `migrate.py` | Applies the numbered SQL migrations in order, each atomic with its record. | writes | — | `unit/test_migrate.py`, `harness_migrate.py` |
 | `migration.py` | Dormant cross-cluster lease migration: re-admit on the target, move through PDM. | writes; via admission | via pdm | `unit/test_migration.py`, `harness_migrate_lease.py` |
@@ -158,12 +159,19 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `scheduler.py` | Picks a node for an unpinned ask: ranks candidates, tries `admit()` on each. | reads; via admission | — | `unit/test_scheduler.py`, `harness_schedule.py` |
 | `settings.py` | The `operator_setting` knobs: ledger, then env, then default, applied each tick. | writes | — | `unit/test_settings.py`, `harness_settings.py` |
 | `sweeper.py` | The teardown backstop: destroys fenced guests whose lease is terminal or gone. | via replication | via pve | `integration/test_sweeper.py`, `harness_sweeper_watermark.py` |
+| `tick_builds.py` | Tick steps: template downloads and the stale-build reclaim. | via build, reconciler | acts (build reclaim); via reconciler | `integration/test_daemon.py`, `harness_build_node_pick.py` |
+| `tick_config.py` | Tick steps: hot-apply the operator settings, then hot-reload the node registry. | via settings | — | `unit/test_daemon.py`, `integration/test_daemon.py` |
+| `tick_copies.py` | Tick steps: the migration saga, the replication data plane and its reclaim. | via migration, replication | via migration, replication | `integration/test_daemon.py`, `unit/test_tick_steps.py` |
+| `tick_provision.py` | Tick steps: provision ADMITTED leases; the placement re-check, holds and preflight. | reads; via lease, placement, audit, reconciler | via reconciler | `unit/test_daemon.py`, `integration/test_daemon.py` |
+| `tick_queue.py` | Tick step: promote queued leases, strict per-scope FIFO. | via admission, scheduler | — | `integration/test_daemon.py`, `unit/test_tick_steps.py` |
+| `tick_steps.py` | The tick as a table: each step's order, cadence and connection; `TickSummary`. | — | — | `unit/test_tick_steps.py`, `integration/test_daemon.py` |
+| `tick_upkeep.py` | Tick steps: reap, guest-IP discovery, orphan sweep, audit retention, discovery report. | via reaper, sweeper, reconciler, audit | via reaper, sweeper, reconciler; reads (discovery) | `unit/test_daemon.py`, `harness_discovery_cadence.py` |
 | `ui_assets.py` | Vendored UI-spec CSS and JS, served with the dashboard. | — | — | `unit/test_ui_assets.py`, `integration/test_dashboard.py` |
 
 ## Scale envelope
 
 **Provisioning is single-threaded per leader: the wall is clone time × backlog, not admission** (review PERF-05).
-Defaults from `br0kr/daemon.py` and `br0kr/settings.py`:
+Defaults from `br0kr/daemon.py`, `br0kr/metrics_snapshot.py` and `br0kr/settings.py`:
 
 | Path | Runs | Per pass | Bounded by |
 |---|---|---|---|

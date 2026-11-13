@@ -87,7 +87,7 @@ def test_discovery_interval_knob_is_an_int_defaulting_off(monkeypatch):
     minimum=0) whose default is 0 = OFF (no periodic reachability-discovery report). 0 (OFF), a positive N, and
     a None (clears → env/default) are accepted; a negative is 'below_min' (a clean 400 before the DB CHECK) and a
     non-int (bool/float) is rejected. Guards the knob being dropped/mis-typed and a negative/garbage cadence
-    reaching the ledger or the daemon's _discovery_due gate."""
+    reaching the ledger or the daemon's tick_upkeep.discovery_due gate."""
     by = {k.name: k for k in settings.KNOBS}
     knob = by["discovery_interval_seconds"]
     assert knob.kind == "int" and knob.default == 0 and knob.minimum == 0 and knob.gateway is False

@@ -65,7 +65,7 @@ fail-closed* doctrine. Three concrete gaps motivate this work:
    `download-url`** instead of an up-front placement refusal, and nothing warns that FastStorage can't build.
    (Live: this is the class of failure that surfaced during the PR-7 rebuild_source live-verify.)
 
-3. **The build-node pick is reach-blind (latent bug, confirmed).** `daemon._node_and_driver_for_cluster`
+3. **The build-node pick is reach-blind (latent bug, confirmed).** `tick_builds.node_and_driver_for_cluster`
    (`daemon.py:1034`) runs a template build on the cluster's **first served node**, never consulting
    `storage_node` reach — while `plan_rebuild_source` picks by reach. So a build can be actuated on a node that
    cannot reach its own target pool.
@@ -164,7 +164,7 @@ here actuates immediately) — pinned by a test.
 ## 4. The reach-based build-node pick (PR-A2, split out)
 
 Split from PR-A so PR-A keeps its "no actuation-path change" property. Implement as a **new build-only** daemon
-helper (leave `_node_and_driver_for_cluster` / `_driver_for_cluster` untouched — the latter is the stale-build
+helper (leave `tick_builds.node_and_driver_for_cluster` / `tick_builds.driver_for_cluster` untouched — the latter is the stale-build
 reclaim's legacy-NULL-node fallback, where "any served node" is the *correct* semantic). The pick:
 
 - `registry.nodes_in(cluster)` **∩** un-quarantined `storage_node` rows for the **resolved** storage row (§3's
@@ -268,7 +268,7 @@ a discovery sidecar table; discovery stays computed-on-read and no staging sidec
 | PR | Scope | Sacred-seam? |
 |----|-------|--------------|
 | **PR-A** | 0041 (`content_types` + `content_declared_at`, NULLABLE, no backfill) + `admin.set_storage_content` **with dashboard surface + VERB_TIER + audit** + one `content_capable({import,images})` predicate behind the **name→row resolver**, wired at **all four** build/rebuild request seams + the rebuild actuation re-read, **plus the real 401/403 catch → `rebuild_acl_denied`/`build_acl_denied`**. Update `harness_rebuild_source` seed + negative cases; re-run `harness_placement` (:5476) as the lockstep regression; new real-PG harness :5483. Sequenced deploy recipe (§9). | **No** admit-path change (provable). |
-| **PR-A2** | The reach-based build-node pick (new build-only daemon helper; `_driver_for_cluster` untouched; served ∩ reaching ∩ [cordon]; legacy fallback; distinct FAILED reason). Daemon-layer harness. | Touches build actuation routing. |
+| **PR-A2** | The reach-based build-node pick (new build-only daemon helper; `tick_builds.driver_for_cluster` untouched; served ∩ reaching ∩ [cordon]; legacy fallback; distinct FAILED reason). Daemon-layer harness. | Touches build actuation routing. |
 | **PR-B** | `discover_reachability` (computed-on-read, no staging) + `_gather_node_views` extraction (verify's contracts pinned) + `add/remove_storage_node` (full guards + quarantine-laundering refusal) + cluster-scoped effective-name join + `acl_denied_nodes`/`unserved_nodes` buckets + MCP/dashboard/fleet-stats + the "discovery writes nothing" invariant test. | No. |
 | **PR-C** | vmbr parity, **read-side only** (bridge-dict sibling method; network half of the discovery report; NO suggestions, NO auto-mapping, NO reader-less columns). | No. |
 | **PR-D** (backlog, each its own adversarial review) | clone-path `images` enforcement in `_resolve_clone_storage` (the **one** item touching the sacred seam — needs `STORAGE_NOT_CAPABLE` in the reason taxonomy + harness lockstep cases, and only behind fleet-wide declaration coverage); verify-time content auto-narrow; name-coincidence bridge suggestions; discovery cadence knob (NULLABLE per the 0021 convention); dismissal persistence; live-PVE re-read at actuation; **node-pick rotation** on repeated same-node failures. | Varies. |

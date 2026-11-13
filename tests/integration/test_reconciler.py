@@ -695,7 +695,7 @@ def test_build_template_import_timeout_is_left_non_terminal_for_the_reclaim(monk
     """A create/import (knob=create_rc) OR templatize (knob=template_rc) that returns 'TIMEOUT' (the task is
     STILL RUNNING past the budget) must NOT be destroyed (racing an in-flight Proxmox task fails the DELETE
     and orphans it) and must NOT be marked FAILED (a terminal build is invisible to every reclaim →
-    permanent orphan). The build is left NON-TERMINAL (import_timeout, vmid stamped) so daemon._reclaim_builds
+    permanent orphan). The build is left NON-TERMINAL (import_timeout, vmid stamped) so tick_builds.reclaim_builds
     fenced-destroys it after the task settles. Guards the review HIGH: the in-flight-create race + permanent
     build-fenced orphan."""
     monkeypatch.setattr(reconciler.build, "mark_ready", lambda c, bid, sz=None: True)

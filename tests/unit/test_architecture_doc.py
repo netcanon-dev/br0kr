@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from br0kr import daemon, pve, settings
+from br0kr import daemon, metrics_snapshot, pve, settings
 
 pytestmark = pytest.mark.unit
 
@@ -141,7 +141,7 @@ def test_scale_envelope_defaults_match_the_code():
         f"| {_default(daemon.Daemon, 'batch')} per claim step |",
         f"at most {_default(pve.Pve.clone, 'secs')} s (clone), {_default(pve.Pve.resize_disk, 'secs')} s (grow), "
         f"{_default(pve.Pve.start, 'secs')} s (start)",
-        f"| one ledger read per {daemon.METRICS_SNAPSHOT_TTL_S:g} s |",
+        f"| one ledger read per {metrics_snapshot.METRICS_SNAPSHOT_TTL_S:g} s |",
         # the prose repeats the waits; the grow and the start share one figure there
         f"up to {_default(pve.Pve.clone, 'secs')} s for the clone, then {_default(pve.Pve.resize_disk, 'secs')} s "
         f"each for the grow and the start",

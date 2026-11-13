@@ -55,7 +55,7 @@ def setup() -> dict[str, int]:
 
 
 def scrape_ledger(dsn: str) -> observability.LedgerProbe:
-    """The leases-by-state query a leader's metrics snapshot runs (daemon._read_counts), bound to a given DSN
+    """The leases-by-state query a leader's metrics snapshot runs (metrics_snapshot.LedgerSnapshots._read_counts), bound to a given DSN
     (so case C can point at a bad one). Any error → (False, {}) — a momentarily-unreachable ledger reads as
     not-reachable."""
     try:

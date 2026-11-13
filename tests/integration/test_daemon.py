@@ -14,12 +14,34 @@ from types import SimpleNamespace
 
 import pytest
 
+from br0kr import (
+    admission,
+    build,
+    inventory,
+    leader,
+    lease,
+    ledgerhealth,
+    metrics_snapshot,
+    nodes,
+    observability,
+    placement,
+    reaper,
+    reconciler,
+    scheduler,
+    settings,
+    sweeper,
+    tick_builds,
+    tick_config,
+    tick_copies,
+    tick_provision,
+    tick_queue,
+    tick_upkeep,
+)
 from br0kr import daemon as daemon_mod
-from br0kr import leader, lease, ledgerhealth, nodes, observability, placement, reaper, reconciler, sweeper
 from br0kr.lease import AdmittedLease
 
 # The real held re-check, captured before the `wired` fixture patches it out (a REL-05 test drives it).
-_REAL_RECHECK_HELD = daemon_mod.Daemon._recheck_held
+_REAL_RECHECK_HELD = tick_provision.recheck_held
 
 pytestmark = pytest.mark.integration
 
@@ -100,10 +122,10 @@ def wired(monkeypatch):
         rec.setdefault("held", {})[lid] = reason
         summary.placement_holds += 1
 
-    monkeypatch.setattr(daemon_mod.Daemon, "_placement_for", fake_placement_for)
-    monkeypatch.setattr(daemon_mod.Daemon, "_hold", fake_hold)
-    monkeypatch.setattr(daemon_mod.Daemon, "_recheck_held", lambda self, conn, summary: None)
-    monkeypatch.setattr(daemon_mod.Daemon, "_placement_preflight", lambda self, conn, summary: None)
+    monkeypatch.setattr(tick_provision, "placement_for", fake_placement_for)
+    monkeypatch.setattr(tick_provision, "hold", fake_hold)
+    monkeypatch.setattr(tick_provision, "recheck_held", lambda self, conn, summary: None)
+    monkeypatch.setattr(tick_provision, "placement_preflight", lambda conn, summary: None)
 
     # IP-discovery seam. Default: an empty work-list. Captures the env_template flag the daemon passes (the
     # real SQL gates the work-list on it; the fake just records it so the daemon's wiring is assertable).
@@ -137,11 +159,11 @@ def wired(monkeypatch):
 
     # The operator_setting hot-apply + cross-process reload flag (migration 0021) are DB reads the daemon does
     # at the top of each tick; patch them out here like every other work-seam — the settings behaviour is
-    # proven in tests/unit/test_daemon.py + scripts/harness_settings.py. `_apply_settings` → a no-op keeps the
+    # proven in tests/unit/test_daemon.py + scripts/harness_settings.py. `tick_config.apply_settings` → a no-op keeps the
     # daemon's constructor-set knobs for these orchestration asserts; `take_reload` → False so no tick triggers
     # a spurious registry reload.
-    monkeypatch.setattr(daemon_mod.Daemon, "_apply_settings", lambda self, conn: None)
-    monkeypatch.setattr(daemon_mod.settings, "take_reload", lambda conn: False)
+    monkeypatch.setattr(tick_config, "apply_settings", lambda self, conn: None)
+    monkeypatch.setattr(settings, "take_reload", lambda conn: False)
 
     def fake_sweep_all(conn, drivers, dry_run=False, allow_mass_absent=False, on_progress=None, should_stop=None):
         rec["sweep_calls"] += 1
@@ -279,7 +301,7 @@ def test_replication_reclaim_not_opened_without_a_replicate_connect(wired, monke
 def test_discovery_cadence_runs_on_the_interval_and_advances_the_stamp(wired, monkeypatch):
     """The tick runs the discovery report when discovery_interval_seconds>0 and the interval has elapsed, sets
     summary.discovery_ran (a SUCCESSFUL run) + discovery_drift, and — the SOLE guard against an every-tick
-    PVE-read runaway — ADVANCES _last_discovery_at BEFORE _discover (the gate itself is pure; the TICK owns the
+    PVE-read runaway — ADVANCES _last_discovery_at BEFORE tick_upkeep.discover (the gate itself is pure; the TICK owns the
     stamp). A second immediate tick does NOT re-run (the interval hasn't elapsed) yet the drift gauge still HOLDS
     the last-known level (not flapping to 0). Guards a refactor dropping/reordering the stamp-advance — which
     would make the daemon run the tick-blocking two-GETs-per-node report EVERY tick with the rest of the suite
@@ -290,9 +312,9 @@ def test_discovery_cadence_runs_on_the_interval_and_advances_the_stamp(wired, mo
         calls["n"] += 1
         return {"ok": True, "checked_nodes": ["n1"], "content_report": [{"a": 1}], "unknown_pool": [{"b": 2}]}
 
-    monkeypatch.setattr(daemon_mod.placement, "discover_reachability", fake_discover)
+    monkeypatch.setattr(placement, "discover_reachability", fake_discover)
     d = _daemon(sweep_every=1)
-    # `wired` no-ops _apply_settings, so these post-construction knob sets survive the tick (the real daemon
+    # `wired` no-ops tick_config.apply_settings, so these post-construction knob sets survive the tick (the real daemon
     # hot-applies them from the ledger). interval>0 + never-run → the first tick is due.
     d.discovery_interval_seconds = 300
     d._last_discovery_at = None
@@ -382,7 +404,7 @@ def test_a_lease_clones_its_picked_template_over_the_env_default(wired):
 
 def test_the_data_disk_plan_is_threaded_into_the_provision_call(wired):
     """A templated lease whose placement decision carries a data_disk_plan (PR-4) has that plan threaded through
-    _resolve_clone_target → provision_lease, so the reconciler attaches the tenant's extra pools. Guards the
+    tick_provision.resolve_clone_target → provision_lease, so the reconciler attaches the tenant's extra pools. Guards the
     silent-drop gap: a plan resolved at placement that never reaches actuation would provision boot-only and the
     tenant's data disks would vanish."""
     plan = (placement.DataDiskTarget(disk_index=1, storage_id="bulk_id", storage_pve="bulk", req_disk_gb=5),)
@@ -396,7 +418,7 @@ def test_the_data_disk_plan_is_threaded_into_the_provision_call(wired):
 
 def test_a_picked_template_with_a_key_builds_cloud_init_without_an_env_default(wired):
     """A lease that picked a template AND requested access gets its cloud-init built even when NO env
-    template is configured — the lease's OWN template is the OS to inject into. Guards _cloud_init_for
+    template is configured — the lease's OWN template is the OS to inject into. Guards tick_provision.cloud_init_for
     keying off the env default instead of the EFFECTIVE (lease-or-env) template, which would drop the key
     for a per-request templated lease on a no-env-default daemon."""
     wired["admitted"] = [AdmittedLease(7, "n1", 1.0, 512, ssh_pubkey="ssh-ed25519 AAAA k", ci_user="runner",
@@ -785,24 +807,24 @@ def test_leadership_lost_during_the_reap_skips_the_rest_of_the_tick(wired, monke
 
 
 def test_a_loss_in_the_last_phase_still_returns_without_waiting(wired, monkeypatch):
-    """A drop noticed in the tick's last phase (the audit prune, which has no checkpoint after it) lets the tick
-    complete, and serve() still returns at once instead of waiting out the interval and starting another tick.
-    Guards the exit check that runs after a COMPLETED tick, not only after one cut short."""
+    """A drop noticed in one of the tick's last steps (the audit prune) ends the tick at the checkpoint after it,
+    and serve() returns at once instead of waiting out the interval and starting another tick. Guards the exit
+    check after the tick, which a late loss reaches with nothing left of the tick to cut short."""
     state = {"lost": False}
     _lose_leadership_when(monkeypatch, state)
     d = _daemon(interval=0.0)
-    monkeypatch.setattr(d, "_audit_prune_due", lambda: True)
+    monkeypatch.setattr(tick_upkeep, "audit_prune_due", lambda _d: True)
 
-    def prune_then_drop(conn):
+    def prune_then_drop(_d, conn):
         state["lost"] = True
         d._beat()
         return 0
 
-    monkeypatch.setattr(d, "_prune_audit", prune_then_drop)
+    monkeypatch.setattr(tick_upkeep, "prune_audit", prune_then_drop)
     waits: list[float] = []
     monkeypatch.setattr(d._stop, "wait", lambda timeout=None: waits.append(timeout) or False)
     d.serve(_FakeConn())
-    assert wired["reap_calls"] == 1 and waits == []      # the tick ran to its end, then serve returned at once
+    assert wired["reap_calls"] == 1 and waits == []      # the tick ended after the prune; serve returned at once
     assert d._ticks == 1
 
 
@@ -834,22 +856,22 @@ def test_a_lost_leadership_starts_no_new_item_in_any_daemon_loop(wired, monkeypa
     item. Guards an item loop that still checks only the shutdown flag (the pre-REL-05 shape) and so keeps
     actuating after the loss."""
     touched: list[str] = []
-    monkeypatch.setattr(daemon_mod.build, "claim_next_build", lambda c: touched.append("build"))
-    monkeypatch.setattr(daemon_mod.build, "stale_builds",
+    monkeypatch.setattr(build, "claim_next_build", lambda c: touched.append("build"))
+    monkeypatch.setattr(build, "stale_builds",
                         lambda c, s: [SimpleNamespace(id=1, vmid=None, node_id="n1", stage="clone")])
-    monkeypatch.setattr(daemon_mod.build, "claim_stale_for_reclaim", lambda *a, **k: touched.append("reclaim"))
+    monkeypatch.setattr(build, "claim_stale_for_reclaim", lambda *a, **k: touched.append("reclaim"))
     monkeypatch.setattr(lease, "list_queued", lambda c, limit=100: [SimpleNamespace(id=3)])
-    monkeypatch.setattr(daemon_mod.Daemon, "_recheck_held", _REAL_RECHECK_HELD)   # wired patched it out
+    monkeypatch.setattr(tick_provision, "recheck_held", _REAL_RECHECK_HELD)   # wired patched it out
     monkeypatch.setattr(lease, "list_held", lambda conn, limit=100, node_ids=None: [SimpleNamespace(id=7)])
     wired["ip_pending"] = [lease.IpPending(id=7, node_id="n1", vmid=9007)]
     d = _daemon(build_limit=2)
-    monkeypatch.setattr(d, "_placement_for", lambda *a, **k: touched.append("held"))
+    monkeypatch.setattr(tick_provision, "placement_for", lambda *a, **k: touched.append("held"))
     d._leader_conn, d._leadership_lost = _FakeConn(), True
-    assert d._build_templates(_FakeConn()) == 0
-    assert d._reclaim_builds(_FakeConn()) == 0
-    assert d._discover_ips(_FakeConn()) == 0 and "ip_discovered" not in wired
-    assert d._promote(_FakeConn()) == (0, 1)
-    d._recheck_held(_FakeConn(), daemon_mod.TickSummary())
+    assert tick_builds.build_templates(d, _FakeConn()) == 0
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 0
+    assert tick_upkeep.discover_ips(d, _FakeConn()) == 0 and "ip_discovered" not in wired
+    assert tick_queue.promote(d, _FakeConn()) == (0, 1)
+    tick_provision.recheck_held(d, _FakeConn(), daemon_mod.TickSummary())
     assert touched == []
 
 
@@ -866,9 +888,9 @@ def test_the_daemon_hands_halted_to_every_batch_pass(wired, monkeypatch):
     monkeypatch.setattr(replication, "reclaim_stale_replications", lambda *a, **k: seen.__setitem__("reclaim", k) or 0)
     d = _daemon(sweep_every=1)
     d.tick(_FakeConn())
-    d._migrate(_FakeConn())
-    d._run_replications(_FakeConn())
-    d._reclaim_replications(_FakeConn())
+    tick_copies.migrate(d, _FakeConn())
+    tick_copies.run_replications(d, _FakeConn())
+    tick_copies.reclaim_replications(d, _FakeConn())
     assert wired["sweep_should_stop"] == d._halted
     assert all(seen[k]["should_stop"] == d._halted for k in ("migrate", "replicate", "reclaim")), seen
 
@@ -892,17 +914,17 @@ def test_a_loss_in_the_sweep_block_skips_its_later_steps(lose_in, wired, monkeyp
 
     monkeypatch.setattr(sweeper, "orphan_sweep_all", sweep)
     d = _daemon(interval=0.0, sweep_every=1, build_limit=1, replicate_connect=lambda: _FakeConn())
-    monkeypatch.setattr(daemon_mod.build, "claim_next_build", lambda c: None)
+    monkeypatch.setattr(build, "claim_next_build", lambda c: None)
 
-    def reclaim_builds(conn):
+    def reclaim_builds(_d, conn):
         ran.append("build_reclaim")
         if lose_in == "build_reclaim":
             state["lost"] = True
             d._beat()
         return 0
 
-    monkeypatch.setattr(d, "_reclaim_builds", reclaim_builds)
-    monkeypatch.setattr(d, "_reclaim_replications", lambda c: ran.append("repl_reclaim") or 0)
+    monkeypatch.setattr(tick_builds, "reclaim_builds", reclaim_builds)
+    monkeypatch.setattr(tick_copies, "reclaim_replications", lambda _d, c: ran.append("repl_reclaim") or 0)
     d.serve(_FakeConn())
     assert ran == ([] if lose_in == "sweep" else ["build_reclaim"])
 
@@ -1177,7 +1199,7 @@ def test_a_fleet_shrink_to_a_different_nonempty_set_still_swaps(wired, monkeypat
 def test_the_reload_flag_is_lock_free_for_async_signal_safety(wired):
     """The reload flag is a plain bool, NOT a threading.Event: request_reload() is a SIGHUP handler
     on the daemon's sole (main) thread, and Event.set()/clear() take the Event's non-reentrant lock —
-    a HUP landing while the main thread held that lock in _maybe_reload's read-and-clear would
+    a HUP landing while the main thread held that lock in tick_config.maybe_reload's read-and-clear would
     self-deadlock the only reconciler. A bool store/load is atomic under the GIL and lock-free.
     Guards a regression that swaps the flag back to an Event (re-introducing the deadlock the
     adversarial review caught): the explicit isinstance(bool) check fails for an Event even if the
@@ -1191,7 +1213,7 @@ def test_the_reload_flag_is_lock_free_for_async_signal_safety(wired):
 
 # ── health / metrics wiring (the daemon-side adapter feeding br0kr/observability.py) ──────────────
 class _ScrapeConn:
-    """A fake ledger connection for _scrape_ledger: execute(...).fetchall() returns canned
+    """A fake ledger connection for the metrics snapshot: execute(...).fetchall() returns canned
     (state, count) rows, and fetchone() the live-pinned count (0049); closeable for the `with closing(...)`."""
 
     def __init__(self, rows, pinned=0):
@@ -1267,7 +1289,7 @@ def test_standby_publish_clears_the_tick_stamp(wired):
 
 
 def test_scrape_ledger_returns_counts_or_marks_unreachable(wired):
-    """_scrape_ledger runs leases-by-state on a FRESH connection and returns (True, counts), the counts also
+    """The snapshot's scrape_ledger runs leases-by-state on a FRESH connection and returns (True, counts), the counts also
     carrying the live pinned leases under observability.PINNED_KEY (0049); ANY error (a momentarily-unreachable
     ledger) returns (False, {}) instead of raising — so /readyz reads not-ready and /metrics reads
     ledger_reachable 0 rather than the scrape crashing. Guards the probe propagating an exception onto the
@@ -1275,13 +1297,13 @@ def test_scrape_ledger_returns_counts_or_marks_unreachable(wired):
     d = _daemon()
     d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
     d._connect = lambda: _ScrapeConn([("ACTIVE", 3), ("ADMITTED", 1)], pinned=2)
-    assert d._scrape_ledger() == (True, {"ACTIVE": 3, "ADMITTED": 1, observability.PINNED_KEY: 2})
+    assert d._snapshots.scrape_ledger() == (True, {"ACTIVE": 3, "ADMITTED": 1, observability.PINNED_KEY: 2})
 
     def boom():
         raise RuntimeError("ledger down")
     d._connect = boom
-    d._ledger_snap = None   # the snapshot is cached for METRICS_SNAPSHOT_TTL_S; force the next read
-    assert d._scrape_ledger() == (False, {})
+    d._snapshots._snap = None   # the snapshot is cached for METRICS_SNAPSHOT_TTL_S; force the next read
+    assert d._snapshots.scrape_ledger() == (False, {})
 
 
 # ── the admission-queue promoter (strict per-scope FIFO) ─────────────────────────
@@ -1291,10 +1313,10 @@ def test_queue_block_keys_pinned_and_scheduled():
     policy that decides which younger requests must wait behind an older still-waiting one — a wrong key
     set would let a younger request jump the line (unfair) or block unrelated resources (needless stall)."""
     QL = daemon_mod.lease.QueuedLease
-    assert daemon_mod._queue_block_keys(QL(1, "n1", None, None, None)) == {"node:n1"}
-    assert daemon_mod._queue_block_keys(QL(2, "n1", None, "ceph", "p1")) == {"node:n1", "storage:ceph", "project:p1"}
-    assert daemon_mod._queue_block_keys(QL(3, None, "c1", None, None)) == {"cluster:c1"}
-    assert daemon_mod._queue_block_keys(QL(4, None, None, None, "p1")) == {"cluster:*", "project:p1"}
+    assert tick_queue.queue_block_keys(QL(1, "n1", None, None, None)) == {"node:n1"}
+    assert tick_queue.queue_block_keys(QL(2, "n1", None, "ceph", "p1")) == {"node:n1", "storage:ceph", "project:p1"}
+    assert tick_queue.queue_block_keys(QL(3, None, "c1", None, None)) == {"cluster:c1"}
+    assert tick_queue.queue_block_keys(QL(4, None, None, None, "p1")) == {"cluster:*", "project:p1"}
 
 
 def test_promote_holds_a_younger_same_scope_request(monkeypatch):
@@ -1303,7 +1325,7 @@ def test_promote_holds_a_younger_same_scope_request(monkeypatch):
     Guards the exact fairness the user chose (a small younger request stealing the slot an older bigger
     one is waiting for) — the whole point of the blocked-scope set."""
     QL = daemon_mod.lease.QueuedLease
-    PR = daemon_mod.admission.PromoteResult
+    PR = admission.PromoteResult
     q_old, q_new = QL(1, "n1", None, None, None), QL(2, "n1", None, None, None)   # same node, younger
     monkeypatch.setattr(daemon_mod.lease, "list_queued", lambda c, limit: [q_old, q_new])
     calls: list[int] = []
@@ -1311,8 +1333,8 @@ def test_promote_holds_a_younger_same_scope_request(monkeypatch):
     def fake_promote(c, lid, *, onto_node=None):
         calls.append(lid)
         return PR(False, "insufficient_node_cpu")   # the older doesn't fit → holds the line
-    monkeypatch.setattr(daemon_mod.admission, "promote_pinned", fake_promote)
-    promoted, seen = _daemon(registry=_registry("n1"))._promote(_FakeConn())
+    monkeypatch.setattr(admission, "promote_pinned", fake_promote)
+    promoted, seen = tick_queue.promote(_daemon(registry=_registry("n1")), _FakeConn())
     assert promoted == 0 and seen == 2 and calls == [1]   # younger (2) HELD behind the older — never tried
 
 
@@ -1326,7 +1348,7 @@ def test_promote_does_not_hold_the_line_for_a_forbidden_template_lease(monkeypat
     scheduler.promote_scheduled's template_forbidden short-circuit. The forbidden lease stays PENDING (never
     cloned) and queue-expires / re-promotes on a re-grant; only the wrongful line-holding is removed."""
     QL = daemon_mod.lease.QueuedLease
-    PR = daemon_mod.admission.PromoteResult
+    PR = admission.PromoteResult
     q_old, q_new = QL(1, "n1", None, None, "p1"), QL(2, "n1", None, None, "p1")   # same node + project scope
     monkeypatch.setattr(daemon_mod.lease, "list_queued", lambda c, limit: [q_old, q_new])
     results = {1: PR(False, "template_forbidden"), 2: PR(True, None)}
@@ -1335,8 +1357,8 @@ def test_promote_does_not_hold_the_line_for_a_forbidden_template_lease(monkeypat
     def fake_promote(c, lid, *, onto_node=None):
         calls.append(lid)
         return results[lid]
-    monkeypatch.setattr(daemon_mod.admission, "promote_pinned", fake_promote)
-    promoted, seen = _daemon(registry=_registry("n1"))._promote(_FakeConn())
+    monkeypatch.setattr(admission, "promote_pinned", fake_promote)
+    promoted, seen = tick_queue.promote(_daemon(registry=_registry("n1")), _FakeConn())
     assert promoted == 1 and seen == 2 and calls == [1, 2]   # the forbidden older did NOT hold the line
 
 
@@ -1345,7 +1367,7 @@ def test_promote_does_not_block_independent_scopes(monkeypatch):
     node n2. Guards the pathology where one full node freezes the whole queue (the reason global FIFO was
     rejected for per-scope FIFO)."""
     QL = daemon_mod.lease.QueuedLease
-    PR = daemon_mod.admission.PromoteResult
+    PR = admission.PromoteResult
     q_n1, q_n2 = QL(1, "n1", None, None, None), QL(2, "n2", None, None, None)
     monkeypatch.setattr(daemon_mod.lease, "list_queued", lambda c, limit: [q_n1, q_n2])
     results = {1: PR(False, "insufficient_node_cpu"), 2: PR(True, None)}
@@ -1354,8 +1376,8 @@ def test_promote_does_not_block_independent_scopes(monkeypatch):
     def fake_promote(c, lid, *, onto_node=None):
         calls.append(lid)
         return results[lid]
-    monkeypatch.setattr(daemon_mod.admission, "promote_pinned", fake_promote)
-    promoted, _seen = _daemon(registry=_registry("n1", "n2"))._promote(_FakeConn())
+    monkeypatch.setattr(admission, "promote_pinned", fake_promote)
+    promoted, _seen = tick_queue.promote(_daemon(registry=_registry("n1", "n2")), _FakeConn())
     assert promoted == 1 and calls == [1, 2]   # n2 promoted despite n1 stuck (independent scope)
 
 
@@ -1364,26 +1386,26 @@ def test_promote_routes_scheduled_entries_to_promote_scheduled(monkeypatch):
     (which picks the node), a pinned one via admission.promote_pinned. Guards the routing that would
     otherwise hand a node-less scheduled entry to promote_pinned (which has no node to lock)."""
     QL = daemon_mod.lease.QueuedLease
-    PR = daemon_mod.admission.PromoteResult
+    PR = admission.PromoteResult
     monkeypatch.setattr(daemon_mod.lease, "list_queued", lambda c, limit:
                         [QL(1, "n1", None, None, None), QL(2, None, "c1", None, None)])
     pinned, scheduled = [], []
-    monkeypatch.setattr(daemon_mod.admission, "promote_pinned",
+    monkeypatch.setattr(admission, "promote_pinned",
                         lambda c, lid, *, onto_node=None: pinned.append(lid) or PR(True, None))
-    monkeypatch.setattr(daemon_mod.scheduler, "promote_scheduled",
+    monkeypatch.setattr(scheduler, "promote_scheduled",
                         lambda c, lid: scheduled.append(lid) or PR(True, None))
-    promoted, _seen = _daemon(registry=_registry("n1"))._promote(_FakeConn())
+    promoted, _seen = tick_queue.promote(_daemon(registry=_registry("n1")), _FakeConn())
     assert promoted == 2 and pinned == [1] and scheduled == [2]
 
 
 def test_promote_rolls_back_a_raised_promotion_and_keeps_going(monkeypatch):
-    """A promotion that RAISES (a transient DB blip) must NOT poison the rest of the pass: _promote rolls
+    """A promotion that RAISES (a transient DB blip) must NOT poison the rest of the pass: tick_queue.promote rolls
     the promote connection back (clearing the aborted non-autocommit txn + its scope advisory locks) and
     continues, so a LATER independent-scope lease still promotes in the SAME tick. Guards the
     InFailedSqlTransaction cascade that would otherwise abandon the whole batch after one error and pin
     the failed promotion's locks until tick end (the review's confirmed medium)."""
     QL = daemon_mod.lease.QueuedLease
-    PR = daemon_mod.admission.PromoteResult
+    PR = admission.PromoteResult
     monkeypatch.setattr(daemon_mod.lease, "list_queued", lambda c, limit:
                         [QL(1, "n1", None, None, None), QL(2, "n2", None, None, None)])
 
@@ -1391,7 +1413,7 @@ def test_promote_rolls_back_a_raised_promotion_and_keeps_going(monkeypatch):
         if lid == 1:
             raise RuntimeError("db blip mid-promote")   # leaves a real non-autocommit txn aborted
         return PR(True, None)
-    monkeypatch.setattr(daemon_mod.admission, "promote_pinned", fake_promote)
+    monkeypatch.setattr(admission, "promote_pinned", fake_promote)
 
     class _RollbackConn:
         def __init__(self) -> None:
@@ -1404,14 +1426,14 @@ def test_promote_rolls_back_a_raised_promotion_and_keeps_going(monkeypatch):
             pass
 
     pconn = _RollbackConn()
-    promoted, seen = _daemon(registry=_registry("n1", "n2"))._promote(pconn)
+    promoted, seen = tick_queue.promote(_daemon(registry=_registry("n1", "n2")), pconn)
     assert promoted == 1 and seen == 2 and pconn.rolled_back == 1   # n1 raised+rolled back, n2 promoted
 
 
 # ── operator template DOWNLOAD tick (phase A4.1) ─────────────────────────────────────────────────────
 def _bjob(*, bid=1, cluster="clA", vmid=None, project_id=None, size_gb=None, node_id=None,
          download_upid=None, download_node=None):
-    return daemon_mod.build.BuildJob(id=bid, cluster_id=cluster, target_template_id="deb", url="u",
+    return build.BuildJob(id=bid, cluster_id=cluster, target_template_id="deb", url="u",
                                      sha256="a" * 64, storage_id="s", name=None, description=None,
                                      public=True, vmid=vmid, project_id=project_id, size_gb=size_gb,
                                      node_id=node_id, download_upid=download_upid, download_node=download_node)
@@ -1422,27 +1444,27 @@ def _cluster_registry(node="n1", cluster="clA", driver=None):
 
 
 def test_build_templates_is_a_noop_at_limit_zero(monkeypatch):
-    """_build_templates does nothing when build_limit is 0 (the opt-in default) — claim_next_build is NEVER
+    """tick_builds.build_templates does nothing when build_limit is 0 (the opt-in default) — claim_next_build is NEVER
     called. Guards the download path running when the operator hasn't enabled it (the default must leave
     existing daemon behaviour untouched)."""
-    monkeypatch.setattr(daemon_mod.build, "claim_next_build",
+    monkeypatch.setattr(build, "claim_next_build",
                         lambda c: pytest.fail("claimed a build at build_limit=0"))
-    assert _daemon(build_limit=0)._build_templates(_FakeConn()) == 0
+    assert tick_builds.build_templates(_daemon(build_limit=0), _FakeConn()) == 0
 
 
 def test_build_templates_claims_and_drives_with_the_heartbeat(monkeypatch):
-    """_build_templates claims up to build_limit REQUESTED builds and drives each via reconciler.build_template
+    """tick_builds.build_templates claims up to build_limit REQUESTED builds and drives each via reconciler.build_template
     WITH the liveness heartbeat (on_progress=self._beat), counting only a 'ready' outcome as done. Guards the
     build tick not threading the heartbeat (a long build would wedge /healthz) and over/under-counting."""
     seq = iter([_bjob(bid=1), _bjob(bid=2), None])
-    monkeypatch.setattr(daemon_mod.build, "claim_next_build", lambda c: next(seq, None))
+    monkeypatch.setattr(build, "claim_next_build", lambda c: next(seq, None))
     captured: list[tuple] = []
     monkeypatch.setattr(daemon_mod.reconciler, "build_template",
                         lambda c, drv, job, *, node_id, cores, memory, on_progress:
                         captured.append((job.id, node_id, on_progress))
                         or reconciler.BuildOutcome(job.id, 9500, "ready", None))
     d = _daemon(registry=_cluster_registry(), build_limit=5)
-    assert d._build_templates(_FakeConn()) == 2
+    assert tick_builds.build_templates(d, _FakeConn()) == 2
     assert [j for j, _, _ in captured] == [1, 2]
     assert all(nid == "n1" for _, nid, _ in captured)   # the build's node (nodes_in(cluster)[0]) is threaded in
     assert all(op == d._beat for _, _, op in captured)  # the heartbeat IS threaded into the build
@@ -1453,13 +1475,13 @@ def test_build_templates_marks_failed_when_no_driver_for_cluster(monkeypatch):
     and NEVER actuated. Guards a build for an unreachable cluster hanging, or worse actuating on a node in
     the wrong cluster."""
     seq = iter([_bjob(bid=1, cluster="other"), None])
-    monkeypatch.setattr(daemon_mod.build, "claim_next_build", lambda c: next(seq, None))
+    monkeypatch.setattr(build, "claim_next_build", lambda c: next(seq, None))
     failed: list[tuple] = []
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: failed.append((bid, err)) or True)
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: failed.append((bid, err)) or True)
     monkeypatch.setattr(daemon_mod.reconciler, "build_template",
                         lambda *a, **k: pytest.fail("must not actuate without a driver"))
     d = _daemon(registry=_cluster_registry(cluster="clA"), build_limit=2)
-    assert d._build_templates(_FakeConn()) == 0
+    assert tick_builds.build_templates(d, _FakeConn()) == 0
     assert failed == [(1, "no_driver_for_cluster")]
 
 
@@ -1471,13 +1493,13 @@ def _win_claim(monkeypatch, won=True, vmid=9500, node_id="n1", download_upid=Non
     and reaps the source; then finalizes. A LOST claim returns None: the build finished or progressed since the
     stale scan, so the reclaim must SKIP it (never destroy a live/finished template). vmid=None models a
     guest-free (DOWNLOADING) build; node_id a node this daemon may or may not serve."""
-    claim = (daemon_mod.build.ReclaimClaim(vmid=vmid, node_id=node_id, download_upid=download_upid,
+    claim = (build.ReclaimClaim(vmid=vmid, node_id=node_id, download_upid=download_upid,
                                            download_node=download_node) if won else None)
-    monkeypatch.setattr(daemon_mod.build, "claim_stale_for_reclaim", lambda c, bid, secs: claim)
+    monkeypatch.setattr(build, "claim_stale_for_reclaim", lambda c, bid, secs: claim)
 
 
 def test_reclaim_builds_destroys_before_marking_a_build_terminal(monkeypatch):
-    """S04: _reclaim_builds destroys a stale build's partial guest FIRST and marks it FAILED only AFTER a clean
+    """S04: tick_builds.reclaim_builds destroys a stale build's partial guest FIRST and marks it FAILED only AFTER a clean
     destroy verdict — never terminal-first. Marking terminal first would hide the row from stale_builds
     (terminal rows are excluded) while a failed destroy left the guest running: a permanent orphan the
     br0kr-build-<id> fence matches in NO sweep phase. Asserts destroy PRECEDES mark for each build, the daemon
@@ -1496,20 +1518,20 @@ def test_reclaim_builds_destroys_before_marking_a_build_terminal(monkeypatch):
             return "freed"   # the post-destroy reap is out of scope here — model it so it doesn't swallow
 
     _win_claim(monkeypatch)
-    monkeypatch.setattr(daemon_mod.build, "stale_builds",
+    monkeypatch.setattr(build, "stale_builds",
                         lambda c, secs: [_bjob(bid=1, vmid=9500), _bjob(bid=2, vmid=9600)])
     won = {1: True, 2: False}   # build 2's mark_failed CAS loses
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: events.append(f"mark:{bid}") or won[bid])
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1                       # only the won build counts
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1                       # only the won build counts
     assert events == ["destroy:1", "mark:1", "destroy:2", "mark:2"]  # destroy precedes mark, EACH build
     assert beats == [d._beat, d._beat]                               # heartbeat threaded into every destroy
 
 
 def test_reclaim_builds_reaps_the_stale_build_import_source(monkeypatch):
     """The reclaim-path twin of build_template's inline reap: once a stale build's guest is destroyed (the
-    create/import task is provably gone), _reclaim_builds best-effort FREES the transient import source too on
+    create/import task is provably gone), tick_builds.reclaim_builds best-effort FREES the transient import source too on
     that EXACT node — closing the import_timeout/abandoned-leader leak inline reaping can't reach. Asserts the
     free targets the build's <storage>:import/<download_filename>, runs AFTER the destroy (guest gone) and
     BEFORE the terminal mark, is heartbeated with the daemon's own _beat, and does not change the reclaim
@@ -1529,11 +1551,11 @@ def test_reclaim_builds_reaps_the_stale_build_import_source(monkeypatch):
             return "freed"
 
     _win_claim(monkeypatch)   # WON claim: vmid=9500, node_id="n1"
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: events.append(f"mark:{bid}") or True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     # _bjob defaults target_template_id="deb"/url="u"/storage_id="s" → download_filename → br0kr-deb.qcow2
     assert events == ["destroy:1", "free:s:br0kr-deb.qcow2", "mark:1"]
     assert beats == [d._beat]   # the reap's task-wait is threaded the daemon's liveness heartbeat (S08/F3)
@@ -1570,13 +1592,13 @@ def test_reclaim_builds_reattaches_to_a_settled_download_and_reaps_its_source(mo
 
     drv = _Drv()
     _win_claim(monkeypatch, vmid=None, node_id=None, download_upid="UPID:n1:download:7:", download_node="n1")
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: events.append(f"mark:{bid}") or True)
     d = _daemon(registry=_cluster_registry(driver=drv), build_limit=1)   # serves n1 in clA (the build's cluster)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert events == ["wait:UPID:n1:download:7:", "free:s:br0kr-deb.qcow2", "mark:1"]   # re-attach → reap → mark
-    assert drv.poll_secs == daemon_mod._DOWNLOAD_REATTACH_POLL_SECS   # a BOUNDED poll, never the full 1800s wait
+    assert drv.poll_secs == tick_builds._DOWNLOAD_REATTACH_POLL_SECS   # a BOUNDED poll, never the full 1800s wait
 
 
 def test_reclaim_builds_finalizes_a_still_running_download_without_reaping(monkeypatch):
@@ -1597,10 +1619,10 @@ def test_reclaim_builds_finalizes_a_still_running_download_without_reaping(monke
 
     marked: list[int] = []
     _win_claim(monkeypatch, vmid=None, node_id=None, download_upid="UPID:n1:download:8:", download_node="n1")
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1   # finalized (no wedge), just not reaped
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1   # finalized (no wedge), just not reaped
     assert marked == [1]
 
 
@@ -1618,10 +1640,10 @@ def test_reclaim_builds_finalizes_when_the_download_reattach_raises(monkeypatch)
 
     marked: list[int] = []
     _win_claim(monkeypatch, vmid=None, node_id=None, download_upid="UPID:n1:download:8b:", download_node="n1")
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1   # a raising re-attach finalizes without a reap, never wedges
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1   # a raising re-attach finalizes without a reap, never wedges
     assert marked == [1]
 
 
@@ -1641,11 +1663,11 @@ def test_reclaim_builds_reaps_after_a_failed_download_settles_then_finalizes(mon
             return "gone"   # nothing landed — idempotent
 
     _win_claim(monkeypatch, vmid=None, node_id=None, download_upid="UPID:n1:download:9:", download_node="n1")
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: events.append(f"mark:{bid}") or True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert events == ["free:s:br0kr-deb.qcow2", "mark:1"]   # settled non-OK → best-effort reap → finalize
 
 
@@ -1666,10 +1688,10 @@ def test_reclaim_builds_finalizes_a_download_whose_node_is_unserved_without_reap
     marked: list[int] = []
     _win_claim(monkeypatch, vmid=None, node_id=None, download_upid="UPID:nOther:download:9:",
                download_node="nOther")   # the download ran on a node this daemon doesn't serve
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
     d = _daemon(registry=_cluster_registry(cluster="clA", driver=_Drv()), build_limit=1)   # serves n1, not nOther
-    assert d._reclaim_builds(_FakeConn()) == 1   # finalized (no wedge), source left as the named residual
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1   # finalized (no wedge), source left as the named residual
     assert marked == [1]
 
 
@@ -1688,10 +1710,10 @@ def test_reclaim_builds_finalizes_a_handleless_guest_free_build_without_a_reap(m
 
     marked: list[int] = []
     _win_claim(monkeypatch, vmid=None, node_id=None, download_upid=None, download_node=None)   # legacy: no handle
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert marked == [1]   # finalized directly (no reap path)
 
 
@@ -1712,17 +1734,17 @@ def test_reclaim_builds_finalizes_even_when_the_import_reap_fails(monkeypatch):
             raise daemon_mod.pve.DeleteTaskFailed("imgdel task did not succeed")
 
     _win_claim(monkeypatch)
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: events.append(f"mark:{bid}") or True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1   # a raising reap did NOT stop the reclaim from finalizing
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1   # a raising reap did NOT stop the reclaim from finalizing
     assert events == ["destroy:1", "mark:1"]      # destroy → (reap raised, swallowed) → mark still ran
 
 
 def test_reclaim_builds_skips_a_build_that_completed_since_the_stale_scan(monkeypatch):
     """S04/F1 regression: destroy-first gave up the mark-FAILED-first CAS that used to serialize the reclaim
-    against a concurrent mark_ready. So right before destroying, _reclaim_builds re-asserts the claim
+    against a concurrent mark_ready. So right before destroying, tick_builds.reclaim_builds re-asserts the claim
     (`build.claim_stale_for_reclaim`); if it LOSES — a wedged ex-leader completed the build to READY (catalog
     row committed), or it made progress, since the stale scan — the reclaim must NOT destroy (that would delete
     a finished, catalogued template) and must NOT mark it FAILED. Guards the wrong-destroy, the top
@@ -1733,11 +1755,11 @@ def test_reclaim_builds_skips_a_build_that_completed_since_the_stale_scan(monkey
         def destroy_build_vm(self, vmid, bid, on_progress=None):
             pytest.fail("must NOT destroy a build that lost the stale claim (it may be a live template)")
 
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: pytest.fail("must NOT mark terminal when the claim was lost"))
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 0
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 0
 
 
 def test_reclaim_builds_finalizes_on_any_clean_destroy_verdict(monkeypatch):
@@ -1756,11 +1778,11 @@ def test_reclaim_builds_finalizes_on_any_clean_destroy_verdict(monkeypatch):
             def free_import_volume(self, storage, filename, *, on_progress=None):
                 return "freed"   # reap out of scope here — model it so it doesn't swallow
 
-        monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-        monkeypatch.setattr(daemon_mod.build, "mark_failed",
+        monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+        monkeypatch.setattr(build, "mark_failed",
                             lambda c, bid, err, _m=marked: _m.append(bid) or True)
         d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-        assert d._reclaim_builds(_FakeConn()) == 1, verdict
+        assert tick_builds.reclaim_builds(d, _FakeConn()) == 1, verdict
         assert marked == [1], verdict
 
 
@@ -1776,11 +1798,11 @@ def test_reclaim_builds_leaves_a_build_non_terminal_when_the_destroy_raises(monk
         def destroy_build_vm(self, vmid, bid, on_progress=None):
             raise daemon_mod.pve.DeleteTaskFailed("delete task did not succeed")
 
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: pytest.fail("must NOT mark terminal while the guest may still be up"))
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 0
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 0
 
 
 def test_reclaim_builds_leaves_a_build_non_terminal_when_its_stamped_node_is_unserved(monkeypatch):
@@ -1800,11 +1822,11 @@ def test_reclaim_builds_leaves_a_build_non_terminal_when_its_stamped_node_is_uns
             return "gone"
 
     _win_claim(monkeypatch, node_id="nOther")   # the guest's node is not in this daemon's registry
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: pytest.fail("must NOT mark terminal when we cannot destroy here"))
     d = _daemon(registry=_cluster_registry(cluster="clA", driver=_Drv()), build_limit=1)   # serves n1, not nOther
-    assert d._reclaim_builds(_FakeConn()) == 0
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 0
     assert hits == []   # the served node's driver was NEVER used — no cluster-any fallback for a stamped node
 
 
@@ -1824,12 +1846,12 @@ def test_reclaim_builds_refuses_a_stamped_node_repointed_to_another_cluster(monk
 
     reg = nodes.NodeRegistry({"nB": _Drv()}, {"nB": "clB"})   # nB is NOW mapped to clB (repointed)
     _win_claim(monkeypatch, node_id="nB")
-    monkeypatch.setattr(daemon_mod.build, "stale_builds",
+    monkeypatch.setattr(build, "stale_builds",
                         lambda c, secs: [_bjob(bid=1, vmid=9500, cluster="clA")])   # the build was made on clA
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: pytest.fail("must NOT finalize a build whose node was repointed"))
     d = _daemon(registry=reg, build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 0
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 0
     assert hits == []   # the repointed node's driver was never asked to destroy
 
 
@@ -1850,10 +1872,10 @@ def test_reclaim_builds_destroys_the_claim_vmid_not_the_scan_snapshot(monkeypatc
             return "freed"   # reap out of scope here — model it so it doesn't swallow
 
     _win_claim(monkeypatch, vmid=9500, node_id="n1")   # the claim reads back a vmid the scan didn't have
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])   # scan: none
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])   # scan: none
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: True)
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert hits == [9500]   # destroyed the CLAIM's vmid, not the scan snapshot's None
 
 
@@ -1878,16 +1900,16 @@ def test_reclaim_builds_targets_the_stamped_node_not_an_arbitrary_cluster_node(m
 
     reg = nodes.NodeRegistry({"nA": _Drv("nA"), "nB": _Drv("nB")}, {"nA": "clA", "nB": "clA"})
     _win_claim(monkeypatch, node_id="nB")   # the guest lives on nB, not the sorted-first nA
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: True)
     d = _daemon(registry=reg, build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert hits == ["nB"]   # ONLY the stamped node's driver was asked — never nA (the arbitrary cluster head)
 
 
 def test_reclaim_builds_falls_back_to_cluster_any_node_for_a_legacy_unstamped_build(monkeypatch):
     """S04 (migration 0029): a build with NO stamped node (claim.node_id is None — a legacy/pre-0029 row, or a
-    since-deleted node whose FK went SET NULL) falls back to the cluster-any-node driver (_driver_for_cluster =
+    since-deleted node whose FK went SET NULL) falls back to the cluster-any-node driver (tick_builds.driver_for_cluster =
     nodes_in(cluster)[0]), preserving the old best-effort reclaim for rows in flight across the upgrade rather
     than stranding them forever. Guards the additive-safety promise: pre-0029 builds still get reclaimed."""
     hits: list[str] = []
@@ -1905,10 +1927,10 @@ def test_reclaim_builds_falls_back_to_cluster_any_node_for_a_legacy_unstamped_bu
 
     reg = nodes.NodeRegistry({"nA": _Drv("nA"), "nB": _Drv("nB")}, {"nA": "clA", "nB": "clA"})
     _win_claim(monkeypatch, node_id=None)   # legacy row — no node stamp
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500, cluster="clA")])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed", lambda c, bid, err: True)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500, cluster="clA")])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: True)
     d = _daemon(registry=reg, build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert hits == ["nA"]   # fell back to the sorted-first node of the cluster (best-effort, legacy behaviour)
 
 
@@ -1919,22 +1941,22 @@ def test_reclaim_builds_marks_failed_when_no_partial_vmid(monkeypatch):
     has nothing to reclaim."""
     _win_claim(monkeypatch, vmid=None)   # the claim reads back no guest handle
     marked: list = []
-    monkeypatch.setattr(daemon_mod.build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
-    monkeypatch.setattr(daemon_mod.build, "mark_failed",
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=None)])
+    monkeypatch.setattr(build, "mark_failed",
                         lambda c, bid, err: marked.append((bid, err)) or True)
     d = _daemon(registry=_cluster_registry(), build_limit=1)
-    assert d._reclaim_builds(_FakeConn()) == 1
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert marked == [(1, "stale_abandoned")]
 
 
 def test_reclaim_builds_is_wired_into_the_sweep_tick_only_when_builds_enabled(wired, monkeypatch):
-    """Tick-level wiring (S04/F3 test-adequacy): _reclaim_builds fires on a SWEEP tick when downloads are
+    """Tick-level wiring (S04/F3 test-adequacy): tick_builds.reclaim_builds fires on a SWEEP tick when downloads are
     enabled (build_limit>0), and NEVER when build_limit=0 (the opt-in default). Guards a refactor that drops
     the reclaim call from tick(), flips the build_limit gate, or moves it off the sweep cadence — none of which
     the direct-call unit tests above would catch."""
     calls: list = []
-    monkeypatch.setattr(daemon_mod.Daemon, "_build_templates", lambda self, conn: 0)   # keep tick() off the DB
-    monkeypatch.setattr(daemon_mod.Daemon, "_reclaim_builds", lambda self, conn: calls.append(1) or 0)
+    monkeypatch.setattr(tick_builds, "build_templates", lambda self, conn: 0)   # keep tick() off the DB
+    monkeypatch.setattr(tick_builds, "reclaim_builds", lambda self, conn: calls.append(1) or 0)
     _daemon(registry=_cluster_registry(), build_limit=1, sweep_every=1).tick(_FakeConn())
     assert calls == [1]                         # builds enabled + sweep tick → reclaim fires
     calls.clear()
@@ -1982,7 +2004,7 @@ def test_publish_health_renders_every_ticksummary_field_to_metrics():
 
 
 def test_ledger_replication_scrape_is_leader_only_and_degrades_to_unknown():
-    """The snapshot's replication posture (`_ledger_snapshot().repl`, what /metrics renders) is {} on a standby
+    """The snapshot's replication posture (`metrics_snapshot.LedgerSnapshots.get().repl`, what /metrics renders) is {} on a standby
     and the UNREADABLE shape when it cannot connect — never a partial or absent posture.
 
     Both halves are load-bearing contracts the daemon's own docstring makes, and both shipped unpinned
@@ -1995,14 +2017,14 @@ def test_ledger_replication_scrape_is_leader_only_and_degrades_to_unknown():
     d = _daemon()
 
     d._health = observability.HealthState(role=observability.ROLE_STANDBY, leader=False)
-    assert d._ledger_snapshot().repl == {}
+    assert d._snapshots.get().repl == {}
 
     def _boom():
         raise RuntimeError("ledger unreachable")
 
     d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
     d._connect = _boom
-    posture = d._ledger_snapshot().repl
+    posture = d._snapshots.get().repl
     assert posture["readable"] is False
     assert posture["configured"] is False        # never a confident zero-standbys claim
 
@@ -2052,8 +2074,8 @@ def test_metrics_read_the_ledger_once_per_snapshot_and_readyz_only_probes(wired)
         # fail, so the series is present at 0): without that wiring /metrics falls back to get_ledger alone and
         # every fleet-SLO and br0kr_ledger_* series is gone.
         assert "br0kr_ledger_replication_readable 0" in first
-        d._ledger_snap = dataclasses.replace(
-            d._ledger_snap, taken_at=d._ledger_snap.taken_at - daemon_mod.METRICS_SNAPSHOT_TTL_S)
+        d._snapshots._snap = dataclasses.replace(
+            d._snapshots._snap, taken_at=d._snapshots._snap.taken_at - metrics_snapshot.METRICS_SNAPSHOT_TTL_S)
         get("/metrics")
         assert len(opened) == 2
         n = len(sqls)
@@ -2085,8 +2107,8 @@ def test_a_leader_snapshot_renders_slos_and_replication_from_one_connection(wire
         seen.append(("repl", conn))
         return ledgerhealth.LedgerReplication(readable=True, reason="ok")
 
-    monkeypatch.setattr(daemon_mod.inventory, "fleet_stats", fleet_stats)
-    monkeypatch.setattr(daemon_mod.ledgerhealth, "read", read)
+    monkeypatch.setattr(inventory, "fleet_stats", fleet_stats)
+    monkeypatch.setattr(ledgerhealth, "read", read)
     conn = _ScrapeConn([("ACTIVE", 1)])
     opened: list[int] = []
 
@@ -2097,7 +2119,7 @@ def test_a_leader_snapshot_renders_slos_and_replication_from_one_connection(wire
     d = _daemon()
     d._connect = connect
     d._health = observability.HealthState(role=observability.ROLE_LEADER, leader=True)
-    ok, counts, slo, repl = d._scrape(True)
+    ok, counts, slo, repl = d._snapshots.scrape(True)
     body = observability.render_metrics(d._health, ok, counts, 0.0, slo, repl)
     assert len(opened) == 1 and seen == [("slo", conn), ("repl", conn)]
     assert "br0kr_ledger_reachable 1" in body and 'br0kr_leases{state="ACTIVE"} 1' in body
@@ -2111,8 +2133,8 @@ def test_a_leader_snapshot_renders_slos_and_replication_from_one_connection(wire
 
     seen.clear()
     conn = _NoCounts([])
-    d._ledger_snap = None
-    ok, counts, slo, repl = d._scrape(True)
+    d._snapshots._snap = None
+    ok, counts, slo, repl = d._snapshots.scrape(True)
     assert (ok, counts) == (False, {}) and [what for what, _ in seen] == ["slo", "repl"]
     assert slo == {"oldest_pending_age_seconds": 12.5} and repl["readable"] is True
 
@@ -2137,14 +2159,14 @@ def test_concurrent_scrapes_share_one_slow_read(wired, monkeypatch):
         def monotonic() -> float:
             return clock[0]
 
-    monkeypatch.setattr(daemon_mod, "time", _Clock())
+    monkeypatch.setattr(metrics_snapshot, "time", _Clock())   # the module whose clock stamps the snapshot
     release = threading.Event()
     opened: list[int] = []
 
     def slow_connect():
         opened.append(1)
         release.wait(10)
-        clock[0] += daemon_mod.METRICS_SNAPSHOT_TTL_S + 1   # this read outlasts the TTL
+        clock[0] += metrics_snapshot.METRICS_SNAPSHOT_TTL_S + 1   # this read outlasts the TTL
         return _ScrapeConn([("ACTIVE", 1)])
 
     d = _daemon()
@@ -2153,7 +2175,7 @@ def test_concurrent_scrapes_share_one_slow_read(wired, monkeypatch):
     got: list[tuple] = []
 
     def scrape() -> None:
-        got.append(d._scrape(True))
+        got.append(d._snapshots.scrape(True))
 
     first = threading.Thread(target=scrape)
     first.start()
@@ -2170,5 +2192,5 @@ def test_concurrent_scrapes_share_one_slow_read(wired, monkeypatch):
     for t in (first, *others):
         t.join(10)
     assert len(opened) == 1 and len(got) == 4 and all(g[0] is True for g in got)
-    d._scrape(True)               # a scrape right after the slow read is served from it
+    d._snapshots.scrape(True)               # a scrape right after the slow read is served from it
     assert len(opened) == 1

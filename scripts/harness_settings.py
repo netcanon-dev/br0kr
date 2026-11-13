@@ -270,7 +270,7 @@ def check_audit_retention() -> bool:
 
 def check_pre0024_forward_compat() -> bool:
     # Simulate a NOT-YET-0024 ledger: DROP the retention column, then settings.resolve must RAISE an
-    # UndefinedColumn (it SELECTs every _COLS incl. the missing one) — which the daemon's _apply_settings
+    # UndefinedColumn (it SELECTs every _COLS incl. the missing one) — which the daemon's tick_config.apply_settings
     # try/except SWALLOWS, keeping audit_retention_days at its 0 (OFF) startup default so it never prunes a
     # non-existent column. Proving the load-bearing forward-compat PRECONDITION against real PG (a
     # not-yet-migrated ledger must never wedge the tick). Run LAST — it drops a column on the throwaway ledger.

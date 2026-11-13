@@ -51,7 +51,7 @@ class BuildJob:
 
     `download_upid`/`download_node` (migration 0045) are the download-url TASK handle: the UPID and the br0kr
     node the download actuated on, stamped by `set_download_task` the instant the download POST returns (BEFORE
-    the long wait). They let daemon._reclaim_builds RE-ATTACH to a guest-free DOWNLOADING build's still-running
+    the long wait). They let tick_builds.reclaim_builds RE-ATTACH to a guest-free DOWNLOADING build's still-running
     download (pve.wait on that exact node) to learn it SETTLED, then reap the transient source that would
     otherwise orphan — the download-stage twin of the vmid-branch reap. Both None for a build that never reached
     download_start (or a legacy/pre-0045 in-flight row); download_node is DISTINCT from node_id (the guest node,
@@ -183,8 +183,8 @@ def claim_next_build(conn: psycopg.Connection[Any]) -> BuildJob | None:
 def set_download_task(conn: psycopg.Connection[Any], build_id: int, upid: str, node_id: str | None) -> None:
     """Stamp the download-url TASK handle (its UPID + the br0kr node it actuates on) onto a DOWNLOADING build
     the instant the download POST returns — BEFORE the reconciler's long `wait()` — so a build whose download
-    outruns the wait budget (or whose leader dies mid-wait) leaves behind a re-attachable handle. daemon.
-    _reclaim_builds uses it to poll the still-running download to SETTLEMENT on that exact node and then reap the
+    outruns the wait budget (or whose leader dies mid-wait) leaves behind a re-attachable handle. tick_builds.
+    reclaim_builds uses it to poll the still-running download to SETTLEMENT on that exact node and then reap the
     transient source that would otherwise orphan (migration 0045; the download-stage twin of the vmid-branch
     reap). `node_id` is the daemon's chosen build node — DISTINCT from `node_id` (the guest-created-on node set
     with the vmid), which is still NULL during DOWNLOADING.
@@ -355,7 +355,7 @@ def mark_failed(conn: psycopg.Connection[Any], build_id: int, error: str) -> boo
 def force_fail(conn: psycopg.Connection[Any], build_id: int, reason: str | None = None) -> dict[str, Any]:
     """OPERATOR escape hatch (review S04/F4): force a STUCK non-terminal build → FAILED, WITHOUT any teardown.
     This is the manual release valve for a build the automated reclaim can NOT finalize — a wedged PVE / dead
-    node whose guest DELETE keeps raising, so `daemon._reclaim_builds` retries forever and the build's row
+    node whose guest DELETE keeps raising, so `tick_builds.reclaim_builds` retries forever and the build's row
     keeps pinning its project's declared disk-quota reserve (`project_template_disk_used` counts non-terminal
     builds). Forcing it terminal FREES that reserve and STOPS the retry loop.
 

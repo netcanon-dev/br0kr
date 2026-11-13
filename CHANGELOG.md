@@ -45,6 +45,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The daemon's tick is a table (`br0kr/tick_steps.py`): a new step was four edits to daemon.py, now a row.** Each
+  step ends in a leadership check; its log lines carry `step=<name>`, logger `br0kr.tick_*` (`test_tick_steps.py`).
 - **Agent tokens expire after 90 days unless the creator chooses otherwise.** A never-expiring token, or clearing
   one's expiry, now takes `never_expires: true` (`/api/token/expiry` with an empty body clears nothing); the
   token table flags it (SEC-07).

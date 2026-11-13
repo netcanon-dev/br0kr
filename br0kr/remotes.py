@@ -20,7 +20,7 @@ is no empty-guard: nothing is stranded by having no PDM.
 
 **Hot-reloadable in place.** Like `NodeRegistry`, the contents live behind a single dict reference that
 `adopt` swaps atomically, so the daemon can rebuild from the ledger on SIGHUP / a cadence and pick up an
-added PDM endpoint or a re-resolved token WITHOUT a restart (br0kr/daemon.py `_maybe_reload`).
+added PDM endpoint or a re-resolved token WITHOUT a restart (br0kr/tick_config.py `maybe_reload`).
 """
 from __future__ import annotations
 

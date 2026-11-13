@@ -507,7 +507,7 @@ def prune_replications(
 # ══════════════════════════════════════════════════════════════════════════════════════════════════════
 # DATA PLANE (PR-5): the leader clone engine — the ledger CAS transitions + the admit() byte reservation +
 # the resume-safe copy orchestration + the stale reclaim + the waiter coupling. Everything below is DRIVEN ONLY
-# by the leader daemon's `_run_replications` / `_reclaim_replications` / waiter-sweep steps behind
+# by the leader daemon's replicate / reclaim_replications / replication_waiters steps (br0kr/tick_copies.py) behind
 # `BR0KR_REPLICATE_LIMIT` (default 0 = DISABLED); until an operator sets it >0 a REQUESTED job holds NOTHING and
 # NONE of this runs (`replication_enabled()` stays False, so the request surface tells a caller the engine is
 # off). The saga is the MIGRATION saga's recipe (br0kr/migration.py) with build.py's guarded-CAS shape: a
@@ -1147,7 +1147,7 @@ def _teardown_transient(job: ReplicationJob, driver: pve.Pve,
       * 'settled'    — the guest is gone / provably not ours → the caller may mark the job FAILED + settled;
       * 'unresolved' — our clone MAY still be live (the clone task is still running, so the guest is `lock:clone`
                        and can't be torn down yet) → the caller LEAVES the job non-terminal (RECLAIMING) for the
-                       next cutoff, exactly like daemon._reclaim_builds' inconclusive-teardown rule.
+                       next cutoff, exactly like tick_builds.reclaim_builds' inconclusive-teardown rule.
     RAISES on a transient PVE/API error (the caller leaves the job non-terminal + retries) — incl. the config
     POST `stamp_repl_fence` issues against a still-`lock:clone` guest in the upid-lost window (self-heals once the
     clone finishes). `on_progress` is threaded through the stop/DELETE waits so the reclaim heartbeat stays fresh."""
@@ -1422,7 +1422,7 @@ def _reap_rebuild_source(driver: pve.Pve, job: ReplicationJob, facts: _RebuildFa
     ADOPT path (guest existed, download NOT re-waited this pass) our download could still be running — reaping
     there could race it. NOT called at the PRE-download / top-of-pass failures (reservation_lost / vanished /
     bad_content / hand_modified / download_start-ACL / download_failed) — nothing landed, or a non-OK download
-    self-cleaned its temp. Both are LEFT as named residuals, the same philosophy `daemon._reclaim_builds` uses.
+    self-cleaned its temp. Both are LEFT as named residuals, the same philosophy `tick_builds.reclaim_builds` uses.
     `filename` is recomputed via the shared `_rebuild_import_filename` (no formula drift; available on the
     adopt/resume path where the Phase-1 local is out of scope). Sink-guarded to `br0kr-repl-<id>-<template>.<ext>`
     (`pve.free_import_volume`), so it can only ever free broker-owned scratch."""
@@ -1628,8 +1628,9 @@ def _finalize(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pv
 
 
 def list_advanceable(conn: psycopg.Connection[Any], limit: int = 20) -> list[ReplicationJob]:
-    """The non-terminal jobs the leader's `_run_replications` step should advance (REQUESTED/COPYING/CONVERTING),
-    oldest first. RECLAIMING jobs are NOT here — they are the stale-reclaim step's. A plain read; commits."""
+    """The non-terminal jobs the leader's replicate step (`tick_copies.run_replications`) should advance
+    (REQUESTED/COPYING/CONVERTING), oldest first. RECLAIMING jobs are NOT here — they are the stale-reclaim
+    step's. A plain read; commits."""
     rows = conn.execute(
         f"SELECT {_JOB_COLS} FROM template_replication WHERE job_state IN {_ADVANCE_IN} "
         f"ORDER BY created_at, id LIMIT %s", (max(1, int(limit)),)).fetchall()
@@ -1682,7 +1683,7 @@ def reclaim_stale_replications(
     unfenced landed clone, then FAIL + settle) + finalize-retry a READY job whose fence strip failed + reclaim a
     FAILED job's LEAKED guest (a force-fail during the pre-fence window leaves a guest no other path reaches;
     identity-gated adopt → destroy → stamp settled so the row is prunable). `wall_cap = WALL_CAP_FACTOR × stale`.
-    Returns the count reclaimed. Mirrors daemon._reclaim_builds: an INCONCLUSIVE teardown — a destroy that RAISES,
+    Returns the count reclaimed. Mirrors tick_builds.reclaim_builds: an INCONCLUSIVE teardown — a destroy that RAISES,
     a clone still materializing, or NO served driver for the stamped node — leaves the job non-terminal (or, for
     the leaked-guest phase, guest_settled_at NULL) for the next cutoff, never settling while a guest may be live.
     Caller passes a NON-autocommit conn. ``should_stop`` (optional) is asked before each item; True ends the
@@ -1778,7 +1779,7 @@ def reclaim_stale_replications(
         reason = "reclaimed:wall_time_exceeded" if claim.wall_capped else "reclaimed:stale"
         if claim.vmid is not None:
             # H3: a stamped guest exists but its node has NO served driver → LEAVE it RECLAIMING (never mark
-            # FAILED+settled without a destroy verdict — the _reclaim_builds S04 rule; else the guest leaks with
+            # FAILED+settled without a destroy verdict — tick_builds.reclaim_builds' S04 rule; else the guest leaks with
             # the reservation freed → silent pool over-commit). A daemon that DOES serve the node retries.
             driver = driver_for(claim.node_id) if claim.node_id else None
             if driver is None:

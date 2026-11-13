@@ -10,7 +10,7 @@ Two hard rules shape the API:
   1. BEST-EFFORT, NEVER-BREAKS-THE-ACTION. `record` is called AFTER the caller's action has already durably
      committed, and it swallows EVERY error (a not-yet-0023 ledger, a blip) — so auditing can never roll back
      or fail a lease op / an operator write. It mirrors `auth.resolve`'s best-effort `last_used_at` bump and
-     `daemon._apply_settings`'s tick fail-safe.
+     `tick_config.apply_settings`'s tick fail-safe.
   2. NEVER STORE A SECRET. Only the action's PARAMS are recorded (never a verb RESULT — e.g. `create_token`'s
      result carries the one plaintext secret), and params pass through `redact` (a defensive name-denylist)
      first. The table is APPEND-ONLY (INSERT + SELECT) with EXACTLY ONE sanctioned mutation: `prune` — the

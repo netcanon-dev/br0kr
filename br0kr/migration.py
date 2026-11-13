@@ -41,7 +41,7 @@ freed mid-copy (review S07); and the flip + settle are idempotent CAS.
 
 **Scope + activation (PDM pre-wire).** A `Pdm` is INJECTED into every function here (never constructed
 in this module). It is now CONSTRUCTED at runtime by the daemon from cluster config (br0kr/remotes.py
-builds one Pdm per PDM-configured cluster) and the daemon's `_migrate` step drives this saga — but
+builds one Pdm per PDM-configured cluster) and the daemon's migrate step (`tick_copies.migrate`) drives this saga — but
 DISABLED BY DEFAULT (BR0KR_MIGRATE_LIMIT=0) and inert unless a cluster has PDM config, because the API
 contract in docs/pdm-api-contract.md is still UNVERIFIED against a real PDM (the homelab has none yet).
 The saga is proven against a real Postgres ledger + a fake Pdm (scripts/harness_migrate_lease.py, which
@@ -622,7 +622,7 @@ def run_migration_step(conn: psycopg.Connection[Any], mig: Migration, driver: pd
     that MUST span its capacity read + insert; an autocommit connection releases that lock after the
     lock-acquire statement, silently defeating the race-free re-debit. (The daemon's per-tick work
     connection is autocommit, so the daemon drives this saga on a DEDICATED non-autocommit connection —
-    see br0kr/daemon.py `_migrate` + docs/runbooks/cross-cluster-migration.md.) `getattr` so a hermetic
+    see br0kr/tick_copies.py `migrate` + docs/runbooks/cross-cluster-migration.md.) `getattr` so a hermetic
     test passing a non-connection stub is unaffected."""
     if getattr(conn, "autocommit", False):
         raise RuntimeError(
@@ -887,7 +887,7 @@ def run_pending_routed(
     should_stop: Callable[[], bool] | None = None,
 ) -> list[Migration]:
     """Drive every pending migration one step, routing each to the PDM that fronts its SOURCE cluster —
-    the daemon's per-tick migration work (br0kr/daemon.py `_migrate`). `resolve_by_source_node(source_node)`
+    the daemon's per-tick migration work (br0kr/tick_copies.py `migrate`). `resolve_by_source_node(source_node)`
     returns the `pdm.Pdm` for that node's cluster, or None; a migration whose source has no PDM driver
     (cluster not migration-capable, or an unrouted source node) is LEFT PENDING and logged — never actuated
     blind, exactly as an unroutable lease is left ADMITTED. A migration that RAISES (a PDM/DB blip) is

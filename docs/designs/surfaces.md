@@ -107,7 +107,7 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   build job (`template_build` REQUESTED→…→READY, opt-in `BR0KR_BUILD_LIMIT`) that fetches → imports →
   templatizes → atomically registers the catalog row, with the transient build VM fenced by its own
   `br0kr-build-<id>` tag and the partial vmid destroyed on any failure. The build actuates on a node picked BY
-  REACH (`daemon._build_node_and_driver`, PR-A2 — the twin of `rebuild_source`'s node pick): a served, un-cordoned
+  REACH (`tick_builds.build_node_and_driver`, PR-A2 — the twin of `rebuild_source`'s node pick): a served, un-cordoned
   node with an un-quarantined `storage_node` row for the target pool, so the download+boot-disk land on a pool the
   node can actually reach (a modeled pool no served node reaches fails `build_no_reaching_node`; an un-modeled pool
   keeps the legacy first-served fallback). **Per-project downloads (phase A4.2):**
@@ -147,7 +147,7 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   override → env → code default), so an all-NULL seed row is byte-identical to the old env-only behaviour; the
   operator edits the SHARED ledger layer from the token-gated `#settings-sec` dashboard section (the dashboard
   shares neither the daemon's nor the gateway's env, so it manages the ledger override + shows each knob's
-  default, not a per-process env value). The daemon re-reads the row each tick in `_apply_settings` (applied
+  default, not a per-process env value). The daemon re-reads the row each tick in `tick_config.apply_settings` (applied
   BETWEEN passes, never mid-admit) and the gateway reads `queue_max` per request in `_queue_max` — so these
   are reconciler/queue POLICY dials that debit NO capacity scope and can't weaken the `admit()` floor;
   `tick_seconds`/`reload_every`/bind ports/secrets stay env-only (process-launch). A cross-process **reload

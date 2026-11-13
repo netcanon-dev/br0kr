@@ -423,7 +423,7 @@ class BuildOutcome:
       'import_timeout'       — the create/import/templatize is STILL RUNNING past the budget; NON-TERMINAL
                                (NOT destroyed — racing an in-flight task orphans it; NOT marked FAILED — a
                                terminal build is invisible to the reclaim), left IMPORTING (vmid stamped) so
-                               daemon._reclaim_builds fenced-destroys it after the task settles.
+                               tick_builds.reclaim_builds fenced-destroys it after the task settles.
       'catalog_insert_failed'— the target catalog id already exists (a race vs the request-time pre-check) or
                                the CAS lost; the built template destroyed.
     `vmid` is the id allocated for the build (None if we failed before allocating one). The two *_timeout
@@ -439,7 +439,7 @@ def _destroy_build(driver: pve.Pve, vmid: int, build_id: int) -> None:
     """Best-effort fenced teardown of a failed build's transient guest, with retry. Mirrors
     `_release_to_reaper`'s discipline, but there is no reaper for builds. IMPORTANT: every caller is a
     TERMINAL build-failure path (import_error/import_failed/size_*/catalog_insert_failed) that marks the
-    build FAILED immediately after this returns — and ``daemon._reclaim_builds`` reclaims only NON-terminal
+    build FAILED immediately after this returns — and ``tick_builds.reclaim_builds`` reclaims only NON-terminal
     builds (``stale_builds`` excludes terminal rows). So a guest we genuinely cannot destroy here is a real
     ORPHAN requiring operator cleanup; it is NOT auto-reclaimed. This inline retry (and the DeleteTaskFailed
     hand-off below, which only avoids un-heartbeated hammering) is the best AUTOMATED effort, no more —
@@ -504,7 +504,7 @@ def free_build_import(driver: pve.Pve, storage: str, filename: str, build_id: in
     """Best-effort reap of the build's transient SOURCE image (``<storage>:import/<filename>``) once its bytes
     are copied into the template's disk — pure hygiene that NEVER affects the build outcome (a build is already
     committed/failed by the time this runs). Called inline by `build_template` (post-import + the settled
-    `import_failed` path) AND by `daemon._reclaim_builds` after a stale build's guest destroy settles (so the
+    `import_failed` path) AND by `tick_builds.reclaim_builds` after a stale build's guest destroy settles (so the
     reclaim/timeout paths self-clean too). A denied or failed free is logged and the ~cloud-image-sized file
     is LEFT for manual cleanup: the least-priv br0kr token may lack ``Datastore.Allocate`` on the pool (the
     download-url only needed ``Datastore.AllocateTemplate``), so a 401/403 is EXPECTED until an operator grants
@@ -696,7 +696,7 @@ def build_template(
         # can exceed it). Do NOT destroy it now — Proxmox LOCKS a VM during an active task, so the DELETE
         # would race and fail; and do NOT mark FAILED — a terminal FAILED build is invisible to every reclaim
         # (stale_builds excludes terminal), so the eventually-settled guest would orphan FOREVER. Leave the
-        # build NON-TERMINAL (IMPORTING, vmid stamped) so daemon._reclaim_builds fenced-destroys the vmid
+        # build NON-TERMINAL (IMPORTING, vmid stamped) so tick_builds.reclaim_builds fenced-destroys the vmid
         # AFTER the task settles — DESTROY-first, retried each sweep until the guest is confirmed gone
         # (review S04) — the exact discipline provision_lease uses for a create TIMEOUT.
         log.warning("build %s import/templatize still running past budget (vmid %s) — leaving non-terminal "

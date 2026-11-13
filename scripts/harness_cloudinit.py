@@ -12,7 +12,7 @@ tests/integration; here we prove every LEDGER property the live path depends on)
      preserves them — so a lease that waited still gets its key injected when it provisions.
   E. CARRY (schedule): schedule_lease carries the fields onto whatever node the broker picks.
   F. WORK-LIST: lease.list_admitted returns the cloud-init inputs (the daemon's provisioning input).
-  G. RECIPE: the daemon's _cloud_init_for builds the right cloud-init from a REAL admitted lease (ciuser +
+  G. RECIPE: the daemon's tick_provision.cloud_init_for builds the right cloud-init from a REAL admitted lease (ciuser +
      URL-encoded sshkeys + ipconfig0), and returns None — with a warning — when no template is configured.
   H. RETURN PATH: set_ip_address stamps an ACTIVE lease ONCE (write-once CAS), and lease_status returns the
      guest ip_address + ci_user + vmid + node_id — the connection facts an agent needs.
@@ -33,6 +33,7 @@ import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from br0kr import admission, cloudinit, daemon, gateway, lease, migrate, nodes
+from br0kr import tick_provision
 
 CONN = os.environ["PGCONN"]
 GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINa1Rdq8Q4kq7tF3rJ8z2pP0bXcW9oYxqL5mN6vK1aB agent@host"
@@ -169,15 +170,15 @@ def main() -> int:
     # ── G: the daemon's recipe (real admitted lease) ───────────────────────────────
     d_with = daemon.Daemon(connect=lambda: None, registry=nodes.NodeRegistry({}),
                            vm_template=9000, ci_user_default="br0kr")
-    # _cloud_init_for takes the EFFECTIVE template vmid the daemon resolved (the lease's pick over the env
+    # tick_provision.cloud_init_for takes the EFFECTIVE template vmid the daemon resolved (the lease's pick over the env
     # default); this carry lease picked no template, so the env default 9000 stands.
-    recipe = d_with._cloud_init_for(al, 9000)
+    recipe = tick_provision.cloud_init_for(d_with, al, 9000)
     check("recipe_built_from_real_lease",
           recipe is not None and recipe["ciuser"] == "runner" and recipe["ipconfig0"] == "ip=dhcp"
           and recipe["sshkeys"] == cloudinit.encode_sshkeys([GOOD_KEY]),
           f"recipe={recipe}")
     d_no = daemon.Daemon(connect=lambda: None, registry=nodes.NodeRegistry({}), vm_template=None)
-    check("recipe_none_without_template", d_no._cloud_init_for(al, None) is None)
+    check("recipe_none_without_template", tick_provision.cloud_init_for(d_no, al, None) is None)
 
     # ── H: return path — set_ip_address (write-once) + lease_status ────────────────
     _activate(lid, vmid=9501)

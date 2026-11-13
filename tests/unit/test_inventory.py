@@ -484,7 +484,7 @@ def test_fleet_stats_surfaces_placement_reachability_counts():
 
 def test_fleet_stats_sql_counts_placement_backlogs_over_the_right_tables():
     """The 5 placement counts read the right fail-closed predicates: held = ADMITTED + hold_reason (matches
-    daemon._recheck_held, never a terminal lease that retains hold_reason); pairs split on quarantined_at /
+    tick_provision.recheck_held, never a terminal lease that retains hold_reason); pairs split on quarantined_at /
     verified_at; unsized scopes to LIVE instances; zero-reachable scopes to cluster nodes. Guards a predicate
     drift that would over- or under-count a backlog operators alert on."""
     sql = inventory._FLEET_STATS

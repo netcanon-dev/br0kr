@@ -537,7 +537,7 @@ def promote_scheduled(
         # schedule() queued as no_capacity is leapfrogged to queue_timeout here): if the ask is PLACEABLE
         # somewhere in scope ignoring capacity (`_ask_placeable_in_scope`, the precise resolve_placement-reusing
         # probe), the per-candidate wall is merely a full/cordoned copy-node filtered from the snapshot before
-        # the loop. Return `no_capacity` so daemon._promote HOLDS the FIFO line (the node will free), exactly as
+        # the loop. Return `no_capacity` so tick_queue.promote HOLDS the FIFO line (the node will free), exactly as
         # the pre-widening empty-candidate-list path did — not the non-holding placement wall. Uniform across all
         # per-candidate reasons (incl. the storage_unreachable sibling); linked_pinned + operator-only states are
         # NOT placeable → the per-candidate reason is surfaced (non-holding), never over-held.

@@ -516,7 +516,7 @@ def main() -> int:  # noqa: C901 - a linear gate of independent checks
         with psycopg.connect(CONN, autocommit=True) as c:
             d.tick(c)
 
-    # NOTE: the tick's `_apply_settings` (0021) hot-applies migrate_limit each pass from operator_setting →
+    # NOTE: the tick's `tick_config.apply_settings` (0021) hot-applies migrate_limit each pass from operator_setting →
     # env(BR0KR_MIGRATE_LIMIT) → default(0), OVERRIDING the constructor value. So the scenario's EFFECTIVE
     # limit is the env var (operator_setting is NULL here), not build_daemon's `limit` arg — set it per case.
     # I.1 migrate_limit=0 → the tick's migrate gate is off; the migration stays REQUESTED.

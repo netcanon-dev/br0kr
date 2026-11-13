@@ -225,13 +225,13 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
   has moved off its recorded `source_node` before actuating — together closing the double-migrate
   double-allocation path (review S01). A durable, idempotently
   resumable saga (`migration` table, `0003`), driven by the leader-elected daemon (single-writer,
-  like provisioning) on a NON-autocommit connection (the `_migrate` tick step, routed per source cluster via
+  like provisioning) on a NON-autocommit connection (the `tick_copies.migrate` tick step, routed per source cluster via
   `remotes.py`; admit's advisory lock must span the re-debit; `run_migration_step` guards against an autocommit
   connection). The control plane is the
   `migrate_lease`/`migration_status` gateway verbs. Proven on real Postgres + a fake PDM
   (`scripts/harness_migrate_lease.py`); pure verdicts + the saga branches are hermetic
   (`tests/unit/test_migration.py`, `tests/integration/test_migration.py`). **Wired but DISABLED by default**
-  (`BR0KR_MIGRATE_LIMIT=0` and/or no cluster PDM config — the daemon's `_migrate` step + a per-cluster `Pdm`
+  (`BR0KR_MIGRATE_LIMIT=0` and/or no cluster PDM config — the daemon's `tick_copies.migrate` step + a per-cluster `Pdm`
   from `remotes.py` are in place) and **not live-proven** — enabling + live activation is the follow-up; first
   cut is compute-only leases.
 
@@ -333,7 +333,7 @@ runbook means item 9 here and there.
      1-slot target → exactly one wins) proven against real Postgres + a fake PDM actuator
      (`scripts/harness_migrate_lease.py`). First cut is **compute-only** (a storage-backed lease is
      refused — a shared pool has no per-cluster model yet). The daemon wiring is proven too — the leader's
-     `_migrate` tick step, routed per source cluster, on a dedicated non-autocommit connection with the
+     `tick_copies.migrate` tick step, routed per source cluster, on a dedicated non-autocommit connection with the
      liveness heartbeat threaded through the copy (harness group I). **Now wired but DISABLED BY DEFAULT**
      (`BR0KR_MIGRATE_LIMIT=0`): the operator TRIGGER is the dashboard OR the `migrate_lease` operator-tier MCP
      verb (#47 — only an `operator` token, never a tenant one), and `migration_status` is a lease-scoped MCP

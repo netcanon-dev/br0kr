@@ -1024,7 +1024,7 @@ def _content_drift(declared: list[str] | None, observed: Any) -> dict[str, Any] 
 
 # The per-bucket DISCRIMINATOR field (0044, PR-H): a discovery finding's dismissal identity is
 # (kind, node_id, subject), where `subject` is the value of the bucket row's field named here. Exactly the
-# SUMMABLE DRIFT buckets are dismissable (the same set daemon._DISCOVERY_DRIFT_BUCKETS sums into the gauge —
+# SUMMABLE DRIFT buckets are dismissable (the same set tick_upkeep._DISCOVERY_DRIFT_BUCKETS sums into the gauge —
 # pinned by a cross-module test); the non-drift keys (bridge_menu, checked_nodes, the *_nodes lists) are NOT
 # findings, so they are absent here and cannot be dismissed. `dismiss_discovery_finding` validates a caller's
 # `kind` against DISMISSABLE_KINDS = the keys of this map.
@@ -1336,7 +1336,7 @@ def discover_reachability(
     }
     # FAIL-FAST sync guard: the local bucket→list map MUST cover exactly the dismissable kinds, or a dismissal of a
     # missing kind would silently never filter (the finding leaks back — the defect this feature prevents) and a
-    # stray key would KeyError below. Pinned cross-module (daemon._DISCOVERY_DRIFT_BUCKETS == _SUBJECT_FIELD) too.
+    # stray key would KeyError below. Pinned cross-module (tick_upkeep._DISCOVERY_DRIFT_BUCKETS == _SUBJECT_FIELD) too.
     assert set(_drift_buckets) == set(_SUBJECT_FIELD), "dismissal filter buckets drifted from _SUBJECT_FIELD"
     dismissed: list[dict[str, Any]] = []
     scope_nodes = sorted(set(read_nodes) | set(net_read_nodes))

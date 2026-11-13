@@ -3,7 +3,7 @@
 Multi-disk PR-4 actuation-ledger gate — proves, against a REAL Postgres, the DB-side effects the daemon applies
 AFTER the reconciler attaches a lease's DATA disks: the per-disk late-stamp (clone_storage_id + device_key onto
 the lease_data_disk rows) and the per-pool reachability VERIFY / QUARANTINE. Exercised through the shipped
-functions the daemon's `_record_provision_outcome` calls (lease.stamp_data_disk_device + placement.mark_verified
+functions the daemon's `tick_provision.record_provision_outcome` calls (lease.stamp_data_disk_device + placement.mark_verified
 + placement.quarantine_pair) over rows a REAL admission.admit stamped — a fake cursor cannot catch the SQL. The
 daemon's ORCHESTRATION (which function fires on which outcome) is pinned in tests/unit/test_daemon.py; here the
 SQL is proven against a live ledger.
