@@ -2070,3 +2070,110 @@ def test_a_boot_that_cannot_borrow_names_the_real_error_and_pools_close_at_exit(
     monkeypatch.setattr(mcp_common, "_pools", pools)
     mcp_common._close_pools()
     assert sorted(closed) == ["auth", "verbs"] and pools == {}
+
+
+# ── gateway log context (review OPS-06) ───────────────────────────────────────────────────────────────
+def test_each_tool_call_runs_in_its_own_log_context(monkeypatch):
+    """Through the enveloped tool (what FastMCP registers), each call runs under a fresh run_id, op = the tool and
+    lease_id when the call names one; the caller's project joins once _authorize resolves the token; and nothing
+    stays in the context after the call. Guards gateway log lines carrying no correlation id (review OPS-06), two
+    calls sharing one id, and a project tagged by one call leaking onto the next line the thread logs."""
+    from br0kr import logging_setup
+    before = logging_setup.current_context()
+    monkeypatch.setattr(mcp_common, "_presented_secret", lambda _ctx: "s")
+    _patch_resolve(monkeypatch, auth.Principal("team-a", "consume", 7))
+    real_authorize = mcp_common._authorize
+    seen: list[dict] = []
+
+    def spy(ctx, verb):
+        real_authorize(ctx, verb)
+        seen.append(logging_setup.current_context())
+        return {"error": reasons.NO_TOKEN}   # stop before the tool reaches the ledger
+    monkeypatch.setattr(mcp_common, "_authorize", spy)
+    tool = mcp_common._enveloped(mcp_server.renew_lease)
+    tool(SimpleNamespace(), lease_id=5)
+    tool(SimpleNamespace(), lease_id=6)
+    assert seen[0]["op"] == "renew_lease" and seen[0]["lease_id"] == 5 and seen[0]["project"] == "team-a"
+    assert seen[1]["lease_id"] == 6 and seen[0]["run_id"] != seen[1]["run_id"]
+    assert logging_setup.current_context() == before
+
+
+def test_the_caller_is_tagged_only_inside_a_tool_call(monkeypatch):
+    """_authorize adds the project to the log context only inside a tool call's context, and never for an operator
+    token (no project). Guards a direct call (a test, a script) leaving a tenant on every later line of its thread,
+    since a bare set outside a call has no reset to discard it (review OPS-06)."""
+    from br0kr import logging_setup
+    before = logging_setup.current_context()
+    monkeypatch.setattr(mcp_common, "_presented_secret", lambda _ctx: "s")
+    _patch_resolve(monkeypatch, auth.Principal("team-a", "consume", 7))
+    mcp_common._authorize(object(), "list_nodes")
+    assert logging_setup.current_context() == before
+    _patch_resolve(monkeypatch, auth.Principal(None, "operator", 8))
+    with logging_setup.push_context(op="list_nodes"):
+        mcp_common._authorize(object(), "list_nodes")
+        assert "project" not in logging_setup.current_context()
+
+
+def test_request_lease_logs_its_outcome_with_the_lease_and_project(monkeypatch, caplog):
+    """A request_lease call through the enveloped tool logs one outcome line whose JSON carries lease_id (the lease
+    it created), project, op and run_id as fields. Guards the review's done-when (OPS-06): before, the gateway's
+    lines carried no correlation id, and the new lease was only inside a message."""
+    import json
+    import logging
+
+    from br0kr import logging_setup
+    monkeypatch.setattr(mcp_common, "_presented_secret", lambda _ctx: "s")
+    _patch_resolve(monkeypatch, auth.Principal("team-a", "consume", 7))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_audit_write", lambda *a, **k: None)
+    monkeypatch.setattr(gateway, "request_lease", lambda c, **k: {
+        "lease_id": 42, "admitted": True, "queued": False, "idempotent": False, "reason": None, "pinned": False})
+    monkeypatch.setattr(caplog.handler, "formatter", logging_setup.JSONFormatter())   # restored after the test
+    with caplog.at_level(logging.INFO, logger="br0kr.mcp_tools"):
+        out = mcp_common._enveloped(mcp_server.request_lease)(
+            SimpleNamespace(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512)
+    assert out["ok"] is True and out["lease_id"] == 42
+    lines = [json.loads(line) for line in caplog.text.splitlines() if "request_lease admitted" in line]
+    assert len(lines) == 1, caplog.text
+    line = lines[0]
+    assert line["lease_id"] == 42 and line["project"] == "team-a" and line["op"] == "request_lease"
+    assert line["run_id"] and line["outcome"] == "admitted"
+
+
+def test_wait_for_lease_lines_carry_the_project_on_the_async_path(monkeypatch, caplog):
+    """wait_for_lease authorizes in a worker thread, whose context is a copy, so it tags the caller again in its
+    own coroutine: a line it logs after authorizing (here the busy refusal) carries project, op and lease_id.
+    Guards that second tag being dropped, which would leave every wait_for_lease line without its tenant while the
+    sync tools' tests stayed green (review OPS-06)."""
+    import asyncio
+    import json
+    import logging
+
+    from br0kr import logging_setup, mcp_tools
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _verb: auth.Principal("team-a", "consume", 7))
+    monkeypatch.setattr(mcp_tools, "_waiting", mcp_tools.WAIT_SLOTS)   # every slot taken: refused busy, no ledger
+    monkeypatch.setattr(caplog.handler, "formatter", logging_setup.JSONFormatter())
+    with caplog.at_level(logging.WARNING, logger="br0kr.mcp_tools"):
+        asyncio.run(mcp_common._enveloped(mcp_tools.wait_for_lease)(SimpleNamespace(), lease_id=9))
+    lines = [json.loads(line) for line in caplog.text.splitlines() if "wait_for_lease refused busy" in line]
+    assert len(lines) == 1, caplog.text
+    assert lines[0]["project"] == "team-a" and lines[0]["op"] == "wait_for_lease" and lines[0]["lease_id"] == 9
+
+
+def test_a_tool_that_raises_is_logged_under_its_call(monkeypatch, caplog):
+    """A tool that raises is logged once at ERROR with its stack, under the call's run_id and op, and the
+    exception still propagates (the SDK turns it into the agent's error result). Guards a crashing tool staying
+    invisible in the gateway's logs, which the SDK does not log (review OPS-06)."""
+    import json
+    import logging
+
+    from br0kr import logging_setup
+
+    def renew_lease(ctx, lease_id):   # named like a registered tool: _enveloped needs its verdict rule
+        raise RuntimeError("boom")
+    monkeypatch.setattr(caplog.handler, "formatter", logging_setup.JSONFormatter())
+    with caplog.at_level(logging.ERROR, logger="br0kr.mcp_common"), pytest.raises(RuntimeError, match="boom"):
+        mcp_common._enveloped(renew_lease)(SimpleNamespace(), lease_id=3)
+    lines = [json.loads(line) for line in caplog.text.splitlines() if "tool renew_lease raised" in line]
+    assert len(lines) == 1, caplog.text
+    assert lines[0]["op"] == "renew_lease" and lines[0]["lease_id"] == 3 and lines[0]["run_id"]

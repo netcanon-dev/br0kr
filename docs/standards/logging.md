@@ -68,6 +68,17 @@ The daemon's reconcile tick is one example: each tick runs under
 `step=<name>` (the row's name in `br0kr/tick_steps.py`), so a tick's log lines
 can be split by step without parsing messages.
 
+The MCP gateway is another: every tool call runs under its own `run_id` and
+`op=<tool>`, plus `lease_id` when the call names a single lease; once the token
+is resolved, `project` joins (an operator token has none). A request the
+gateway decides on `request_lease` or `schedule_lease` gets one outcome line
+(admitted, queued or refused) carrying the lease it made as `lease_id`, and a
+tool that raises is logged with its stack under the same context. The wrapper
+is `mcp_common._enveloped`, the one every tool passes through, so a new tool
+gets this without a line of its own (review OPS-06). These are context fields,
+so they show in JSON logs (`LOG_FORMAT=json`); the text format prints the
+message alone. Lines the MCP SDK and the web server log are outside any call.
+
 > **Gotcha (load-bearing):** a `threading.Thread` does **not** inherit the
 > parent's context by default — it starts empty. A worker function must
 > re-establish context on its **first line** (`set_context(run_id=…, worker=…)`).

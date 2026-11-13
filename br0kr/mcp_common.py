@@ -27,7 +27,7 @@ from typing import Any, ParamSpec
 import psycopg
 from mcp.server.fastmcp import Context
 
-from br0kr import audit, auth, db, envelope, gateway, ratelimit, reasons, settings
+from br0kr import audit, auth, db, envelope, gateway, logging_setup, ratelimit, reasons, settings
 
 log = logging.getLogger(__name__)
 
@@ -164,7 +164,27 @@ def _authorize(ctx: Context, verb: str) -> auth.Principal | dict[str, Any]:
                       source_ip=_client_ip(ctx), actor="agent", actor_token_id=principal.token_id,
                       project_id=principal.project_id, scope=principal.scope)
         return {"error": reasons.FORBIDDEN_SCOPE, "scope": principal.scope}
+    _tag_caller(principal)
     return principal
+
+
+def _tag_caller(principal: auth.Principal) -> None:
+    """Add the caller's project to the log context of the tool call it is inside (review OPS-06), so every line
+    the call logs from here on names the tenant. Only inside a call's context (the `op` `_enveloped` pushes): there
+    the push's reset discards it when the call ends, while a bare set outside one would stick to the thread. An
+    operator token has no project and adds nothing."""
+    if principal.project_id is not None and "op" in logging_setup.current_context():
+        logging_setup.set_context(project=principal.project_id)
+
+
+def _call_context(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The log context one tool call runs in (review OPS-06): a fresh `run_id`, `op` = the tool, and `lease_id`
+    when the call names a single lease, so a gateway line can be joined to the call and the lease like a tick's or
+    a reap's. FastMCP passes tool arguments by keyword. The bulk tools' `lease_ids` are not copied in."""
+    fields: dict[str, Any] = {"run_id": logging_setup.generate_correlation_id(), "op": name}
+    if kwargs.get("lease_id") is not None:
+        fields["lease_id"] = kwargs["lease_id"]
+    return fields
 
 
 def _denial_connect() -> psycopg.Connection[Any]:
@@ -247,18 +267,30 @@ def _enveloped(fn: Callable[..., Any]) -> Callable[..., Any]:
     builds the tool from, and the annotations are copied explicitly: from Python 3.14 `functools.wraps` copies
     `__annotate__` instead, which a tool built by br0kr/mcp_kinds.py does not have, and FastMCP finds the
     Context argument by its annotation. A KeyError here, at registration, means a tool has no verb registry
-    row."""
+    row. Each call runs in its own log context (`_call_context`, review OPS-06), and a call that raises is logged
+    there with its stack before the exception goes on: the MCP SDK turns it into an error result for the agent and
+    logs nothing, so a crashing tool was invisible in the gateway's logs. No tool raises for an ordinary refusal."""
     name = fn.__name__
     envelope.RESULT_FLAG[name]   # fail at import, not at an agent's first call, for a tool with no verdict rule
     if inspect.iscoroutinefunction(fn):   # an async tool stays async, so FastMCP awaits it off nothing but the loop
         @functools.wraps(fn)
         async def awaited(*args: Any, **kwargs: Any) -> Any:
-            return envelope.envelope(name, await fn(*args, **kwargs))
+            with logging_setup.push_context(**_call_context(name, kwargs)):
+                try:
+                    return envelope.envelope(name, await fn(*args, **kwargs))
+                except Exception:
+                    log.exception("tool %s raised", name)
+                    raise
         awaited.__annotations__ = dict(inspect.get_annotations(fn))
         return awaited
 
     @functools.wraps(fn)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        return envelope.envelope(name, fn(*args, **kwargs))
+        with logging_setup.push_context(**_call_context(name, kwargs)):
+            try:
+                return envelope.envelope(name, fn(*args, **kwargs))
+            except Exception:
+                log.exception("tool %s raised", name)
+                raise
     wrapped.__annotations__ = dict(inspect.get_annotations(fn))
     return wrapped

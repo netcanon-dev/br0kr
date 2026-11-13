@@ -47,6 +47,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **A gateway tool call's JSON log lines carry `run_id`, `op`, `project` and its `lease_id`, like a daemon tick's.**
+  `request_lease`/`schedule_lease` log their outcome with the lease made; a tool that raises is logged (OPS-06).
 - **A PR runs pytest once, on Python 3.13 (the image's); 3.11 and 3.12 run after a merge and weekly.** `validate.sh`
   skips its unit step under `BR0KR_SKIP_UNIT=1`, which CI sets (TEST-06).
 - **CI fails a PR that drops unit-test coverage below a floor: 83%, the measured 85.7% minus 2 (`fail_under`).**

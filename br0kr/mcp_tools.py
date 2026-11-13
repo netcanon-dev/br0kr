@@ -32,6 +32,18 @@ from br0kr import (
 log = logging.getLogger(__name__)
 
 
+def _log_outcome(verb: str, r: dict[str, Any]) -> None:
+    """One INFO line for a lease request's outcome, with `lease_id` as a field (review OPS-06): the lease a call
+    created is otherwise only in the message of admission's own line. The call's context adds run_id, op and
+    project. A replay of the same idem_key says so; a refusal names its reason."""
+    if r.get("admitted") or r.get("queued"):
+        outcome = "queued" if r.get("queued") else "admitted"
+        log.info("%s %s: lease %s%s", verb, outcome, r.get("lease_id"), " (replay)" if r.get("idempotent") else "",
+                 extra={"lease_id": r.get("lease_id"), "outcome": outcome})
+    else:
+        log.info("%s refused (%s)", verb, r.get("reason"), extra={"lease_id": r.get("lease_id"), "outcome": "refused"})
+
+
 @mcp_common._counts_admission("request_lease")
 def request_lease(
     ctx: Context,
@@ -97,6 +109,7 @@ def request_lease(
         elif not r.get("admitted") and not r.get("queued"):   # a FINAL refusal (never a queued-then-promoted)
             mcp_common._audit_refused(principal, reason=r.get("reason"), template_id=template_id, node_id=node_id,
                            lease_id=r.get("lease_id"))
+        _log_outcome("request_lease", r)
         return r
 
 
@@ -159,6 +172,7 @@ def schedule_lease(
         elif not r.get("admitted") and not r.get("queued"):   # a FINAL refusal (the scheduler placed nothing)
             mcp_common._audit_refused(principal, reason=r.get("reason"), template_id=template_id,
                            lease_id=r.get("lease_id"))   # node_id: the broker tried several
+        _log_outcome("schedule_lease", r)
         return r
 
 
@@ -256,6 +270,7 @@ async def wait_for_lease(ctx: Context, lease_id: int,
     principal = await _in_wait_thread(mcp_common._authorize, ctx, "wait_for_lease", pool="auth")
     if isinstance(principal, dict):
         return principal
+    mcp_common._tag_caller(principal)   # the thread tagged its own copy of the context, not this one
     token = principal.token_id
     if _waiting >= WAIT_SLOTS or _waiting_by_token.get(token, 0) >= WAIT_SLOTS_PER_TOKEN:
         log.warning("wait_for_lease refused busy: %d waits running, %d for this token", _waiting,
