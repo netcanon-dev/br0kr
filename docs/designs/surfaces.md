@@ -132,8 +132,10 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   `admit()`/`promote` re-read availability under their scope lock, so lowering a limit just admits less.
   Deletes that would orphan a lease are refused `*_in_use` (pre-checked); a cluster/project delete
   DEMOTES its dependents (nodes → capacity-only, leases → ungoverned) via ON DELETE SET NULL — except a
-  cluster whose template a lease references is refused `cluster_in_use` (the template→cluster CASCADE can't
-  drop a template the NO-ACTION `lease.template_id` FK protects). Cluster
+  cluster with an unfinished lease is refused `cluster_has_live_leases` (a live lease keeps its cluster, CHECK
+  0052, review REL-07), so only finished leases lose it, and a cluster whose template a lease references is
+  refused `cluster_in_use` (the template→cluster CASCADE can't drop a template the NO-ACTION `lease.template_id`
+  FK protects). Cluster
   connection edits use the same bare-host SSRF guard as the node registry (`nodes.valid_pve_host`) and
   store only the secret-env NAME, never a secret value. Proven on real Postgres (`scripts/harness_admin.py`
   GO 18/18: the lowered-quota and lowered-node-capacity edits are seen by the next admit; in-use deletes

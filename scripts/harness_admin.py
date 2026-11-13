@@ -18,8 +18,9 @@ unattended.
      RELEASING, and the change PERSISTS (the verb's lease.* helpers self-commit).
   E. INVENTORY CRUD: create/edit project/node/cluster/storage; duplicate + unknown-cluster refusals; and
      the cluster EDIT is read-modify-write (changing only pdm_endpoint keeps host/token via COALESCE).
-  F. DELETE SEMANTICS: in-use refusal (node/storage referenced by a lease), demote-on-delete (cluster →
-     nodes capacity-only, project → leases ungoverned), a node-capacity edit respected by the next admit,
+  F. DELETE SEMANTICS: in-use refusal (node/storage referenced by a lease), a cluster delete and a node's
+     cluster repoint both refused while a live lease is on them (REL-07), demote-on-delete once it finished
+     (cluster → nodes capacity-only, project → leases ungoverned), a node-capacity edit respected by the next admit,
      and the 0007 DB CHECK(>0) backstop on a non-positive node capacity.
 
 Env: PGCONN (the throwaway ledger).
@@ -143,7 +144,7 @@ def main() -> int:
         pend = cur.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state,queue_deadline) "
                            "VALUES ('n1',1,512,'PENDING', now() + interval '1 hour') RETURNING id").fetchone()[0]
         live = cur.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state) "
-                           "VALUES ('n1',1,512,'ACTIVE') RETURNING id").fetchone()[0]
+                           "VALUES ('n1',1,512,'ADMITTED') RETURNING id").fetchone()[0]
         c.commit()
     with connect() as c:
         cp = gateway.cancel_lease(c, pend)   # cancel_lease self-commits via lease.cancel_pending/release
@@ -186,18 +187,36 @@ def main() -> int:
     check("edit_node_and_storage_capacity", float(ncap[0]) == 16.0 and int(scap[0]) == 1000, f"{ncap} {scap}")
 
     # ── F: delete semantics (in-use refusal, demote-on-delete, capacity-edit respected by admit) ──
-    with connect() as c:   # a node referenced by a lease can't be deleted
-        c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state) VALUES ('nX',1,512,'ACTIVE')")
+    with connect() as c:   # a node referenced by a lease can't be deleted (a real ACTIVE lease: vmid + cluster)
+        live = c.execute("INSERT INTO lease(node_id,cluster_id,vmid,req_cpu,req_mem_mb,state) "
+                         "VALUES ('nX','clX',4321,1,512,'ACTIVE') RETURNING id").fetchone()[0]
         c.commit()
     check("delete_node_in_use_refused",
           _admin(lambda c: admin.delete_node(c, "nX"))["reason"] == "node_in_use")
+    # REL-07: neither the cluster's delete nor a repoint of the node may strand a live lease's cluster
+    refused = _admin(lambda c: admin.delete_cluster(c, "clX"))
+    check("delete_cluster_refused_under_a_live_lease",
+          refused["reason"] == "cluster_has_live_leases" and not refused["deleted"], f"{refused}")
+    with connect() as c:
+        still = c.execute("SELECT cluster_id FROM lease WHERE id = %s", (live,)).fetchone()[0]
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('clZ','10.0.0.2','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
+        c.commit()
+    moved = _admin(lambda c: admin.set_node(c, "nX", cpu_total=16, mem_total_mb=8192, cluster_id="clZ"))
+    check("set_node_repoint_refused_under_a_live_lease",
+          moved["reason"] == "node_has_live_leases" and still == "clX", f"{moved} lease cluster={still}")
+    with connect() as c:   # the lease finishes; its history keeps the row
+        c.execute("UPDATE lease SET state = 'RELEASED' WHERE id = %s", (live,))
+        c.commit()
     _admin(lambda c: admin.delete_cluster(c, "clX"))   # deleting a cluster DEMOTES its nodes
     with connect() as c:
         demoted = c.execute("SELECT cluster_id FROM node WHERE id='nX'").fetchone()[0]
-    check("delete_cluster_demotes_its_nodes", demoted is None, f"cluster_id={demoted}")
+        hist = c.execute("SELECT cluster_id FROM lease WHERE id = %s", (live,)).fetchone()[0]
+    check("delete_cluster_demotes_its_nodes", demoted is None and hist is None,
+          f"node cluster={demoted} finished lease cluster={hist}")
     with connect() as c:   # a storage pool referenced by a lease can't be deleted
         c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,storage_id,req_disk_gb,state) "
-                  "VALUES ('nX',1,512,'sX',10,'ACTIVE')")
+                  "VALUES ('nX',1,512,'sX',10,'ADMITTED')")
         c.commit()
     check("delete_storage_in_use_refused",
           _admin(lambda c: admin.delete_storage(c, "sX"))["reason"] == "storage_in_use")
@@ -206,7 +225,7 @@ def main() -> int:
                                           max_queued=None))
     with connect() as c:
         plid = c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,project_id,state) "
-                         "VALUES ('nX',1,512,'pX','ACTIVE') RETURNING id").fetchone()[0]
+                         "VALUES ('nX',1,512,'pX','ADMITTED') RETURNING id").fetchone()[0]
         c.commit()
     delp = _admin(lambda c: admin.delete_project(c, "pX"))
     with connect() as c:

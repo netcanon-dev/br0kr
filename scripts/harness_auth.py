@@ -156,11 +156,11 @@ def main() -> int:  # noqa: C901 — a linear sequence of independent checks; sp
     # ── E: lease ownership ─────────────────────────────────────────────────────────
     with connect() as c:
         own = c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,project_id,state) "
-                        "VALUES ('n1',1,512,'team-a','ACTIVE') RETURNING id").fetchone()[0]
+                        "VALUES ('n1',1,512,'team-a','ADMITTED') RETURNING id").fetchone()[0]
         other = c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,project_id,state) "
-                          "VALUES ('n1',1,512,'team-b','ACTIVE') RETURNING id").fetchone()[0]
+                          "VALUES ('n1',1,512,'team-b','ADMITTED') RETURNING id").fetchone()[0]
         ungov = c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state) "
-                          "VALUES ('n1',1,512,'ACTIVE') RETURNING id").fetchone()[0]
+                          "VALUES ('n1',1,512,'ADMITTED') RETURNING id").fetchone()[0]
         c.commit()
     with connect() as c:
         r_own = auth.lease_owned_by(c, own, "team-a")

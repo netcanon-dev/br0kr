@@ -23,6 +23,7 @@ Env: PGCONN (the throwaway ledger).
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 from pathlib import Path
@@ -71,15 +72,22 @@ class _FakeDriver:
 def _reset() -> None:
     with connect() as c:
         c.execute("TRUNCATE lease RESTART IDENTITY CASCADE")
-        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb) VALUES ('n1',100,100000) "
-                  "ON CONFLICT (id) DO NOTHING")
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('c1','10.0.0.1','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id) VALUES ('n1',100,100000,'c1') "
+                  "ON CONFLICT (id) DO UPDATE SET cluster_id = 'c1'")
         c.commit()
+
+
+_VMID = itertools.count(8200)
 
 
 def _add_lease(state: str) -> int:
     with connect() as c:
-        lid = c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state) VALUES ('n1',1,512,%s) "
-                        "RETURNING id", (state,)).fetchone()[0]
+        live = state in ("PROVISIONING", "ACTIVE")   # a live lease carries its vmid and cluster (0052)
+        lid = c.execute("INSERT INTO lease(node_id,cluster_id,req_cpu,req_mem_mb,state,vmid) "
+                        "VALUES ('n1','c1',1,512,%s,%s) RETURNING id",
+                        (state, next(_VMID) if live else None)).fetchone()[0]
         c.commit()
     return int(lid)
 

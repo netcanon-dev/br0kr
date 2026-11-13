@@ -45,11 +45,16 @@ def setup() -> dict[str, int]:
         migrate.apply_pending(c)
         c.execute("DELETE FROM lease")
         c.execute("DELETE FROM node")
-        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb) VALUES ('n1',100,100000)")
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('c1','10.0.0.1','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id) VALUES ('n1',100,100000,'c1')")
+        vmid = 7000
         for state, n in counts.items():
             for _ in range(n):
-                c.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state) VALUES ('n1',1,512,%s)",
-                          (state,))
+                vmid += 1   # a live (ACTIVE) lease carries its vmid and cluster (0052)
+                live = state in ("PROVISIONING", "ACTIVE")
+                c.execute("INSERT INTO lease(node_id,cluster_id,req_cpu,req_mem_mb,state,vmid) "
+                          "VALUES ('n1','c1',1,512,%s,%s)", (state, vmid if live else None))
         c.commit()
     return counts
 

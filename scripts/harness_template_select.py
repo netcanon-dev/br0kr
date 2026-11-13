@@ -23,8 +23,9 @@ every template); clB has none. Cross-cluster widening is harness_cross_cluster.p
      the instances); a name-only edit is still allowed while the template is in use.
   I. DELETE-IN-USE is fail-CLOSED (NO ACTION FK): delete_template is refused 'template_in_use' while ANY
      lease references it — live OR terminal history — so the delete can never SET NULL a live lease's
-     template_id and route it to the env-default image; delete_cluster is refused 'cluster_in_use' on that same
-     history even once the cluster's instances are gone; once the lease ROWS are purged, the delete proceeds.
+     template_id and route it to the env-default image; delete_cluster is refused 'cluster_has_live_leases' while
+     a lease on the cluster is unfinished (review REL-07), then 'cluster_in_use' on that same history even once the
+     cluster's instances are gone; once the lease ROWS are purged, the delete proceeds.
 
 Env: PGCONN (the throwaway ledger).
 """
@@ -201,6 +202,12 @@ def main() -> int:
     with connect() as c:
         dropped = admin.delete_template_instance(c, deb_seed, force=True)
         alpine = admin.delete_template(c, "alpine")
+        unfinished = admin.delete_cluster(c, "clA")   # k-plain (no template) is still ADMITTED on nA
+        c.execute("UPDATE lease SET state='RELEASED' WHERE idem_key='k-plain'")
+        c.commit()
+    check("delete_cluster_refused_while_a_lease_is_unfinished",
+          unfinished["reason"] == "cluster_has_live_leases" and not unfinished["deleted"], f"{unfinished}")
+    with connect() as c:
         cdel = admin.delete_cluster(c, "clA")
         c.commit()
     check("delete_cluster_refused_on_templated_lease_history",

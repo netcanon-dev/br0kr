@@ -87,7 +87,13 @@ lease (migration `0049`, `br0kr/pin.py`) is skipped by the TTL step alone, so it
 debited and released like any other, the two steps above still apply, and a project may hold at most `max_pinned` of
 them, counted under the project row lock ([designs/pinned-lease.md](pinned-lease.md)). Every statement that starts a
 release stamps `releasing_at` (migration `0051`), the end of the tenant's hold; with `admitted_at` it gives each
-lease's held interval, which `inventory.project_usage` reads for usage per project. **Built in `br0kr/lease.py`**;
+lease's held interval, which `inventory.project_usage` reads for usage per project. A live (PROVISIONING or
+ACTIVE) lease always carries its vmid and cluster (CHECK `lease_live_has_vmid`, 0052), so the `(cluster_id, vmid)`
+unique index (0004) covers every one of them. While a lease on it is unfinished, `admin.set_node` refuses to repoint
+a node's cluster (`node_has_live_leases`) and `admin.delete_cluster` to delete the cluster
+(`cluster_has_live_leases`). `template_build.vmid` has no such index, on purpose: only the single
+leader stamps it, by a guarded CAS, and `destroy_build_vm` deletes only a guest whose build fence names that build
+(review REL-07). **Built in `br0kr/lease.py`**;
 the teardown driver that actually destroys guests is **`br0kr/reaper.py`**. `db/migrations/0001_baseline.sql` carries
 the `ttl_seconds`/`expires_at`/`heartbeat_at`/`reclaim_at`/`release_attempts` columns (a trigger derives `expires_at`
 from `ttl_seconds`, so the deadline can't drift from the TTL).

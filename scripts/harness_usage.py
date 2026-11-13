@@ -18,6 +18,7 @@ No Proxmox, no VMs — pure ledger. Safe to run unattended. Env: PGCONN.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 from pathlib import Path
@@ -50,18 +51,22 @@ def setup() -> None:
         c.commit()
 
 
+_VMID = itertools.count(8300)
+
+
 def insert(idem: str, state: str, *, project: str | None = None, cpu: int = 1, mem: int = 1024,
            admitted: str | None = None, releasing: str | None = None, reclaim: str | None = None,
            provisioning: str | None = None, expires: str = "now() + interval '1 hour'") -> int:
     """A lease row in `state` with the given timestamps (SQL expressions), bypassing admission: the report reads
-    rows, and the fixture needs exact times."""
+    rows, and the fixture needs exact times. It takes the node's cluster, and a live one a vmid (CHECK 0052)."""
     with connect() as c:
         lid = c.execute(
             "INSERT INTO lease (idem_key,node_id,req_cpu,req_mem_mb,state,ttl_seconds,expires_at,project_id,"
-            "admitted_at,releasing_at,reclaim_at,provisioning_at,created_at) VALUES "
+            "admitted_at,releasing_at,reclaim_at,provisioning_at,created_at,cluster_id,vmid) VALUES "
             f"(%s,'N',%s,%s,%s,900,{expires},%s,{admitted or 'NULL'},{releasing or 'NULL'},{reclaim or 'NULL'},"
-            f"{provisioning or 'NULL'},{admitted or 'now()'}) RETURNING id",
-            (idem, cpu, mem, state, project)).fetchone()[0]
+            f"{provisioning or 'NULL'},{admitted or 'now()'},'cl',%s) RETURNING id",
+            (idem, cpu, mem, state, project,
+             next(_VMID) if state in ("PROVISIONING", "ACTIVE") else None)).fetchone()[0]
         c.commit()
     return int(lid)
 
@@ -127,7 +132,7 @@ def main() -> int:
            reclaim="'2025-12-31T05:00Z'")
     # internal reservations: a live migration hold in the window (would add 24 h to no project), and a replication
     # hold settled before 0051 with no end bound at all (would be unmeasured in every window)
-    insert(lease.MIGRATION_IDEM_PREFIX + "7", "ACTIVE", cpu=2, mem=4096, admitted="'2025-12-31T00:00Z'")
+    insert(lease.MIGRATION_IDEM_PREFIX + "7", "ADMITTED", cpu=2, mem=4096, admitted="'2025-12-31T00:00Z'")
     insert(lease.REPLICATION_IDEM_PREFIX + "9", "RELEASED", cpu=1, mem=1024, admitted="'2025-12-30T00:00Z'")
 
     with connect() as c:

@@ -377,7 +377,11 @@ Name the residual, why it's accepted, and what would close it.
   `vmid_contended` outcome + the `br0kr_vmid_contended_total` metric) BEFORE any guest is created — the
   loser's lease stays ADMITTED and retries with a fresh `nextid()`. Two guests can no longer land on one
   vmid even if two reconcilers briefly overlap (the per-VMID fence C8 stops a stale DESTROY; this stops a
-  colliding CREATE). Proven on real Postgres: `scripts/harness_vmid_race.py` (`run_harness.sh vmid_race`, GO
+  colliding CREATE). The index is partial over rows with a vmid AND a cluster, so CHECK `lease_live_has_vmid`
+  (migration `0052`, review REL-07) makes every PROVISIONING/ACTIVE lease carry both and the index cover every one
+  (`scripts/harness_lease.py`, `live_lease_has_vmid`). While a lease on it is unfinished, `set_node` refuses to
+  repoint a node's cluster and `delete_cluster` to delete the cluster (`tests/unit/test_admin.py`,
+  `scripts/harness_admin.py`). Proven on real Postgres: `scripts/harness_vmid_race.py` (`run_harness.sh vmid_race`, GO
   14/14) — **8 concurrent provisions pinned to one vmid → exactly one ACTIVE, seven `vmid_contended`, one
   guest, zero double-allocation**; vmid reuse after a terminal lease; a RELEASING vmid is not reused;
   per-cluster scope (cross-node-same-cluster contends, cross-cluster reuses). Single-writer remains the
@@ -779,8 +783,9 @@ Name the residual, why it's accepted, and what would close it.
   collapse the guest's cluster onto the target undetected. On a match it retries (reservation HELD) until the
   registry is corrected,
   then resumes to DONE — proven recoverable by `scripts/harness_migrate_lease.py` scenarios J (single repoint)
-  and N (the two-mutation attack). A lease whose own cluster is unknown (`cluster_id` NULL — its cluster was
-  deleted) is refused at request (`source_cluster_unknown`) and never confirmed mid-flight. Because the lease
+  and N (the two-mutation attack). A lease whose own cluster is unknown (`cluster_id` NULL, which only data from
+  before CHECK `lease_live_has_vmid`, 0052, can hold) is refused at request (`source_cluster_unknown`) and never
+  confirmed mid-flight. Because the lease
   cluster proves the guest ≠ target immutably, the confirm is plain REMOTE-ONLY, so an intra-cluster
   HA/maintenance relocation of a landed guest still confirms (scenario K) with no node-pin to wedge it. Three
   further safety properties are implemented + tested: **fence-before-migrate** (it actuates via `pdm.fenced_migrate`,

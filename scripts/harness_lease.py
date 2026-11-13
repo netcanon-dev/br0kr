@@ -23,6 +23,9 @@ Deterministic checks:
   full_release_path    release → RELEASING → mark_released → RELEASED, capacity freed.
   reaper_end_to_end    reap_once expires + destroys (mixed vmid / null-vmid leases) and
                        frees all the capacity; a null-vmid lease is settled WITHOUT a destroy.
+  live_lease_has_vmid  a PROVISIONING lease with no vmid (with or without a cluster), or an ACTIVE
+                       one with no cluster, fails CHECK lease_live_has_vmid (0052); RELEASING with
+                       no vmid is allowed.
   reaper_release_failed a guest whose destroy always fails ends RELEASE_FAILED (capacity
                        freed, orphan vmid flagged) instead of pinning the slot forever.
   pinned_survives_expiry  a PINNED lease (0049) a day past its deadline survives claim_expired and a full
@@ -56,6 +59,7 @@ Exit 0 + "GO" iff every invariant holds.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 import threading
@@ -90,25 +94,73 @@ def reset() -> None:
         # TRUNCATE lease is refused; CASCADE clears that referrer too (cf. harness_project_quota).
         c.execute("TRUNCATE lease CASCADE")
         c.execute("DELETE FROM node")
-        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb) VALUES (%s,%s,%s)", (NODE, NODE_CPU, NODE_MEM))
+        # a clustered node: a live lease carries its cluster (0052), copied from the node by begin_provisioning
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('cl','10.0.0.1','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id) VALUES (%s,%s,%s,'cl')",
+                  (NODE, NODE_CPU, NODE_MEM))
 
 
 def insert_lease(state: str, expires_offset_s: int, ttl: int = 900, vmid: int | None = None,
                  provisioning_offset_s: int | None = None) -> int:
     """Insert a lease in a chosen state with expires_at = now()+offset (negative =
     already past, i.e. due), an optional vmid, and an optional provisioning_at = now()+offset
-    (negative = entered PROVISIONING that long ago; None = NULL). Returns the lease id."""
+    (negative = entered PROVISIONING that long ago; None = NULL). Returns the lease id. The lease takes the
+    node's cluster, and a PROVISIONING or ACTIVE lease given no vmid gets a fresh one: a live lease carries
+    both (CHECK lease_live_has_vmid, 0052)."""
+    if vmid is None and state in ("PROVISIONING", "ACTIVE"):
+        vmid = next(_AUTO_VMID)
     with psycopg.connect(CONN, autocommit=True) as c:
         row = c.execute(
-            """INSERT INTO lease(node_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid,
+            """INSERT INTO lease(node_id, cluster_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid,
                                  provisioning_at)
-               VALUES (%s,%s,%s,%s::lease_state,%s, now() + make_interval(secs => %s), %s,
+               VALUES (%s,(SELECT cluster_id FROM node WHERE id = %s),%s,%s,%s::lease_state,%s,
+                       now() + make_interval(secs => %s), %s,
                        CASE WHEN %s::int IS NULL THEN NULL ELSE now() + make_interval(secs => %s::int) END)
                RETURNING id""",
-            (NODE, REQ_CPU, REQ_MEM, state, ttl, expires_offset_s, vmid,
+            (NODE, NODE, REQ_CPU, REQ_MEM, state, ttl, expires_offset_s, vmid,
              provisioning_offset_s, provisioning_offset_s),
         ).fetchone()
         return row[0]
+
+
+_AUTO_VMID = itertools.count(20000)   # fresh vmids for live fixture leases, clear of the explicit ones (< 2000)
+
+
+def check_live_lease_has_vmid() -> bool:
+    """CHECK lease_live_has_vmid (0052, review REL-07): moving a lease to PROVISIONING without a vmid (with a
+    cluster, and with neither), or inserting an ACTIVE lease with no cluster, fails the CHECK and changes nothing; a RELEASING lease with no vmid
+    (released before it was provisioned) is still allowed; begin_provisioning, which stamps the vmid and copies the
+    node's cluster, passes; re-applying the migration is a no-op."""
+    reset()
+    admitted = insert_lease("ADMITTED", expires_offset_s=3600)
+    with psycopg.connect(CONN, autocommit=True) as c:   # as admission leaves it: begin_provisioning copies the cluster
+        c.execute("UPDATE lease SET cluster_id = NULL WHERE id = %s", (admitted,))
+    refused = []
+    with psycopg.connect(CONN, autocommit=True) as c:
+        for sql, params in (
+                ("UPDATE lease SET state = 'PROVISIONING', cluster_id = 'cl' WHERE id = %s", (admitted,)),
+                ("UPDATE lease SET state = 'PROVISIONING' WHERE id = %s", (admitted,)),
+                ("INSERT INTO lease(node_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid) "
+                 "VALUES (%s,%s,%s,'ACTIVE',900, now() + interval '1 hour', 777)", (NODE, REQ_CPU, REQ_MEM))):
+            try:
+                c.execute(sql, params)
+                refused.append(False)
+            except psycopg.errors.CheckViolation:
+                refused.append(True)
+    still = state_of(admitted)
+    gone_early = insert_lease("RELEASING", expires_offset_s=3600)          # no vmid: allowed
+    with connect() as c:
+        won = lease.begin_provisioning(c, admitted, vmid=778, name="g")
+    with psycopg.connect(CONN, autocommit=True) as c:
+        row = c.execute("SELECT state, vmid, cluster_id FROM lease WHERE id = %s", (admitted,)).fetchone()
+        sql = (Path(__file__).resolve().parent.parent / "db" / "migrations" / "0052_lease_live_has_vmid.sql").read_text(
+            encoding="utf-8")
+        c.execute(sql)                                                      # idempotent
+    ok = (refused == [True, True, True] and still == "ADMITTED" and gone_early > 0 and won
+          and row == ("PROVISIONING", 778, "cl"))
+    print(f"[live_lease_has_vmid]  refused={refused} untouched={still} provisioned={row}  | {'PASS' if ok else 'FAIL'}")
+    return ok
 
 
 def avail_cpu() -> float:
@@ -182,11 +234,13 @@ def check_begin_provisioning_only_from_admitted() -> bool:
     wrong = []
     for i, st in enumerate(others):
         lid = insert_lease(st, expires_offset_s=3600)
+        with psycopg.connect(CONN, autocommit=True) as c:   # a live fixture lease already has its vmid (0052)
+            before = c.execute("SELECT vmid FROM lease WHERE id = %s", (lid,)).fetchone()[0]
         with connect() as c:
             won = lease.begin_provisioning(c, lid, vmid=960 + i, name="g")
         with psycopg.connect(CONN, autocommit=True) as c:
             after, vmid = c.execute("SELECT state, vmid FROM lease WHERE id = %s", (lid,)).fetchone()
-        if won or after != st or vmid is not None:
+        if won or after != st or vmid != before:
             wrong.append(f"{st}->won={won},state={after},vmid={vmid}")
     ok = not wrong
     print(f"[begin_prov_admitted]  {len(others)} non-ADMITTED states refused, row untouched: "
@@ -735,6 +789,7 @@ def main() -> int:
         check_pinned_request_end_to_end,
         check_pinned_lease_migration,
         check_states_of_batch,
+        check_live_lease_has_vmid,
     ]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))

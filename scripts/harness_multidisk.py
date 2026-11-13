@@ -85,8 +85,8 @@ def main() -> int:
                      "('poolA',1000,'c1',ARRAY['images']),('poolB',500,'c1',ARRAY['images']),"
                      "('poolC',100,'c1',ARRAY['images'])")
         lid = conn.execute(
-            "INSERT INTO lease(idem_key,node_id,req_cpu,req_mem_mb,storage_id,req_disk_gb,state) "
-            "VALUES ('boot-a','n1',1,512,'poolA',100,'ACTIVE') RETURNING id").fetchone()[0]
+            "INSERT INTO lease(idem_key,node_id,cluster_id,vmid,req_cpu,req_mem_mb,storage_id,req_disk_gb,state) "
+            "VALUES ('boot-a','n1','c1',9101,1,512,'poolA',100,'ACTIVE') RETURNING id").fetchone()[0]
         conn.execute("INSERT INTO lease_data_disk(lease_id,disk_index,storage_id,req_disk_gb) VALUES "
                      "(%s,1,'poolB',200),(%s,2,'poolA',50),(%s,3,'poolC',10)", (lid, lid, lid))
         conn.commit()

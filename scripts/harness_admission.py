@@ -245,11 +245,15 @@ def check_capacity_reads_use_partial_indexes(terminal: int = 50_000) -> bool:
                                        ttl_seconds, expires_at)
                      SELECT 'n1', 's1', 'p1', 1, 64, 1, 'RELEASED', 900, now() FROM generate_series(1, %s)""",
                   (terminal,))
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('cl-idx','10.0.0.1','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
         for st in ("ADMITTED", "ACTIVE", "RELEASING"):
+            live = st == "ACTIVE"   # a live lease carries its vmid and cluster (0052)
             c.execute("""INSERT INTO lease(node_id, storage_id, project_id, req_cpu, req_mem_mb, req_disk_gb,
-                                           state, ttl_seconds, expires_at)
-                         VALUES ('n1','s1','p1', 2, 128, 3, %s::lease_state, 900, now() + interval '1 hour')""",
-                      (st,))
+                                           state, ttl_seconds, expires_at, vmid, cluster_id)
+                         VALUES ('n1','s1','p1', 2, 128, 3, %s::lease_state, 900, now() + interval '1 hour',
+                                 %s, %s)""",
+                      (st, 4242 if live else None, "cl-idx" if live else None))
         c.execute("ANALYZE lease")
         reads = {"node": (admission._NODE_AVAIL, ("n1",), "lease_node_active"),
                  "storage": (admission._STORAGE_AVAIL, ("s1",), "lease_storage_active"),

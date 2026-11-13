@@ -47,6 +47,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **A live lease always has its vmid and cluster, and no admin edit takes its cluster away.** Migration 0052's CHECK;
+  `set_node` refuses a repoint (`node_has_live_leases`), `delete_cluster` a delete (`cluster_has_live_leases`) (REL-07).
 - **Cleanups: one home each for the integer column ceilings (`db`) and the capacity states (`admission.CAPACITY_SQL`).**
   Job SQL names its state lists; the destroy verdicts are named in `driver.py`; one dead helper is gone (CODE-06).
 - **Which capability is on which surface is a table: `tests/unit/test_surface_parity.py`.** Each MCP tool and

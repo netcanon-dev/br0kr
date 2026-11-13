@@ -9,7 +9,9 @@ recording fake connection (review TEST-04).
 """
 from __future__ import annotations
 
+import types
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -390,3 +392,36 @@ def test_every_statement_that_starts_a_release_stamps_releasing_at():
     assert [name for name, _set in found] == ["lease.py"] * 3, found
     missing = [(name, s) for name, s in found if not re.search(r"\breleasing_at\s*=\s*now\(\)", s, re.I)]
     assert not missing, missing
+
+
+def _check_violation(constraint: str) -> psycopg.errors.CheckViolation:
+    """A CheckViolation naming `constraint`, as Postgres reports it in the error's diagnostics."""
+    class _Named(psycopg.errors.CheckViolation):
+        @property
+        def diag(self) -> Any:
+            return types.SimpleNamespace(constraint_name=constraint)
+    return _Named(f'new row for relation "lease" violates check constraint "{constraint}"')
+
+
+def test_begin_provisioning_fails_closed_when_the_node_has_no_cluster(caplog):
+    """A CheckViolation from begin_provisioning's CAS (CHECK lease_live_has_vmid, 0052: the node has no cluster)
+    rolls back, logs one WARNING naming the lease, and answers False, so the reconciler builds no guest and the
+    lease stays ADMITTED. Guards that refusal escaping as a stack trace every tick (review REL-07)."""
+    import logging
+    conn = _CasConn(raises=_check_violation(lease.LIVE_LEASE_CHECK))
+    with caplog.at_level(logging.WARNING, logger="br0kr.lease"):
+        assert lease.begin_provisioning(conn, 7, 9901, "lease-7") is False
+    assert conn.rollbacks == 1 and conn.commits == 0
+    assert any("lease 7 not provisioned" in r.getMessage() for r in caplog.records)
+
+
+def test_begin_provisioning_reraises_any_other_check_violation():
+    """Only CHECK lease_live_has_vmid is read as "the node has no cluster". Another lease CHECK failing in the
+    same CAS still rolls back but propagates. Guards a future constraint's failure being logged under the wrong
+    cause and silently retried every tick (review REL-07, round 2)."""
+    conn = _CasConn(raises=_check_violation("lease_some_future_check"))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        lease.begin_provisioning(conn, 7, 9901, "lease-7")
+    assert conn.rollbacks == 1 and conn.commits == 0
+    assert lease.LIVE_LEASE_CHECK in (Path(__file__).resolve().parents[2] / "db" / "migrations"
+                                      / "0052_lease_live_has_vmid.sql").read_text(encoding="utf-8")

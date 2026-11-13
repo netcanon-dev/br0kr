@@ -228,6 +228,10 @@ const REASON_HINT = {
   replication_in_progress: 'a replication of this template is still running',
   replication_cooldown: 'this template was replicated recently; try again shortly',
   cluster_has_unbound_instances: 'bind the template instances on this cluster to a node and pool first',
+  node_has_live_leases: 'the node holds leases that are not finished: wait for them, release or migrate them, '
+    + 'then change its cluster',
+  cluster_has_live_leases: 'leases on this cluster are not finished: wait for them, release or migrate them, '
+    + 'then delete it',
   source_not_allowed: 'the URL does not start with an allowlisted source prefix',
   project_required: 'pick a project; only an operator token is project-less',
   template_downloads_disabled: 'this project has no template-disk quota; set one on its project card',

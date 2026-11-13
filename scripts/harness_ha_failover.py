@@ -132,8 +132,11 @@ def main() -> int:
     with db.connect(DSN) as c:
         migrate.apply_pending(c)
     with db.connect(DSN) as c:
-        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
-                  (NODE, 10, 10_000))
+        # a clustered node: begin_provisioning copies its cluster onto the live lease (CHECK 0052)
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('cl','10.0.0.1','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id) VALUES (%s,%s,%s,'cl') "
+                  "ON CONFLICT (id) DO UPDATE SET cluster_id = 'cl'", (NODE, 10, 10_000))
         c.commit()
 
     fake = UnreservedFakeDriver()

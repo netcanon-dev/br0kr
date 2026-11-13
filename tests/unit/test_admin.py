@@ -335,22 +335,23 @@ def test_delete_node_refuses_when_in_use_without_deleting():
 
 
 def test_delete_cluster_reports_deleted_unknown_or_in_use():
-    """A cluster delete runs THREE fail-closed pre-checks — live template_instances (cluster_has_instances),
-    template_replication jobs (cluster_has_replications), then a lease referencing one of its templates
-    (cluster_in_use) — each a crisp reason instead of an FK-abort 503, because template_instance.cluster_id
+    """A cluster delete runs FOUR fail-closed pre-checks — live template_instances (cluster_has_instances),
+    template_replication jobs (cluster_has_replications), an unfinished lease on it (cluster_has_live_leases, REL-07),
+    then a lease referencing one of its templates (cluster_in_use) — each a crisp reason instead of an FK-abort 503, because template_instance.cluster_id
     (0032), template_replication.target_cluster_id (0034), and lease.template_id are all NO ACTION FKs the
-    template→cluster CASCADE can't drop through. With all three clear it reports deleted=True (nodes/leases
-    demote via ON DELETE SET NULL) or unknown_cluster. Guards the round-2 finding (a stale 'always demotes'
+    template→cluster CASCADE can't drop through. With all four clear it reports deleted=True (nodes and finished
+    leases demote via ON DELETE SET NULL) or unknown_cluster. Guards the round-2 finding (a stale 'always demotes'
     contract), a delete of a vanished cluster being reported as applied, and the decommission pre-checks
     regressing into a raw FK error."""
-    # cluster_in_use: no instances, no replications, THEN the lease⋈template pre-check finds a templated lease.
-    in_use = _Seq(None, None, (1,))
+    # cluster_in_use: no instances, no replications, no unfinished lease, THEN the lease⋈template pre-check finds a
+    # templated lease (terminal history).
+    in_use = _Seq(None, None, None, (1,))
     assert admin.delete_cluster(in_use, "clA") == {
         "cluster_id": "clA", "deleted": False, "reason": "cluster_in_use"}
-    assert len(in_use.sqls) == 3   # the three pre-checks ran; the DELETE was never attempted
-    assert admin.delete_cluster(_Seq(None, None, None, ("clA",)), "clA") == {
+    assert len(in_use.sqls) == 4   # the four pre-checks ran; the DELETE was never attempted
+    assert admin.delete_cluster(_Seq(None, None, None, None, ("clA",)), "clA") == {
         "cluster_id": "clA", "deleted": True, "reason": None}
-    assert admin.delete_cluster(_Seq(None, None, None, None), "ghost") == {
+    assert admin.delete_cluster(_Seq(None, None, None, None, None), "ghost") == {
         "cluster_id": "ghost", "deleted": False, "reason": "unknown_cluster"}
 
 
@@ -1382,3 +1383,42 @@ def test_create_token_expires_by_default_and_never_only_when_asked():
     admin.create_token(eternal, project_id="team-a", scope="consume", label="ci", expires_in_days=None)
     params = _param_of(eternal, "INSERT INTO api_token")
     assert params is not None and params[-2:] == (None, None)
+
+
+def test_set_node_refuses_a_cluster_repoint_while_the_node_holds_unfinished_leases():
+    """A cluster REPOINT while an unfinished lease (queued, live or releasing) names the node is refused
+    `node_has_live_leases` with NO UPDATE (review REL-07); with neither an instance nor such a lease the repoint
+    goes through. Guards a live lease's guest, vmid and fence staying in the old cluster while the node moves (its
+    teardown and the 0004 vmid uniqueness would then point at the wrong cluster), and a queued lease being
+    provisioned into the new one. Query order: _exists(new cluster) → current cluster → instances → leases."""
+    blocked = _Seq(("c2",), ("c1",), None, (1,))
+    out = admin.set_node(blocked, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
+    assert out == {"node_id": "nX", "updated": False, "reason": "node_has_live_leases"}
+    assert not any("UPDATE node" in s for s in blocked.sqls)
+    assert "FROM lease WHERE node_id = %s AND state NOT IN" in blocked.sqls[3]
+    assert all(f"'{s}'" in blocked.sqls[3] for s in ("RELEASED", "REJECTED", "RELEASE_FAILED"))
+    free = _Seq(("c2",), ("c1",), None, None, ("nX",))
+    assert admin.set_node(free, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")["updated"] is True
+
+
+def test_set_node_gives_a_cluster_less_node_its_first_cluster_even_with_leases():
+    """Assigning a cluster to a capacity-only node (current cluster NULL) skips the lease check: such a node is never
+    provisioned, so it holds no guest whose cluster could drift, and its admitted leases simply become provisionable
+    (review REL-07). Guards the new lease guard blocking the ordinary way a node is brought into service."""
+    seq = _Seq(("c2",), (None,), None, ("nX",))   # _exists(c2), current cluster NULL, no instances, the UPDATE
+    out = admin.set_node(seq, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
+    assert out["updated"] is True
+    assert not any("FROM lease" in s for s in seq.sqls)
+
+
+def test_delete_cluster_refuses_while_unfinished_leases_are_on_it():
+    """delete_cluster refuses `cluster_has_live_leases` with NO DELETE while an unfinished lease is stamped with
+    the cluster or sits on one of its nodes (review REL-07). Guards the delete reaching Postgres, where the
+    lease.cluster_id SET NULL would break CHECK lease_live_has_vmid for a live lease (a raw 503), and orphaning a
+    queued or admitted lease's cluster. Query order: instances → replications → leases."""
+    seq = _Seq(None, None, (1,))
+    assert admin.delete_cluster(seq, "c1") == {"cluster_id": "c1", "deleted": False,
+                                               "reason": "cluster_has_live_leases"}
+    assert not any("DELETE FROM cluster" in s for s in seq.sqls)
+    assert "cluster_id = %s OR node_id IN (SELECT id FROM node WHERE cluster_id = %s)" in seq.sqls[2]
+    assert "state NOT IN" in seq.sqls[2]

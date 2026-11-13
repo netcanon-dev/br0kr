@@ -70,7 +70,8 @@ _CLEANUP_RETRIES = 3
 class ProvisionOutcome:
     """The result of trying to provision one lease. `state`:
       'active'                  — provisioned and ACTIVE.
-      'not_provisioned'         — lease wasn't ADMITTED (released/reaped first); nothing built.
+      'not_provisioned'         — lease wasn't ADMITTED (released/reaped first), or its node has no
+                                  cluster (CHECK 0052, lease stays ADMITTED); nothing built.
       'vmid_contended'          — the vmid was held by another live lease in the cluster (a concurrent
                                   reconciler won it at failover); lease stays ADMITTED, retried next tick.
       'provision_failed'        — the create task returned a failure exitstatus.
@@ -830,8 +831,9 @@ def provision_lease(
                     extra={"lease_id": lease_id, "vmid": vmid})
         return ProvisionOutcome(lease_id, None, "vmid_contended", "vmid held by a concurrent reconciler")
     if not started:
-        log.info("provision skipped — lease %s not ADMITTED", lease_id, extra={"lease_id": lease_id})
-        return ProvisionOutcome(lease_id, None, "not_provisioned", "lease was not ADMITTED")
+        log.info("provision skipped — lease %s not ADMITTED, or its node has no cluster", lease_id,
+                 extra={"lease_id": lease_id})
+        return ProvisionOutcome(lease_id, None, "not_provisioned", "lease was not ADMITTED or its node has no cluster")
 
     # The lease is PROVISIONING with vmid stamped: from here every exit either reaches
     # ACTIVE or releases the lease so the reaper destroys the stamped vmid durably.

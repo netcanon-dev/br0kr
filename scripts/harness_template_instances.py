@@ -159,8 +159,9 @@ def main() -> int:
         giid = int(cur.execute(
             "INSERT INTO template_instance(template_id,cluster_id,node_id,vmid,storage_id,instance_state,origin,"
             "size_gb) VALUES ('debian12','clA','nA',9950,'FastStorage','READY','seed',8) RETURNING id").fetchone()[0])
-        cur.execute("INSERT INTO lease(idem_key,node_id,req_cpu,req_mem_mb,storage_id,req_disk_gb,state,ttl_seconds,"
-                    "template_instance_id) VALUES ('g-live','nA',1,1024,'FastStorage',0,'ACTIVE',900,%s)", (giid,))
+        cur.execute("INSERT INTO lease(idem_key,node_id,cluster_id,vmid,req_cpu,req_mem_mb,storage_id,req_disk_gb,"
+                    "state,ttl_seconds,template_instance_id) "
+                    "VALUES ('g-live','nA','clA',9951,1,1024,'FastStorage',0,'ACTIVE',900,%s)", (giid,))
         c.commit()
     # a NON-TERMINAL (ACTIVE) lease stamps it → both retire AND delete refuse instance_in_use (no raw 503)
     with connect() as c:

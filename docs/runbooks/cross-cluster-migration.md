@@ -63,11 +63,11 @@ Key properties:
   "landed on the target" while the target's cluster equals the lease's OWN `cluster_id` (the guest's physical
   cluster, migration 0004 — immutable to node repoints; the flip records the cluster the guest was *confirmed*
   on, not a re-read of the node). So an operator repointing a node's `cluster_id` mid-saga can't trick the
-  saga into a phantom flip+settle (no move, capacity misattributed). *Operator note:* if a lease's cluster is
-  **deleted** while its migration is in flight, `lease.cluster_id` goes NULL (`ON DELETE SET NULL`) and the
-  saga retries **forever, conservatively** (it never over-allocates; the reservation is held, `cancel_migration`
-  refuses a mid-copy saga). Recovery is by hand: re-establish the lease's cluster (fix `lease.cluster_id` /
-  the guest's node cluster) — a request for a null-cluster lease is refused `source_cluster_unknown` up front.
+  saga into a phantom flip+settle (no move, capacity misattributed). *Operator note:* a lease's cluster cannot
+  be deleted while its migration is in flight: `delete_cluster` is refused `cluster_has_live_leases` until the
+  lease and the target reservation are finished, and since migration `0052` a live lease always keeps its cluster
+  (review REL-07). A request for a lease with no cluster is still refused `source_cluster_unknown` up front; only
+  data from before 0052 can reach that.
 
 ## Requesting a migration (control plane)
 

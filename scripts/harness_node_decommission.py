@@ -19,6 +19,7 @@ Env: PGCONN (the throwaway ledger).
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 from pathlib import Path
@@ -47,8 +48,13 @@ def seed(cur: psycopg.Cursor) -> None:
 
 
 def lease(cur: psycopg.Cursor, idem: str, *, node=None, storage=None, state="ACTIVE") -> None:
-    cur.execute("INSERT INTO lease(idem_key,node_id,req_cpu,req_mem_mb,storage_id,req_disk_gb,state,ttl_seconds)"
-                " VALUES (%s,%s,1,1024,%s,0,%s,900)", (idem, node, storage, state))
+    live = state in ("PROVISIONING", "ACTIVE")   # a live lease carries its vmid and its node's cluster (0052)
+    cur.execute("INSERT INTO lease(idem_key,node_id,req_cpu,req_mem_mb,storage_id,req_disk_gb,state,ttl_seconds,"
+                "vmid,cluster_id) VALUES (%s,%s,1,1024,%s,0,%s,900,%s,(SELECT cluster_id FROM node WHERE id = %s))",
+                (idem, node, storage, state, next(_VMID) if live else None, node))
+
+
+_VMID = itertools.count(8100)
 
 
 def main() -> int:  # noqa: C901 - a flat sequence of labelled checks

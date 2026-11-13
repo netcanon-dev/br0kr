@@ -106,12 +106,14 @@ def seed_history() -> None:
             if admitted is None and rnd.random() < 0.05:
                 active = max(0.0, created - 30)   # a legacy row: active_at without admitted_at
             hold = "placement_lost" if state == "ADMITTED" and i % 3 == 0 else None
+            live = state in ("PROVISIONING", "ACTIVE")   # a live lease carries its vmid and cluster (0052)
             c.execute(
                 "INSERT INTO lease (idem_key,node_id,req_cpu,req_mem_mb,state,ttl_seconds,expires_at,queue_deadline,"
-                " created_at,admitted_at,active_at,hold_reason) VALUES (%s,'N',1,512,%s,900,"
+                " created_at,admitted_at,active_at,hold_reason,vmid,cluster_id) VALUES (%s,'N',1,512,%s,900,"
                 " now()+interval '900 seconds', now()+interval '3600 seconds', now() - make_interval(secs => %s),"
-                " now() - make_interval(secs => %s), now() - make_interval(secs => %s), %s)",
-                (f"hist-{i}", state, created, admitted, active, hold))
+                " now() - make_interval(secs => %s), now() - make_interval(secs => %s), %s, %s, %s)",
+                (f"hist-{i}", state, created, admitted, active, hold, 10_000 + i if live else None,
+                 "cl" if live else None))
         c.commit()
 
 

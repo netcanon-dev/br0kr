@@ -28,6 +28,7 @@ Env: PGCONN (the throwaway ledger).
 """
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 from pathlib import Path
@@ -56,10 +57,18 @@ def _lease(cur: psycopg.Cursor, **cols: object) -> int:
     """Insert one lease from explicit columns (state always supplied) and return its id. expires_at is left
     to the BEFORE INSERT trigger (derived from ttl_seconds); a queued row's created_at/queue_deadline are
     patched afterward by the caller."""
+    if cols["state"] in ("PROVISIONING", "ACTIVE"):   # a live lease carries its vmid and cluster (0052)
+        cols.setdefault("vmid", next(_VMID))
+        if "cluster_id" not in cols:
+            cols["cluster_id"] = cur.execute("SELECT cluster_id FROM node WHERE id = %s",
+                                             (cols["node_id"],)).fetchone()[0]
     keys = ", ".join(cols)
     ph = ", ".join(["%s"] * len(cols))
     row = cur.execute(f"INSERT INTO lease ({keys}) VALUES ({ph}) RETURNING id", tuple(cols.values())).fetchone()
     return int(row[0])
+
+
+_VMID = itertools.count(8000)
 
 
 def seed(cur: psycopg.Cursor) -> list[int]:
@@ -101,8 +110,8 @@ def seed(cur: psycopg.Cursor) -> list[int]:
     # n3 / clB: 2 ACTIVE drawing on ceph (100 GB each → 200 used)
     for _ in range(2):
         _lease(cur, node_id="n3", req_cpu=1, req_mem_mb=512, storage_id="ceph", req_disk_gb=100, state="ACTIVE")
-    # n9 unassigned: 1 ACTIVE
-    _lease(cur, node_id="n9", req_cpu=1, req_mem_mb=512, state="ACTIVE")
+    # n9 unassigned (capacity-only, never provisioned): 1 ADMITTED, holding capacity like any live lease
+    _lease(cur, node_id="n9", req_cpu=1, req_mem_mb=512, state="ADMITTED")
     # G (UI-04): 'lan' realised on n1 (verified) and n2 (quarantined), 'dmz' declared by no node; one template on
     # lan, one undeclared; two dismissed findings an hour apart (the newer one names who dismissed it)
     cur.execute("INSERT INTO logical_network(id, description) VALUES ('lan', 'office LAN'), ('dmz', NULL)")
@@ -133,11 +142,11 @@ def seed(cur: psycopg.Cursor) -> list[int]:
     cur.execute("UPDATE lease SET queue_deadline = now() + interval '1 hour' "
                 "WHERE state = 'PENDING' AND node_id IS NOT NULL")
 
-    # A cross-cluster MIGRATION reservation lease (reserved br0kr-mig- idem_key): a REAL ACTIVE capacity
+    # A cross-cluster MIGRATION reservation lease (reserved br0kr-mig- idem_key): a REAL ADMITTED capacity
     # debit with NO guest, owned by a saga. It COUNTS as capacity, so list_leases must SHOW it but flag it
     # is_reservation + mark it NOT cancellable/migratable. On n3, with no storage/project, so it doesn't
     # disturb the ceph / team-a / team-b checks above.
-    resv = _lease(cur, node_id="n3", req_cpu=1, req_mem_mb=512, state="ACTIVE", idem_key="br0kr-mig-1")
+    resv = _lease(cur, node_id="n3", req_cpu=1, req_mem_mb=512, state="ADMITTED", idem_key="br0kr-mig-1")
     return pend, resv
 
 
@@ -245,7 +254,7 @@ def main() -> int:
 
     # ── F: list_leases — CAPACITY_STATES only, tenant scoping, reservation flag + action flags, clamp ──
     # The 10 capacity-holders: n1/team-a 3 ACTIVE+1 RELEASING+1 PROVISIONING, n2/team-b 1 ADMITTED, n3 2
-    # ACTIVE(ceph), n9 1 ACTIVE, + the n3 reservation. PENDING (4) + terminal (3) are NOT here.
+    # ACTIVE(ceph), n9 1 ADMITTED, + the n3 reservation. PENDING (4) + terminal (3) are NOT here.
     states = {ll["state"] for ll in all_leases}
     check("leases_are_capacity_states_only",
           len(all_leases) == 10 and states <= {"ADMITTED", "PROVISIONING", "ACTIVE", "RELEASING"}

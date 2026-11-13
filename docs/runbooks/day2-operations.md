@@ -79,6 +79,17 @@ bash scripts/deploy.sh --check && bash scripts/deploy.sh                   # bui
     under `umask 077`.
 - **If `migrate` fails on a lock timeout,** a scheduled dump was running: `pg_dump` holds a share lock on every
   table, and a migration waits only 10 s. Check `docker compose logs ledger-backup`, then run `deploy.sh` again.
+- **If `migrate` fails on CHECK `lease_live_has_vmid` (0052),** a PROVISIONING or ACTIVE lease lacks its vmid or
+  its cluster. No br0kr version writes one, but an older release's cluster delete could leave a live lease without
+  its cluster. The failed migration changed nothing. In `psql` on `pg-primary`, list them:
+  `SELECT id, state, node_id, vmid, cluster_id FROM lease WHERE state IN ('PROVISIONING', 'ACTIVE') AND (vmid IS NULL
+  OR cluster_id IS NULL)`.
+  - **With a vmid:** find the guest by its tag `br0kr-lease-<id>`. Set the cluster it is on, which may not be its
+    node's current one: `UPDATE lease SET cluster_id = '<that cluster>' WHERE id = <id>`. If that cluster was
+    deleted, add it back first. A wrong cluster lets a migration confirm a guest that never moved.
+  - **Without a vmid:** no guest was built. Release it:
+    `UPDATE lease SET state = 'RELEASING', releasing_at = now() WHERE id = <id>`; the reaper settles it.
+  - Then run `deploy.sh` again.
 - **Verify:**
   - `deploy.sh` ends with `deploy: OK` and `docker compose ps`;
   - the schema version is the release's newest migration;
@@ -122,6 +133,7 @@ full rollback, extract the previous release's archive first, so the compose file
 | 0049 | `lease.pinned`, `project.max_pinned` | **does not know pins.** Its reaper expires every pinned lease whose `expires_at` has passed on its first tick, and destroys its VM. Before rolling back past 0049, unpin every pinned lease (unpinning restarts its TTL); while the old image runs, those leases need a heartbeat like any other |
 | 0050 | the `lease_admitted_at` and `lease_active_at` partial indexes | is unaffected: it computes the same fleet stats in its single pass over `lease`, without them |
 | 0051 | `lease.releasing_at` (when a lease stopped holding its ask) | does not stamp it: the leases it releases get none, so the usage report counts them as unmeasured, after you upgrade again too |
+| 0052 | CHECK `lease_live_has_vmid`: a PROVISIONING or ACTIVE lease has its vmid and cluster | writes both on every live lease, as this image does. Its cluster delete does not pre-check leases: under an unfinished lease it fails with a 503 (the CHECK) instead of taking the lease's cluster. Finish the cluster's leases first |
 
 Every new migration adds a row here (`tests/unit/test_day2_runbook.py` fails until it does). Rolling back further
 than one release, or undoing what a migration did to the data, means [restoring](#restore-the-ledger-from-a-dump)

@@ -50,8 +50,8 @@ def seed(cur: psycopg.Cursor) -> int:
     cur.execute("INSERT INTO template(id,cluster_id,vmid,public) VALUES ('tA','clA',9000,true)")
     # a real lease so the migration saga insert's lease_id + source_node FKs are satisfiable (only the TARGET
     # node FK should fire in that case).
-    row = cur.execute("INSERT INTO lease(idem_key,node_id,req_cpu,req_mem_mb,state,ttl_seconds,vmid) "
-                      "VALUES ('seed-active','nA',1,1024,'ACTIVE',900,5000) RETURNING id").fetchone()
+    row = cur.execute("INSERT INTO lease(idem_key,node_id,cluster_id,req_cpu,req_mem_mb,state,ttl_seconds,vmid) "
+                      "VALUES ('seed-active','nA','clA',1,1024,'ACTIVE',900,5000) RETURNING id").fetchone()
     return int(row[0])
 
 

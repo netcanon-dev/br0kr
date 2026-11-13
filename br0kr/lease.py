@@ -77,6 +77,9 @@ _LIVE_SQL = "(" + ",".join(f"'{s}'" for s in LIVE_STATES) + ")"
 RENEWABLE_STATES: tuple[str, ...] = (*LIVE_STATES, "PENDING")
 _RENEWABLE_SQL = "(" + ",".join(f"'{s}'" for s in RENEWABLE_STATES) + ")"
 
+# The CHECK constraint (0052, review REL-07) that a PROVISIONING or ACTIVE lease has a vmid and a cluster.
+LIVE_LEASE_CHECK = "lease_live_has_vmid"
+
 # Reserved idem_key namespace for cross-cluster MIGRATION reservation leases (br0kr/migration.py).
 # A reservation is a REAL lease (so it debits the target node race-free through admit()), but it is
 # pure bookkeeping — it never has a guest to provision; the migration saga settles it once the lease
@@ -243,9 +246,10 @@ def begin_provisioning(
 
     Returns ``True`` if this caller won. ``False`` means the lease left ADMITTED first — almost always
     because the reaper expired it (ADMITTED is LIVE, so a slow pickup past TTL is reapable) — and the
-    reconciler must NOT provision a guest for a lease that is already being torn down. Also refreshes the
-    deadline so the provisioning window starts at pickup, not at admission, and stamps ``provisioning_at``
-    (0048), the start of the bounded PROVISIONING budget `claim_provisioning_stale` enforces.
+    reconciler must NOT provision a guest for a lease that is already being torn down. ``False`` also means the
+    lease's node has no cluster (CHECK ``lease_live_has_vmid``, 0052): the lease stays ADMITTED, nothing is built.
+    Also refreshes the deadline so the provisioning window starts at pickup, not at admission, and stamps
+    ``provisioning_at`` (0048), the start of the bounded PROVISIONING budget `claim_provisioning_stale` enforces.
 
     Raises ``VmidContended`` if the vmid is already held by another LIVE lease in the cluster (the unique
     index `lease_cluster_vmid_uniq`, migration 0004, rejects the double-stamp): the failed UPDATE changes
@@ -272,6 +276,18 @@ def begin_provisioning(
         raise VmidContended(
             f"vmid {vmid} is already held by another live lease in lease {lease_id}'s cluster"
         ) from exc
+    except psycopg.errors.CheckViolation as exc:
+        # CHECK lease_live_has_vmid (0052, review REL-07): the lease's node has no cluster, so it cannot go live.
+        # Fail closed and say why once per attempt, no stack: the lease stays ADMITTED and no guest is built (the
+        # caller reads False as "not provisioned"). set_node and delete_cluster refuse to take a cluster from a node
+        # with unfinished leases, so this needs a lease admitted onto a node demoted while it had none, picked up
+        # by a daemon whose node registry has not reloaded yet. Any other CHECK is not this case: re-raise it.
+        conn.rollback()
+        if exc.diag.constraint_name != LIVE_LEASE_CHECK:
+            raise
+        log.warning("lease %s not provisioned: its node has no cluster (CHECK lease_live_has_vmid)", lease_id,
+                    extra={"lease_id": lease_id})
+        return False
     conn.commit()
     return row is not None
 

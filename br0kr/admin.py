@@ -416,7 +416,10 @@ def set_node(
     pass a non-null value to (re)set it. A `pve_node` that isn't a bare hostname is `invalid_pve_node`. Unknown
     cluster → `unknown_cluster`; no such node → `unknown_node`. A cluster REPOINT (cluster_id changing) while the
     node hosts live template_instance rows is refused `node_has_instances` — retire/rebind them first (else their
-    cluster binding would drift; see the inline note)."""
+    cluster binding would drift; see the inline note) — and while it holds an unfinished lease (queued, live or
+    releasing) it is refused `node_has_live_leases` (review REL-07): the lease's guest and vmid belong to the old
+    cluster, and a lease provisioned after the repoint would take the new one. Giving a cluster-less node its first
+    cluster is allowed (it holds no guest)."""
     if pve_node is not None and not valid_pve_node(pve_node):
         return {"node_id": node_id, "updated": False, "reason": "invalid_pve_node"}
     if cluster_id is not None and not _exists(conn, "cluster", cluster_id):
@@ -433,6 +436,17 @@ def set_node(
         return {"node_id": node_id, "updated": False, "reason": "unknown_node"}
     if cluster_id != noderow[0] and _node_has_live_instances(conn, node_id):
         return {"node_id": node_id, "updated": False, "reason": "node_has_instances"}
+    # The same drift for a lease (review REL-07): a live lease's guest, vmid and fence live in the node's CURRENT
+    # cluster, so a repoint would leave its teardown and its vmid uniqueness (0004, keyed on the lease's cluster)
+    # pointing at the wrong one; and a queued or admitted lease on this node would be provisioned into the NEW
+    # cluster after the fact. Refused for any unfinished lease, the predicate delete_node uses. Giving a
+    # cluster-less node its FIRST cluster is allowed: a capacity-only node is never provisioned, so it holds no guest
+    # and its admitted leases simply become provisionable. (Check-then-update without a lock: an admit racing the
+    # repoint can land in the window; the CHECK still keeps every live lease's vmid and cluster present.)
+    if cluster_id != noderow[0] and noderow[0] is not None and conn.execute(
+            f"SELECT 1 FROM lease WHERE node_id = %s AND state NOT IN {_TERMINAL_IN} LIMIT 1",
+            (node_id,)).fetchone() is not None:
+        return {"node_id": node_id, "updated": False, "reason": "node_has_live_leases"}
     row = conn.execute(
         "UPDATE node SET cpu_total=%s, mem_total_mb=%s, cluster_id=%s, "
         "pve_node=COALESCE(%s, pve_node) WHERE id=%s RETURNING id",
@@ -562,12 +576,15 @@ def set_cluster(
 
 def delete_cluster(conn: psycopg.Connection[Any], cluster_id: str) -> dict[str, Any]:
     """Delete a cluster. Its nodes are DEMOTED to capacity-only (node.cluster_id ON DELETE SET NULL) and its
-    leases ungoverned-of-cluster (lease.cluster_id ON DELETE SET NULL). Its TEMPLATES would CASCADE away
-    (template.cluster_id ON DELETE CASCADE, 0012) — BUT `lease.template_id` is a NO ACTION FK (0013), so if
-    any lease (live OR terminal history) references a template on this cluster, that cascade can't drop the
-    template and the whole delete would FK-abort. We PRE-CHECK that into a crisp `cluster_in_use` (mirroring
-    delete_node/storage/template's `*_in_use`) rather than surfacing an opaque 503; the cluster's templated
-    lease history must be purged first. No such cluster → `unknown_cluster`.
+    FINISHED leases keep their history minus the cluster (lease.cluster_id ON DELETE SET NULL). An unfinished lease
+    (queued, live or releasing) stamped with the cluster or on one of its nodes refuses the delete
+    `cluster_has_live_leases` (review REL-07): its guest and vmid live in this cluster, and a live lease must keep
+    its cluster (CHECK lease_live_has_vmid, 0052), so the SET NULL would otherwise fail as a raw error. Its
+    TEMPLATES would CASCADE away (template.cluster_id ON DELETE CASCADE, 0012) — BUT `lease.template_id` is a NO
+    ACTION FK (0013), so if any lease (live OR terminal history) references a template on this cluster, that
+    cascade can't drop the template and the whole delete would FK-abort. We PRE-CHECK that into a crisp
+    `cluster_in_use` (mirroring delete_node/storage/template's `*_in_use`) rather than surfacing an opaque 503; the
+    cluster's templated lease history must be purged first. No such cluster → `unknown_cluster`.
 
     The DECOMMISSION RECIPE (the template-reachability arc, §3.4): a cluster also owns `template_instance` rows
     (0032, cluster_id NO ACTION) and `template_replication` jobs (0034, target_cluster_id NO ACTION) whose FKs
@@ -577,7 +594,8 @@ def delete_cluster(conn: psycopg.Connection[Any], cluster_id: str) -> dict[str, 
     then `delete_template_instance(force=True)` each instance (force severs its TERMINAL lease history; a live
     lease still blocks; a job's `source_instance_id` also auto-nulls, ON DELETE SET NULL) → `cancel_replication`
     any non-terminal job, then `prune_replications(cluster_id=…, older_than_days=0)` the settled terminal ones (0
-    = prune now — a cancelled job is guest-free by its settle stamp) → `delete_cluster`. ONE step is NOT a verb:
+    = prune now — a cancelled job is guest-free by its settle stamp) → release, cancel or migrate away every
+    unfinished lease on the cluster and wait for it to finish → `delete_cluster`. ONE step is NOT a verb:
     `cluster_in_use` refuses on ANY lease (live OR terminal history) referencing a template on the cluster via
     `lease.template_id`, and NOTHING severs that FK (delete_template has no force — 'purge the history first', its
     own out-of-scope retention note); so the final `delete_cluster` still requires the cluster's templated lease
@@ -589,6 +607,12 @@ def delete_cluster(conn: psycopg.Connection[Any], cluster_id: str) -> dict[str, 
     if conn.execute("SELECT 1 FROM template_replication WHERE target_cluster_id = %s LIMIT 1",
                     (cluster_id,)).fetchone() is not None:
         return {"cluster_id": cluster_id, "deleted": False, "reason": "cluster_has_replications"}
+    if conn.execute(
+        f"SELECT 1 FROM lease WHERE state NOT IN {_TERMINAL_IN} "
+        "AND (cluster_id = %s OR node_id IN (SELECT id FROM node WHERE cluster_id = %s)) LIMIT 1",
+        (cluster_id, cluster_id),
+    ).fetchone() is not None:
+        return {"cluster_id": cluster_id, "deleted": False, "reason": "cluster_has_live_leases"}
     if conn.execute(
         "SELECT 1 FROM lease l JOIN template t ON t.id = l.template_id WHERE t.cluster_id = %s LIMIT 1",
         (cluster_id,),
