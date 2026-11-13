@@ -368,3 +368,25 @@ def test_begin_provisioning_turns_a_vmid_collision_into_vmid_contended():
     assert conn.rollbacks == 1 and conn.commits == 0
     with pytest.raises(psycopg.OperationalError):
         lease.begin_provisioning(_CasConn(raises=psycopg.OperationalError("connection lost")), 7, 9901, "lease-7")
+
+
+def test_every_statement_that_starts_a_release_stamps_releasing_at():
+    """Every `UPDATE lease` in br0kr/ whose SET clause moves the lease to RELEASING (`state = 'RELEASING'` anywhere
+    in the SET, any spacing or case) also stamps `releasing_at = now()` there (0051), and there are exactly three
+    such statements: release, claim_expired and claim_provisioning_stale. Guards a new or edited release path
+    leaving releasing_at NULL: the usage report would count that lease as unmeasured, and its hours would silently
+    drop out of every project's total (review FEAT-06). A fourth release statement fails the count until it is
+    reviewed and added here."""
+    import re
+    from pathlib import Path
+    root = Path(lease.__file__).resolve().parent
+    # the SET clause ends at the first WHERE/FROM/RETURNING, even one right after a Python string-literal join
+    update = re.compile(r"UPDATE\s+lease\b(?:\s+\w+)?\s+SET\s+(.*?)(?<![\w.])(?:WHERE|FROM|RETURNING)\b", re.I)
+    releasing = re.compile(r"\bstate\s*=\s*'RELEASING'", re.I)
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        flat = " ".join(path.read_text(encoding="utf-8").split())
+        found += [(path.name, m.group(1)) for m in update.finditer(flat) if releasing.search(m.group(1))]
+    assert [name for name, _set in found] == ["lease.py"] * 3, found
+    missing = [(name, s) for name, s in found if not re.search(r"\breleasing_at\s*=\s*now\(\)", s, re.I)]
+    assert not missing, missing

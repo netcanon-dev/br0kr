@@ -29,6 +29,7 @@ operator tools need an operator token. A tenant token always acts on its own pro
 | [`migration_status`](#migration_status) | read | all gateways | Watch a cross-cluster MIGRATION of one of YOUR leases progress (REQUESTED → RESERVED → MIGRATING → DONE/ABORTED). |
 | [`node_capacity`](#node_capacity) | read | all gateways | Current free capacity on a node (cpu + mem, derived live) so you can size a request before making it. |
 | [`project_capacity`](#project_capacity) | read | all gateways | Remaining tenant budget for YOUR project (cpu + mem + how many more leases it may hold, derived live) so you can check your quota before requesting. |
+| [`project_usage`](#project_usage) | read | all gateways | Report YOUR project's usage over a window: leases that held capacity in it, and their lease-hours, cpu-hours and memory GiB-hours inside it. |
 | [`queue_status`](#queue_status) | read | all gateways | Check a QUEUED lease: its state and how many requests are AHEAD of it in line (its GLOBAL position across the whole queue). |
 | [`queue_view`](#queue_view) | read | all gateways | View YOUR project's admission queue: depth plus the oldest-first head of your waiting requests (up to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's target node has been cordoned (it won't promote until an operator uncordons it or you cancel and re-request elsewhere), else null (a null with room still waiting is transient — it will promote). |
 | [`replication_status`](#replication_status) | read | all gateways | Status of a replication job: its state (REQUESTED → COPYING → CONVERTING → READY \| FAILED), mechanism, attempts, any (pre-redacted) error, the target (cluster/storage), the declared size, `replication_enabled` (whether the data plane is advancing jobs yet), and `age_seconds`. |
@@ -138,6 +139,13 @@ Tier **read**, served by all gateways. Current free capacity on a node (cpu + me
 Tier **read**, served by all gateways. Remaining tenant budget for YOUR project (cpu + mem + how many more leases it may hold, derived live) so you can check your quota before requesting.
 
 - `project_id` (string | null, default `null`)
+
+### project_usage
+
+Tier **read**, served by all gateways. Report YOUR project's usage over a window: leases that held capacity in it, and their lease-hours, cpu-hours and memory GiB-hours inside it.
+
+- `since` (string | null, default `null`)
+- `until` (string | null, default `null`)
 
 ### queue_status
 
@@ -425,6 +433,7 @@ missing or wrong one is 401. Setup: [docker-deploy.md §3](runbooks/docker-deplo
 | `/api/template/sources` | operator |
 | `/api/templates` | read |
 | `/api/tokens` | operator |
+| `/api/usage` | operator |
 | `/api/whoami` | open |
 | `/healthz` | open |
 | `/assets/<version>/…` | open (the page's CSS and JS: the vendored UI files and the client script) |

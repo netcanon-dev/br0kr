@@ -208,6 +208,12 @@ These arrive as `{"error": "<code>"}`: the call itself was refused before it did
 | `source_not_allowed` | request_template_download `reason` (requested=false); also the operator build request. | The url is not https on an allowlisted host under an allowlisted path prefix, or it contains whitespace or control characters. | Fix the ask: use an https url under an operator-allowlisted source; ask the operator for the prefixes or to add yours. | Vet the source, then add its prefix with create_template_source (/api/template/source/create). |
 | `storage_undeclared` | request_template_download `reason` (requested=false); also the operator build request, and a build fails with it at actuation. | No storage row in cluster_id has that effective PVE name (pve_name, else id), so the pool is unmodeled. | Fix the ask: use a pve_name that list_storage shows for this cluster_id. | Create the pool bound to the cluster (/api/storage/create with cluster_id), then declare import and images (/api/storage/content). |
 
+### The usage report (project_usage)
+
+| Code | Where | Meaning | Agent | Operator |
+|---|---|---|---|---|
+| `invalid_window` | `project_usage` (`error`); the dashboard's /api/usage answers it with HTTP 400. | since or until is not an ISO 8601 date or date-time, or falls outside the years 1 to 9999 once a date is widened to its whole day, or since is not before until (a since in the future with no until is one: until defaults to now). | Fix the ask: send since and until as dates (2026-10-01) or date-times (2026-10-01T00:00:00Z) with since before until, or omit them: until defaults to now and since to 30 days before until. | None. |
+
 ### Operator tools
 
 Answered to an operator token; listed because they share the request path's modules.

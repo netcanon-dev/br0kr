@@ -177,6 +177,12 @@ _SHELL = """<!doctype html>
   <section id="projects-sec"><h2>Projects (tenant allowances)</h2><div class="cards" id="projects"></div></section>
   <section id="leases-sec"><h2>Active leases</h2><div id="leases"></div></section>
   <section id="queue-sec"><h2>Admission queue</h2><div id="queue"></div></section>
+  <section id="usage-sec" style="display:none"><h2>Usage by project (operator)</h2>
+    <div class="toolbar"><label>Window <select id="usage-window" data-change="loadUsage(true)">
+      <option value="7">last 7 days</option><option value="30" selected>last 30 days</option>
+      <option value="90">last 90 days</option><option value="month">this month</option>
+      <option value="last-month">last month</option></select></label></div>
+    <div id="usage"></div></section>
   </div>
   <div class="tabpanel" role="tabpanel" id="panel-images" aria-labelledby="tab-images" data-tab="images">
   <section id="templates-sec"><h2>OS templates (catalog)</h2><div id="templates"></div></section>

@@ -151,6 +151,9 @@ INVALID_SHA256: Final = "invalid_sha256"
 SOURCE_NOT_ALLOWED: Final = "source_not_allowed"
 STORAGE_UNDECLARED: Final = "storage_undeclared"
 
+# ── The usage report (project_usage) ────────────────────────────────────────────────────────────────────────────
+INVALID_WINDOW: Final = "invalid_window"
+
 # ── Operator verbs that share these modules ─────────────────────────────────────────────────────────────────────
 ALREADY_TERMINAL: Final = "already_terminal"
 ACL_INSUFFICIENT: Final = "acl_insufficient"

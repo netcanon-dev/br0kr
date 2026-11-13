@@ -429,10 +429,11 @@ def release(conn: psycopg.Connection[Any], lease_id: int, reason: str = "complet
     Returns ``True`` if THIS call initiated the release, ``False`` if the lease was
     already releasing/released/expired (idempotent — a double release, or a release
     racing the reaper's expiry, is a safe no-op). The reaper (br0kr/reaper.py) then
-    destroys the guest and finishes with `mark_released`.
+    destroys the guest and finishes with `mark_released`. The same CAS stamps ``releasing_at``
+    (0051), the end of the tenant's hold that inventory.project_usage reads.
     """
     row = conn.execute(
-        f"""UPDATE lease SET state = 'RELEASING', released_reason = %s
+        f"""UPDATE lease SET state = 'RELEASING', released_reason = %s, releasing_at = now()
              WHERE id = %s AND state IN {_LIVE_SQL}
          RETURNING id""",
         (reason, lease_id),
@@ -452,9 +453,9 @@ def claim_expired(conn: psycopg.Connection[Any], limit: int = 100) -> list[Claim
     """Reaper, step 1: atomically claim LIVE leases whose deadline has passed,
     flipping each to RELEASING(expired) and returning them.
 
-    One statement, so there is no claim-then-update window. ``FOR UPDATE SKIP
-    LOCKED`` lets many reaper instances run at once without claiming the same lease
-    twice or blocking one another. A lease renewed since the scan has ``expires_at``
+    One statement, so there is no claim-then-update window; it stamps ``releasing_at`` (0051) as
+    `release` does. ``FOR UPDATE SKIP LOCKED`` lets many reaper instances run at once without claiming
+    the same lease twice or blocking one another. A lease renewed since the scan has ``expires_at``
     in the future and is simply not matched — the heartbeat wins. A PINNED lease (0049) is
     never matched, whatever its expires_at: pinning exempts it from this step only. The actual guest
     teardown is then driven by `claim_releasing` (a freshly-expired lease has
@@ -468,7 +469,7 @@ def claim_expired(conn: psycopg.Connection[Any], limit: int = 100) -> list[Claim
                  FOR UPDATE SKIP LOCKED
                  LIMIT %s)
             UPDATE lease l
-               SET state = 'RELEASING', released_reason = 'expired'
+               SET state = 'RELEASING', released_reason = 'expired', releasing_at = now()
               FROM due WHERE l.id = due.id
           RETURNING l.id, l.node_id, l.vmid, l.name, l.release_attempts""",
         (limit,),
@@ -494,7 +495,8 @@ PROVISION_STUCK_SECONDS = 1200
 def claim_provisioning_stale(conn: psycopg.Connection[Any], budget_seconds: int,
                              limit: int = 100) -> list[ClaimedLease]:
     """Reaper step (0048, review REL-01): claim PROVISIONING leases that entered PROVISIONING more than
-    ``budget_seconds`` ago, flipping each to RELEASING(released_reason = 'provision_stuck') and returning them.
+    ``budget_seconds`` ago, flipping each to RELEASING(released_reason = 'provision_stuck') and returning them
+    (stamping ``releasing_at``, 0051, as `release` does).
 
     Nothing else revisits a PROVISIONING lease: the provisioner leaves one there on purpose when its clone or
     create task outlives the wait budget, and one also stays there when mark_active raises and the hand-off
@@ -519,7 +521,7 @@ def claim_provisioning_stale(conn: psycopg.Connection[Any], budget_seconds: int,
                  FOR UPDATE SKIP LOCKED
                  LIMIT %s)
             UPDATE lease l
-               SET state = 'RELEASING', released_reason = 'provision_stuck'
+               SET state = 'RELEASING', released_reason = 'provision_stuck', releasing_at = now()
               FROM due WHERE l.id = due.id
           RETURNING l.id, l.node_id, l.vmid, l.name, l.release_attempts""",
         (budget_seconds, limit),

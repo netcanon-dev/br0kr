@@ -478,12 +478,13 @@ def test_list_leases_scopes_to_the_tokens_project(monkeypatch):
 @pytest.mark.parametrize(("tool", "reader", "args", "answer"), [
     ("list_projects", "list_projects", {}, []),
     ("queue_view", "queue_view", {"limit": 5}, {"depth": 0}),
+    ("project_usage", "project_usage", {"since": "2026-10-01"}, {"projects": []}),
 ])
 def test_project_scoped_reads_pass_only_the_tokens_project(monkeypatch, tool, reader, args, answer):
-    """list_projects and queue_view pass the token's bound project to their inventory reader, so a tenant sees only
-    its own quota and its own queue, while an operator token (project None) gets the cross-tenant view. Guards the
-    leak a registry row makes easy, since the inventory readers take project_id=None to mean every tenant: dropping
-    either row's TENANT scope passed every test before this one."""
+    """list_projects, queue_view and project_usage pass the token's bound project to their inventory reader, so a
+    tenant sees only its own quota, queue and usage, while an operator token (project None) gets the cross-tenant
+    view. Guards the leak a registry row makes easy, since the inventory readers take project_id=None to mean every
+    tenant: dropping a row's TENANT scope passed every test before this one."""
     monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     seen: dict = {}
     monkeypatch.setattr(inventory, reader, lambda c, **kw: seen.update(kw) or answer)
@@ -1494,11 +1495,13 @@ def test_every_operator_only_tool_is_collected_and_kept_short():
 
 def test_tenant_tool_descriptions_stay_within_a_context_budget():
     """The descriptions a tenant agent receives from tools/list (every tool but the operator-only ones) total
-    under 25,000 characters. Guards the tenant surface creeping back toward the size it had before UX-02,
-    when operator-only text made up a large share of every tenant agent's context."""
+    under 25,550 characters. Guards the tenant surface creeping back toward the size it had before UX-02,
+    when operator-only text made up a large share of every tenant agent's context. The budget was 25,000 and
+    the surface stood 13 characters under it; it rose by 550 for project_usage's 526-character description
+    (review FEAT-06). A new tenant tool is the only reason to raise it, and only by that tool's text."""
     collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
     tenant = {n: t for n, t in _descriptions(mcp_server.mcp).items() if n not in collected}
-    assert sum(map(len, tenant.values())) < 25_000, sum(map(len, tenant.values()))
+    assert sum(map(len, tenant.values())) < 25_550, sum(map(len, tenant.values()))
 
 
 def test_pin_lease_is_operator_gated_forwards_and_commits_before_auditing(monkeypatch):

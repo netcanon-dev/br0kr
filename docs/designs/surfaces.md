@@ -71,8 +71,9 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   are the same-origin vendored UI-spec files from `br0kr/ui_assets.py` — no third-party origin) +
   JSON endpoints — read-only, **unauthenticated plain HTTP on a trusted network** (SECURITY.md C3), never
   exposing a secret or the clusters' connection config. The same aggregate reads are also agent-facing MCP
-  tools (`list_nodes`/`list_clusters`/`list_storage`/`list_projects`/`list_leases`/`queue_view`). Shapers unit-tested,
-  the socket integration-tested, the SQL proven on real Postgres (`scripts/harness_inventory.py`).
+  tools (`list_nodes`/`list_clusters`/`list_storage`/`list_projects`/`list_leases`/`queue_view`/
+  `project_usage`). Shapers unit-tested, the socket integration-tested, the SQL proven on real Postgres
+  (`scripts/harness_inventory.py`, `scripts/harness_usage.py`).
   Every successful write on BOTH surfaces (the dashboard POSTs + the MCP write verbs) is appended to an
   **append-only audit trail** (`br0kr/audit.py`, migration `0023` `operator_audit`) — a best-effort,
   never-breaks-the-action "who did what" log (dashboard = the RESOLVED operator identity — a NAMED dashboard

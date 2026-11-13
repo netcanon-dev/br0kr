@@ -402,6 +402,14 @@ Inventory YOUR project (tenant): cpu/mem/lease quota vs live usage, plus your cu
 admission-queue depth. Scoped to your token's project — a PROJECT-BOUND token never sees other tenants;
 an OPERATOR token (not project-bound) gets the cross-tenant view (every project). Returns {projects: [...]}
 (one entry for a tenant token, all for an operator). Requires a read-tier (or higher) token."""),
+    Verb("project_usage", "read", None, LOOKUP, "inventory.project_usage", scope=TENANT,
+         params=(Param("since", str | None, None), Param("until", str | None, None)),
+         doc="""\
+Report YOUR project's usage over a window: leases that held capacity in it, and their lease-hours, cpu-hours
+and memory GiB-hours inside it. since/until: ISO 8601 dates or date-times, UTC unless an offset is given; a
+date as until includes that day; until defaults to now, since to 30 days before it. unmeasured_leases have no
+recorded release time and add no hours. An OPERATOR token sees every project. Returns {since, until,
+projects, totals}; a bad window is refused invalid_window. Requires a read-tier (or higher) token."""),
     Verb("list_templates", "read", None, LOOKUP, "inventory.list_templates",
          wrap="templates", scope=TENANT,
          doc="""\

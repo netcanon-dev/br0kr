@@ -46,6 +46,8 @@ Beyond that list: /healthz answers 503 when the ledger is unreachable; a strip o
 is null plus `<key>_error`; /api/audit filters on surface, actor, action, project_id, target, outcome,
 actor_token_id, since and until (`_audit_filters`) and pages with ?before_id= set to the previous answer's
 next_before_id; /api/audit/export takes the same filters and ?format=csv|json, capped at audit.EXPORT_CAP rows.
+/api/usage takes ?since= and ?until= (inventory.usage_window: ISO dates or date-times, default the last 30 days)
+and answers a bad window with 400 invalid_window.
 """
 from __future__ import annotations
 
@@ -116,6 +118,7 @@ _ROUTES: dict[str, str] = {
     "/api/settings": "settings",
     "/api/audit": "audit",
     "/api/audit/export": "audit_export",
+    "/api/usage": "usage",
 }
 # The page's static files, each routed to the "asset" tag and served OPEN like the page shell (static chrome, no
 # data) with immutable caching: the vendored UI-spec files (br0kr/ui_assets.py, at version-pinned /assets/<tag>/
@@ -136,7 +139,7 @@ GET_ACCESS: dict[str, str] = {
     "lease_status": "read", "queue": "read", "migrations": "read", "fleet": "read", "ledger": "read",
     "tokens": "operator", "operators": "operator", "grants": "operator", "sources": "operator",
     "builds": "operator", "settings": "operator", "audit": "operator", "audit_export": "operator",
-    "dismissals": "operator",
+    "dismissals": "operator", "usage": "operator",
 }
 
 # tag → (connection → JSON-able dict). Each references the inventory function at CALL time (not bound at
@@ -445,6 +448,8 @@ def make_handler(
                 self._gated("audit", lambda c: _audit_page(c, filters))
             elif tag == "audit_export":
                 self._audit_export()
+            elif tag == "usage":
+                self._usage()
             elif tag == "lease_status":
                 self._lease_status()
             else:
@@ -668,6 +673,36 @@ def make_handler(
                 self._json(503, {"error": "query_failed"})
             else:
                 self._json(200, data)
+            finally:
+                with contextlib.suppress(Exception):
+                    release(conn)
+
+        def _usage(self) -> None:
+            """Operator-gated usage per project over a window (review FEAT-06): inventory.project_usage, every
+            project's lease-hours, cpu-hours and memory GiB-hours, ?since=&until=. Who used what is tenant
+            accounting, so the SAME operator gate as /api/audit, checked BEFORE the ledger is touched. A bad
+            window is a 400 (the reason is the answer's error); a read failure degrades to 503, never a 500."""
+            verdict = self._operator()[0]   # env token OR a named operator (0026) → 'ok' + attribution ignored here
+            if verdict != "ok":
+                self._deny(verdict, self.path.split("?", 1)[0])
+                return
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            since, until = q.get("since", [""])[0], q.get("until", [""])[0]
+            try:
+                conn = connect()
+            except Exception:
+                log.warning("dashboard: ledger connect failed (usage)", exc_info=True)
+                self._json(503, {"error": "ledger_unreachable"})
+                return
+            try:
+                data = inventory.project_usage(conn, since=since, until=until)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    conn.rollback()
+                log.warning("dashboard: usage read failed", exc_info=True)
+                self._json(503, {"error": "query_failed"})
+            else:
+                self._json(400 if "error" in data else 200, data)
             finally:
                 with contextlib.suppress(Exception):
                     release(conn)

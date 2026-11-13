@@ -7,7 +7,8 @@ project_headroom). An operator (or a dashboard) had no way to ask "show me the W
 knowing every id up front. This module adds the missing aggregate verbs: `list_nodes`, `list_clusters`,
 `list_storage`, `list_projects`, `queue_view`, `list_leases` (the ACTIVE leases holding capacity — what
 makes operator cancel/migrate of a LIVE lease driveable), and an `overview` that bundles them for one round
-trip.
+trip. `project_usage` answers "who used what": lease-hours, cpu-hours and memory GiB-hours per project over a
+window, from each lease's admitted_at and releasing_at (review FEAT-06).
 
 It is the data layer behind br0kr/dashboard.py (the read-only web GUI) and the agent-facing MCP
 `list_*` tools (br0kr/mcp_server.py). It writes nothing and locks nothing — these are pure inventory
@@ -27,6 +28,7 @@ scripts/harness_inventory.py):
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from typing import Any
 
@@ -747,3 +749,131 @@ def overview(conn: psycopg.Connection[Any], *, queue_limit: int = 100) -> dict[s
         "migrations": list_migrations(conn),
         "replications": replication.list_replications(conn),
     }
+
+
+# ── Usage per project (review FEAT-06) ─────────────────────────────────────────────────────────────────────────
+# Lease-hours, cpu-hours and memory GiB-hours per project over a window, from each lease's held interval: from
+# admitted_at (0019) to releasing_at (0051), or to now for a lease still live. A lease counts in a window by the
+# part of that interval inside it. Read-only and lock-free like every read here; nothing it returns gates admission.
+USAGE_DEFAULT_DAYS = 30
+
+# The states a lease is in only after it held its ask: every state but the queue's two. PENDING never held capacity
+# and REJECTED ends a lease that never did, so neither ever counts (tests/unit/test_inventory.py pins this to the
+# states reachable from ADMITTED).
+_HELD_STATES: tuple[str, ...] = tuple(s for s in lease.VALID_TRANSITIONS if s not in ("PENDING", "REJECTED"))
+_HELD_SQL = "(" + ",".join(f"'{s}'" for s in _HELD_STATES) + ")"
+
+# Internal reservations (a migration's or a replication's placeholder lease, lease.RESERVED_IDEM_PREFIXES) hold
+# capacity for the broker, not for a tenant, so they are never usage: a migration's would count the migrating lease a
+# second time, and they are settled straight to RELEASED (no reaper, so no reclaim_at), which would leave one settled
+# before 0051 unmeasured in every window. Named params, since the usage query uses %(name)s placeholders.
+_USAGE_RESERVED: dict[str, str] = {f"reserved{i}": p + "%" for i, p in enumerate(lease.RESERVED_IDEM_PREFIXES)}
+_USAGE_NOT_RESERVED = ("(l.idem_key IS NULL OR ("
+                       + " AND ".join(f"l.idem_key NOT LIKE %({k})s" for k in _USAGE_RESERVED) + "))")
+
+# `measured`: the held interval is known, its start stamped and its end stamped or still running. A lease that left
+# the live states before 0051 (or under an image from before it) has no releasing_at, so its hours are unknown: it
+# is counted in unmeasured_leases when it may overlap the window, using reclaim_at as an upper bound on its end (the
+# reaper stamps it only on a RELEASING lease). A lease from before 0019 has no admitted_at and is the same.
+_USAGE_TMPL = f"""
+  WITH held AS (
+    SELECT l.project_id, l.req_cpu, l.req_mem_mb,
+           (l.admitted_at IS NOT NULL AND (l.releasing_at IS NOT NULL OR l.state IN {_LIVE_SQL})) AS measured,
+           EXTRACT(EPOCH FROM LEAST(COALESCE(l.releasing_at, %(now)s), %(until)s)
+                              - GREATEST(l.admitted_at, %(since)s)) AS secs
+      FROM lease l
+     WHERE l.state IN {_HELD_SQL} AND {_USAGE_NOT_RESERVED}
+       AND COALESCE(l.admitted_at, l.created_at) < %(until)s
+       AND COALESCE(l.releasing_at, l.reclaim_at, 'infinity') > %(since)s
+       {{extra}})
+  SELECT project_id,
+         count(*) FILTER (WHERE measured AND secs > 0),
+         COALESCE(sum(secs) FILTER (WHERE measured AND secs > 0), 0) / 3600,
+         COALESCE(sum(req_cpu * secs) FILTER (WHERE measured AND secs > 0), 0) / 3600,
+         COALESCE(sum(req_mem_mb * secs) FILTER (WHERE measured AND secs > 0), 0) / 3600 / 1024,
+         count(*) FILTER (WHERE NOT measured)
+    FROM held GROUP BY project_id
+"""
+_USAGE = _USAGE_TMPL.format(extra="")
+_USAGE_PROJECT = _USAGE_TMPL.format(extra="AND l.project_id = %(project)s")
+
+
+def _usage_bound(s: str, *, end: bool) -> dt.datetime:
+    """One window bound: a date (2026-10-01) is that day's midnight UTC, or the next day's for the upper bound, so
+    until=2026-10-31 includes all of the 31st; a date-time without an offset is UTC. Raises ValueError."""
+    try:
+        day = dt.date.fromisoformat(s)
+    except ValueError:
+        d = dt.datetime.fromisoformat(s)
+        return d if d.tzinfo is not None else d.replace(tzinfo=dt.UTC)
+    start = dt.datetime(day.year, day.month, day.day, tzinfo=dt.UTC)
+    return start + dt.timedelta(days=1) if end else start
+
+
+def usage_window(since: str | None, until: str | None, now: dt.datetime) -> tuple[dt.datetime, dt.datetime] | None:
+    """The half-open window [since, until) a usage report covers, or None when it is invalid (a bound that is not
+    an ISO 8601 date or date-time, or since not before until). until defaults to `now`, since to USAGE_DEFAULT_DAYS
+    before until; an empty string is the default. Pure."""
+    try:
+        end = _usage_bound(until.strip(), end=True) if until and until.strip() else now
+        start = (_usage_bound(since.strip(), end=False) if since and since.strip()
+                 else end - dt.timedelta(days=USAGE_DEFAULT_DAYS))
+    except (ValueError, OverflowError):
+        return None
+    return (start, end) if start < end else None
+
+
+def _usage_entry(project_id: str | None, sums: tuple[Any, ...]) -> dict[str, Any]:
+    leases, lease_h, cpu_h, mem_h, unmeasured = sums
+    return {"project_id": project_id, "leases": int(leases), "lease_hours": round(float(lease_h), 3),
+            "cpu_hours": round(float(cpu_h), 3), "mem_gb_hours": round(float(mem_h), 3),
+            "unmeasured_leases": int(unmeasured)}
+
+
+def _usage_report(start: dt.datetime, end: dt.datetime, project_ids: list[str],
+                  rows: list[tuple[Any, ...]], *, every_project: bool) -> dict[str, Any]:
+    """Shape the report: one entry per project in `project_ids` (zeros for one with no usage), then, for the
+    every-project view, one per other project_id the rows hold (None: leases with no project, made before tenancy
+    or kept when their project was deleted), so the totals add up. The totals sum the unrounded figures. Pure."""
+    zero: tuple[Any, ...] = (0, 0, 0, 0, 0)
+    by = {r[0]: tuple(r[1:]) for r in rows}
+    keys: list[str | None] = list(project_ids)
+    if every_project:
+        listed = set(project_ids)
+        keys += sorted((k for k in by if k not in listed), key=lambda k: (k is not None, k or ""))
+    shown = [by.get(k, zero) for k in keys]
+    totals = _usage_entry(None, tuple(sum(s[i] for s in shown) for i in range(len(zero))))
+    del totals["project_id"]
+    return {"since": start.astimezone(dt.UTC).isoformat(), "until": end.astimezone(dt.UTC).isoformat(),
+            "projects": [_usage_entry(k, s) for k, s in zip(keys, shown, strict=True)], "totals": totals}
+
+
+def project_usage(conn: psycopg.Connection[Any], since: str | None = None, until: str | None = None,
+                  project_id: str | None = None) -> dict[str, Any]:
+    """Usage per project over the window [since, until) (see usage_window; the default is the last 30 days): for
+    each project, `leases` (the leases that held their ask during the window), `lease_hours`, `cpu_hours` and
+    `mem_gb_hours` (the requested cpu, and memory in GiB, times the hours held inside the window), and
+    `unmeasured_leases` (leases that may have held their ask in the window but whose held time was never recorded:
+    released before migration 0051, or by an older image; their hours are not in the sums). Also `since`, `until`
+    (UTC) and `totals`. A migration's or a replication's internal reservation is not usage and never counts.
+
+    EVERY project when `project_id` is None (the operator and dashboard view), plus a project_id-null entry for
+    leases of no project; or just that ONE project when given. The agent path passes a token's bound project, so a
+    tenant sees only its own usage ([] if the project has since been deleted). An invalid window answers
+    {"error": "invalid_window"}. Read-only, no lock; commits to end the read transaction."""
+    row = conn.execute("SELECT now()").fetchone()   # the transaction's now(), the same one the report reads
+    assert row is not None
+    now: dt.datetime = row[0]
+    window = usage_window(since, until, now)
+    if window is None:
+        conn.commit()
+        return {"error": reasons.INVALID_WINDOW}
+    params = {"since": window[0], "until": window[1], "now": now, "project": project_id, **_USAGE_RESERVED}
+    if project_id is None:
+        rows = conn.execute(_USAGE, params).fetchall()
+        ids = [r[0] for r in conn.execute("SELECT id FROM project ORDER BY id").fetchall()]
+    else:
+        rows = conn.execute(_USAGE_PROJECT, params).fetchall()
+        ids = [r[0] for r in conn.execute("SELECT id FROM project WHERE id = %s", (project_id,)).fetchall()]
+    conn.commit()
+    return _usage_report(window[0], window[1], ids, rows, every_project=project_id is None)

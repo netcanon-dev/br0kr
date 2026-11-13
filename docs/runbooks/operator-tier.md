@@ -157,6 +157,7 @@ fleet-wide:
 - `node_capacity(node_id)`, `cluster_capacity(cluster_id)` — infra capacity by id.
 - `list_projects` — **all** tenants (not just one).
 - `queue_view` — the **global** admission queue.
+- `project_usage` — **every** project's lease-hours over a window, plus leases of no project.
 - `fleet_stats` — fleet-wide admission SLOs (queue depth, oldest-pending age, admit-wait / provision-latency
   percentiles).
 - `migration_status(migration_id)` — **any** migration (the ownership gate is skipped for an operator, since

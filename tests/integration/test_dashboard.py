@@ -371,6 +371,28 @@ def test_get_access_table_matches_the_live_gating_route_by_route(monkeypatch):
             assert refused == want[access], f"{path} is documented {access!r} but answered {codes}"
 
 
+def test_usage_is_operator_gated_passes_the_window_and_answers_a_bad_one_with_400(monkeypatch):
+    """GET /api/usage (review FEAT-06) refuses the read token before the ledger is touched, passes ?since= and
+    ?until= through to inventory.project_usage, and answers its report with 200 and a refused window with 400 and
+    the reason. Guards per-project accounting reaching a viewer, the window being dropped on the way, and an
+    invalid_window answered as a 200 'report' a caller would render as no usage."""
+    seen: list[tuple[str, str]] = []
+
+    def usage(_c: object, since: str = "", until: str = "") -> dict:
+        seen.append((since, until))
+        return {"error": "invalid_window"} if since == "bad" else {"projects": [], "totals": {"leases": 0}}
+
+    monkeypatch.setattr(inventory, "project_usage", usage)
+    with _serving(lambda: _FakeConn(), token="op", read_token="rt") as port:
+        assert _get(port, "/api/usage?since=2026-10-01", token="rt")[0] in (401, 403)
+        assert seen == []
+        code, body = _get(port, "/api/usage?since=2026-10-01&until=2026-10-31", token="op")
+        assert code == 200 and json.loads(body) == {"projects": [], "totals": {"leases": 0}}
+        code, body = _get(port, "/api/usage?since=bad", token="op")
+        assert code == 400 and json.loads(body) == {"error": "invalid_window"}
+    assert seen == [("2026-10-01", "2026-10-31"), ("bad", "")]
+
+
 def test_cancel_requires_the_operator_token(monkeypatch):
     """A POST action is refused unless authorized: with NO server token it is 403 'disabled' (the
     read-only default) even with a bearer; with a token configured, a missing or wrong bearer is 401 — and

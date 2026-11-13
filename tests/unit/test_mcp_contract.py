@@ -143,3 +143,15 @@ def test_a_new_row_of_a_shape_is_a_working_tool(monkeypatch):
     assert set(tool.inputSchema["properties"]) == {"node_id"} and "ctx" not in tool.inputSchema.get("$defs", {})
     _content, structured = asyncio.run(server.call_tool("demo_lookup", {"node_id": "n9"}))
     assert structured == {"ok": True, "node_id": "n9", "exists": True} and seen == ["demo_lookup"]
+
+
+def test_the_recorded_parameter_types_read_the_same_on_every_python():
+    """The generator spells a parameter's type the same on every supported Python: a plain type by its name, a
+    generic by its origin, and an optional as `X | None`. Guards a fixture written on one Python failing the
+    contract test on another: `str | None` is a typing.Union named 'Union' on 3.14 but a types.UnionType with no
+    name on 3.11, which made the fixture differ by the Python that wrote it (review FEAT-06's first optional
+    parameter)."""
+    gen = _generator()
+    assert gen._type_name(int) == "int" and gen._type_name(list[int]) == "list"
+    assert gen._type_name(str | None) == "str | None"
+    assert gen._type_name(int | str | None) == "int | str | None"

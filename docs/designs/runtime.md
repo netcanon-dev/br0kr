@@ -85,7 +85,9 @@ its fence was stamped is removed by the orphan sweep's marker reclaim once the l
 stopped renewing usually expires first (the default TTL is shorter than the budget) and reads `expired`. A **pinned**
 lease (migration `0049`, `br0kr/pin.py`) is skipped by the TTL step alone, so it needs no heartbeat; it is admitted,
 debited and released like any other, the two steps above still apply, and a project may hold at most `max_pinned` of
-them, counted under the project row lock ([designs/pinned-lease.md](pinned-lease.md)). **Built in `br0kr/lease.py`**;
+them, counted under the project row lock ([designs/pinned-lease.md](pinned-lease.md)). Every statement that starts a
+release stamps `releasing_at` (migration `0051`), the end of the tenant's hold; with `admitted_at` it gives each
+lease's held interval, which `inventory.project_usage` reads for usage per project. **Built in `br0kr/lease.py`**;
 the teardown driver that actually destroys guests is **`br0kr/reaper.py`**. `db/migrations/0001_baseline.sql` carries
 the `ttl_seconds`/`expires_at`/`heartbeat_at`/`reclaim_at`/`release_attempts` columns (a trigger derives `expires_at`
 from `ttl_seconds`, so the deadline can't drift from the TTL).

@@ -21,6 +21,8 @@ import asyncio
 import hashlib
 import json
 import sys
+import types
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,14 @@ def _digest(tool: Any) -> str:
     return hashlib.sha256(json.dumps(seen, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _type_name(t: Any) -> str:
+    """A parameter's type as text, the same on every Python: `str | None` is a typing.Union with __name__ 'Union' on
+    3.14 and a types.UnionType with none on 3.11, so a union is spelled from its members."""
+    if typing.get_origin(t) in (typing.Union, types.UnionType):
+        return " | ".join("None" if a is type(None) else _type_name(a) for a in typing.get_args(t))
+    return getattr(t, "__name__", str(t))
+
+
 def _row(name: str) -> dict[str, Any]:
     """What a tool's registry row makes it do, beside what it says: its shape and the function it calls, whose rows a
     lookup returns, how its answer is wrapped and judged, and which answers are audited (functions by name)."""
@@ -50,7 +60,7 @@ def _row(name: str) -> dict[str, Any]:
 
     return {"kind": v.kind, "call": v.call, "scope": v.scope, "wrap": v.wrap, "acting_as": v.acting_as,
             "verdict": named(v.verdict), "audit": named(v.audit), "not_found": v.not_found, "bulk_item": v.bulk_item,
-            "params": [[p.name, getattr(p.type, "__name__", str(p.type)),
+            "params": [[p.name, _type_name(p.type),
                         None if p.default is verbs.REQUIRED else p.default] for p in v.params]}
 
 

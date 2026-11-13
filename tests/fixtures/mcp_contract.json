@@ -23,6 +23,7 @@
   "list_clusters",
   "list_storage",
   "list_projects",
+  "project_usage",
   "list_templates",
   "queue_view",
   "list_leases",
@@ -426,6 +427,33 @@
     "not_found": null,
     "bulk_item": null,
     "params": []
+   }
+  },
+  "project_usage": {
+   "tier": "read",
+   "sha256": "7b6ec665adf3ec6e8a7f2d569d2e7a1ef7174a2a129ecc9abab806395411eb90",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.project_usage",
+    "scope": "tenant",
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": [
+     [
+      "since",
+      "str | None",
+      null
+     ],
+     [
+      "until",
+      "str | None",
+      null
+     ]
+    ]
    }
   },
   "list_templates": {

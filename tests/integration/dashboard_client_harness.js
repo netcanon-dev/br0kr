@@ -301,6 +301,7 @@ function healthy() {
     '/api/template/builds': { status: 200, body: { builds: [] } },
     '/api/audit': { status: 200, body: { audit: [], next_before_id: null } },
     '/api/discovery/dismissals': { status: 200, body: { dismissals: [], kinds: {} } },
+    '/api/usage': { status: 200, body: { since: null, until: null, projects: [], totals: {} } },
   };
 }
 
@@ -324,7 +325,7 @@ const ok = body => ({ status: 200, body });
 const pathsSince = n => calls.slice(n).map(c => c.path.split('?')[0]);
 const pollTimer = () => timers.find(t => t.fn === run('poll'));
 const OPERATOR_READS = ['/api/tokens', '/api/operators', '/api/template/grants', '/api/template/sources',
-  '/api/template/builds', '/api/settings', '/api/audit', '/api/discovery/dismissals'];
+  '/api/template/builds', '/api/settings', '/api/audit', '/api/discovery/dismissals', '/api/usage'];
 // UI-04 fixtures: a pool whose one reachable node is quarantined, a logical network whose one node bridge is
 // quarantined, and a built template on that network
 const PARITY = () => ok({ ...OVERVIEW,
@@ -599,6 +600,34 @@ const SCENARIOS = {
   async parity_dismissals_read_fails() {
     await boot({ token: 't', routes: { '/api/discovery/dismissals': fail(503, 'ledger_unreachable') } });
     return { discovery: $('discovery').innerHTML };
+  },
+  async usage_report() {
+    const row = (id, x) => ({ project_id: id, leases: 0, lease_hours: 0, cpu_hours: 0, mem_gb_hours: 0,
+      unmeasured_leases: 0, ...x });
+    const report = { since: '2026-10-01T00:00:00+00:00', until: '2026-11-01T00:00:00+00:00',
+      projects: [row('pa', { leases: 2, lease_hours: 30, cpu_hours: 36.04, mem_gb_hours: 72 }), row('<b>x</b>', {}),
+        row(null, { unmeasured_leases: 3 })],
+      totals: { leases: 2, lease_hours: 30, cpu_hours: 36.04, mem_gb_hours: 72, unmeasured_leases: 3 } };
+    await boot({ token: 't', tab: 'tenancy', routes: { '/api/usage': ok(report) } });
+    const reads = () => calls.filter(c => c.path.startsWith('/api/usage')).map(c => c.path);
+    const shown = $('usage-sec').style.display, table = $('usage').innerHTML, first = reads();
+    $('usage-window').value = 'last-month';
+    run('loadUsage(true)'); await settle();
+    return { shown, table, first, last: reads().slice(-1)[0], now: run('new Date().toISOString()') };
+  },
+  async usage_locked() {
+    await boot({ tab: 'tenancy' });
+    await advance(15000);
+    return { display: $('usage-sec').style.display, reads: pathsSince(0).filter(p => p === '/api/usage') };
+  },
+  async usage_off_tab() {
+    await boot({ token: 't', tab: 'capacity' });
+    await advance(15000);                            // three polls, the third due for operator reads
+    return { reads: pathsSince(0).filter(p => p === '/api/usage') };
+  },
+  async usage_read_fails() {
+    await boot({ token: 't', tab: 'tenancy', routes: { '/api/usage': fail(400, 'invalid_window') } });
+    return { usage: $('usage').innerHTML };
   },
   async sources_unauthorized() {
     await boot({ token: 't', tab: 'images', routes: { '/api/template/sources': fail(401, 'unauthorized') } });

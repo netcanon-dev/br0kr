@@ -854,6 +854,45 @@ def test_discovery_dismissals_are_listed_cleared_and_added_by_an_operator(served
         {"path": "/api/discovery/dismiss", "body": {"kind": "declared_absent", "node_id": "n1", "subject": "fast"}}]
 
 
+def test_the_usage_report_renders_a_window_table_and_asks_for_the_chosen_window(served_script: Path) -> None:
+    """With an operator token on the Tenancy tab, the usage section shows, asks /api/usage for the last 30 days by
+    default, and renders one row per project (a project-less entry as 'no project', an id escaped), a total row,
+    and a line saying how many leases are unmeasured; choosing 'last month' asks for the previous calendar month
+    in UTC, from its first midnight to the next month's. Guards the review FEAT-06 table (its done-when), an
+    unescaped project id reaching the page, and a month window that drops or adds a day."""
+    import datetime as dt
+    import urllib.parse as up
+    got = _run(served_script, "usage_report")
+    assert got["shown"] == "" and len(got["first"]) == 1
+    q = up.parse_qs(up.urlparse(got["first"][0]).query)
+    now = dt.datetime.fromisoformat(got["now"].replace("Z", "+00:00"))
+    since = dt.datetime.fromisoformat(q["since"][0].replace("Z", "+00:00"))
+    assert "until" not in q and abs((now - since) - dt.timedelta(days=30)) < dt.timedelta(minutes=5)
+    table = got["table"]
+    assert "2026-10-01 00:00 to 2026-11-01 00:00 UTC" in table
+    assert "<td>pa</td><td>2</td><td>30.0</td>" in table and "<td>36.0</td><td>72.0</td>" in table
+    assert "&lt;b&gt;x&lt;/b&gt;" in table and "<b>x</b>" not in table
+    assert "<i>no project</i>" in table and "<b>total</b>" in table
+    assert "3 leases" in table and "not counted" in table
+    q = up.parse_qs(up.urlparse(got["last"]).query)
+    first_of_this = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    first_of_last = (first_of_this - dt.timedelta(days=1)).replace(day=1)
+    assert q["since"] == [first_of_last.strftime("%Y-%m-%dT%H:%M:%S.000Z")]
+    assert q["until"] == [first_of_this.strftime("%Y-%m-%dT%H:%M:%S.000Z")]
+
+
+def test_the_usage_report_is_operator_only_loads_only_on_its_tab_and_names_a_failed_read(served_script: Path) -> None:
+    """A locked page keeps the usage section hidden and never asks for it (who used what is tenant accounting, the
+    same operator gate as the audit log); an unlocked page on another tab does not read it either; a refused read
+    renders 'could not load the usage report' with the reason, never an empty table. Guards usage data on a
+    viewer's page, a ledger read every 15 s for a panel nobody is looking at, and a 400 reading as 'no usage'."""
+    locked = _run(served_script, "usage_locked")
+    assert locked == {"display": "none", "reads": []}
+    assert _run(served_script, "usage_off_tab") == {"reads": []}
+    got = _run(served_script, "usage_read_fails")["usage"]
+    assert "could not load the usage report — invalid_window" in got and "<table>" not in got
+
+
 def test_the_dismissal_roster_is_hidden_when_locked_and_names_its_read_failure(served_script: Path) -> None:
     """The roster section stays hidden on a locked page (it is operator config), and locking an unlocked page drops
     the roster from the page and from memory; a failed roster read renders 'could not load the discovery

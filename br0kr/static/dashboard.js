@@ -123,6 +123,7 @@ function operatorReads(force){
   loadTokens(on('security'));     // operator-only sections hide themselves when locked, at no cost
   loadOperators(on('security'));  // the NAMED dashboard-operator credentials (0026)
   loadGrants(on('images', 'tenancy'));   // template grant counts + the create-VM template picker
+  loadUsage(on('tenancy'));      // usage per project over the chosen window (FEAT-06)
   loadDownloads(due, on('images'));      // builds every due poll (the attention line), sources on Images only
   loadSettings();                 // the runtime settings editor (0021): loads once, retried after an error
   syncAudit();                    // the append-only audit trail (0023): loads once, then on demand
@@ -972,6 +973,44 @@ function renderDismissals(){
     <td><button class="act ghost" data-act="clearDismissal(${i})">clear</button></td></tr>`).join('');
   paint('discovery', add + `<table><thead><tr><th>Kind</th><th>Node</th><th>Subject</th><th>Note</th>
     <th>Dismissed</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
+}
+// ── Usage by project (review FEAT-06): lease-hours, cpu-hours and memory GiB-hours per project over a window, from
+//    /api/usage (operator-gated: who used what is tenant accounting). It loads with the Tenancy tab's other operator
+//    reads and when the window changes; an answer for a window no longer chosen is dropped. ──
+let USAGE = null, usageGen = 0;
+function usageQS(){
+  const v = $('usage-window').value || '30', now = new Date(), p = new URLSearchParams();
+  if(v === 'month' || v === 'last-month'){   // calendar months in UTC, the report's own clock
+    const m = now.getUTCMonth() - (v === 'last-month' ? 1 : 0);
+    p.set('since', new Date(Date.UTC(now.getUTCFullYear(), m, 1)).toISOString());
+    if(v === 'last-month') p.set('until', new Date(Date.UTC(now.getUTCFullYear(), m + 1, 1)).toISOString());
+  } else p.set('since', new Date(now.getTime() - Number(v) * 864e5).toISOString());
+  return p;
+}
+async function loadUsage(go){
+  const sec = $('usage-sec');
+  if(!canEdit){ sec.style.display = 'none'; USAGE = null; paint('usage', ''); return; }
+  sec.style.display = '';
+  if(go === false) return;   // not due this poll
+  const gen = ++usageGen, t = tok(), r = await opFetch('/api/usage?' + usageQS().toString());
+  if(!canEdit || tok() !== t || gen !== usageGen) return;   // locked, re-keyed or superseded while the read was out
+  if(r.ok){ USAGE = r.data; renderUsage(); }
+  else paint('usage', loadErr('the usage report', r));
+}
+function renderUsage(){
+  const u = USAGE || {}, ps = u.projects || [], t = u.totals || {};
+  const hrs = x => Number(x || 0).toFixed(1);
+  const head = `<p class="pill">${tdate(u.since)} to ${tdate(u.until)} UTC. A lease counts from admission to release,
+    only the part inside the window: its hours, times the cpu or memory it asked for.</p>`;
+  if(!ps.length){ paint('usage', head + '<div class="empty">no projects</div>'); return; }
+  const unmeasured = t.unmeasured_leases ? `<p class="pill">${plural(Number(t.unmeasured_leases), 'lease', 'leases')}
+    may fall in this window but ended before the broker recorded release times; their hours are not counted.</p>` : '';
+  const row = (name, x) => `<tr><td>${name}</td><td>${Number(x.leases || 0)}</td><td>${hrs(x.lease_hours)}</td>
+    <td>${hrs(x.cpu_hours)}</td><td>${hrs(x.mem_gb_hours)}</td><td>${Number(x.unmeasured_leases || 0)}</td></tr>`;
+  const rows = ps.map(x => row(x.project_id == null ? '<i>no project</i>' : esc(x.project_id), x)).join('');
+  paint('usage', head + unmeasured + `<table><thead><tr><th>Project</th><th>Leases</th><th>Lease-hours</th>
+    <th>CPU-hours</th><th>Memory GiB-hours</th><th>Unmeasured</th></tr></thead><tbody>${rows}</tbody>
+    <tfoot>${row('<b>total</b>', t)}</tfoot></table>`);
 }
 function openDismissForm(){
   if(paused) return;
@@ -2699,8 +2738,8 @@ function selectText(el){ el.select(); }   // a read-only field an operator copie
 const ACTS = {
   ackFailures, cancelLease, cancelMigration, cancelReplication, cancelSelected, clearAuditFilters, clearDismissal,
   clearPdm, closeForm, copyOperatorSecret, copySecret, cvRefreshTemplates, delItem, delSource, deleteInstance,
-  deleteNetwork, editItem, enterLeaseSelect, exitLeaseSelect, exportAudit, forceFailBuild, forceFailReplication,
-  goTo, leaseDetail, loadAudit, loadMoreAudit, loadOperators, loadTokens, lock, openBindForm, openBridgesForm,
+  deleteNetwork, editItem, enterLeaseSelect, exitLeaseSelect, exportAudit, forceFailBuild, forceFailReplication, goTo,
+  leaseDetail, loadAudit, loadMoreAudit, loadOperators, loadTokens, loadUsage, lock, openBindForm, openBridgesForm,
   openContentForm, openCreateVM, openDismissForm, openDownloadForm, openForm, openGrantForm, openMigrateForm,
   openNetworkForm, openOperatorForm, openPlacementForm, openReplicateForm, openReplicatePrune, openSourceForm,
   openStorageNodeAdd, openStoragePair, openTemplateNetForm, openTenantDownload, openTokenForm, pinLease, reloadFleet,
@@ -2708,8 +2747,8 @@ const ACTS = {
   setTemplateDisk, setTokenExpiry, submitBind, submitContent, submitCreateVM, submitDismiss, submitDownload,
   submitForm, submitGrant, submitMaxPinned, submitMigrate, submitNetwork, submitOperator, submitPlacement,
   submitReplicate, submitReplicatePrune, submitSettings, submitSource, submitStorageNodeAdd, submitTemplateDisk,
-  submitTemplateNet, submitTenantDownload, submitToken, submitTokenExpiry, syncNever, toggleCordon,
-  toggleSourceDirty, unlock, unpinLease, selectText
+  submitTemplateNet, submitTenantDownload, submitToken, submitTokenExpiry, syncNever, toggleCordon, toggleSourceDirty,
+  unlock, unpinLease, selectText
 };
 const THIS = {};   // stands for `this` until the call, when it becomes the element
 function parseActs(spec){

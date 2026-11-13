@@ -134,7 +134,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `envelope.py` | Adds `ok` and a `reason` to every MCP tool answer. | — | — | `unit/test_envelope.py` |
 | `gateway.py` | Transport-agnostic agent verbs: request, schedule, renew, release, status, jobs. | writes self-quota; via admission, lease, jobs | — | `unit/test_gateway.py`, `harness_gateway.py` |
 | `imgbuild.py` | Pure template-download checks: source allowlist, SHA-256 format, names. | — | — | `unit/test_imgbuild.py` |
-| `inventory.py` | Read-only fleet aggregates: nodes, clusters, storage, projects, queue, leases. | reads | — | `unit/test_inventory.py`, `harness_inventory.py` |
+| `inventory.py` | Read-only fleet aggregates: nodes, clusters, storage, projects, queue, leases, usage per project. | reads | — | `unit/test_inventory.py`, `harness_inventory.py`, `harness_usage.py` |
 | `leader.py` | Single-writer election: a session advisory lock on its own connection. | locks only | — | `integration/test_leader.py`, `harness_leader.py` |
 | `lease.py` | The lease lifecycle: TTL, heartbeat, guarded-CAS transitions, reaper work-lists. | writes | — | `unit/test_lease.py`, `harness_lease.py` |
 | `ledgerhealth.py` | The ledger's replication posture (slots, standbys) for metrics and the dashboard. | reads | — | `unit/test_ledgerhealth.py`, `harness_ledger_replication.py` |

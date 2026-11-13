@@ -574,3 +574,152 @@ def test_list_networks_runs_one_read_and_ends_its_transaction():
     assert inventory.list_networks(c) == [{"network_id": "lan", "description": None, "template_count": 1,
                                            "nodes": []}]
     assert len(c.sqls) == 1 and "FROM logical_network" in c.sqls[0] and c.commits == 1
+
+
+# ── Usage per project (review FEAT-06) ─────────────────────────────────────────────────────────────────────────
+_NOW = datetime.datetime(2026, 11, 13, 12, 0, tzinfo=datetime.UTC)
+_UTC = datetime.UTC
+
+
+def test_usage_window_defaults_to_the_last_30_days_and_reads_dates_as_whole_utc_days():
+    """usage_window: no bounds is the 30 days before now; a bare date is that day's midnight UTC, and as the upper
+    bound the next midnight, so until=2026-10-31 covers all of the 31st; a date-time without an offset is UTC, one
+    with an offset keeps it; a blank string is the default. Guards a month report silently dropping its last day, or
+    a naive bound compared against timestamptz in whatever zone the session happens to use."""
+    w = inventory.usage_window
+    assert w(None, None, _NOW) == (_NOW - datetime.timedelta(days=30), _NOW)
+    assert w("", "  ", _NOW) == (_NOW - datetime.timedelta(days=30), _NOW)
+    assert w("2026-10-01", "2026-10-31", _NOW) == (datetime.datetime(2026, 10, 1, tzinfo=_UTC),
+                                                   datetime.datetime(2026, 11, 1, tzinfo=_UTC))
+    assert w("2026-10-01T06:30:00", None, _NOW) == (datetime.datetime(2026, 10, 1, 6, 30, tzinfo=_UTC), _NOW)
+    start, end = w("2026-10-01T00:00:00Z", "2026-10-02T00:00:00+02:00", _NOW)
+    assert start == datetime.datetime(2026, 10, 1, tzinfo=_UTC)
+    assert end == datetime.datetime(2026, 10, 1, 22, tzinfo=_UTC)
+    assert w(None, "2026-11-01", _NOW) == (datetime.datetime(2026, 10, 3, tzinfo=_UTC),
+                                          datetime.datetime(2026, 11, 2, tzinfo=_UTC))
+
+
+@pytest.mark.parametrize(("since", "until"), [
+    ("yesterday", None), ("2026-13-01", None), (None, "not a date"),   # not ISO 8601
+    ("2026-10-02", "2026-10-01"), ("2026-10-01T12:00Z", "2026-10-01T12:00Z"),   # since not before until
+    ("2026-11-14", None),                                                        # since after the default until
+    (None, "0001-01-01"), (None, "9999-12-31"),                                  # out of the datetime range
+])
+def test_usage_window_refuses_a_bound_it_cannot_read_or_an_empty_window(since, until):
+    """usage_window answers None (the caller's invalid_window) for a bound that is not an ISO 8601 date or
+    date-time, for since at or after until, and for a bound whose default or day widening leaves the datetime range.
+    Guards a garbage or inverted window reaching SQL (a 500, or a silent all-zero report) and an OverflowError
+    escaping as a crash."""
+    assert inventory.usage_window(since, until, _NOW) is None
+
+
+def test_held_states_are_the_states_reachable_from_admitted():
+    """The usage report counts a lease in exactly the states it can reach once admitted (the lease machine's states
+    reachable from ADMITTED), so PENDING and REJECTED, which never held capacity, never count. Guards a state added
+    to the machine being silently left out of (or wrongly put into) the usage report's filter."""
+    seen, todo = set(), ["ADMITTED"]
+    while todo:
+        s = todo.pop()
+        if s not in seen:
+            seen.add(s)
+            todo.extend(lease.VALID_TRANSITIONS[s])
+    assert set(inventory._HELD_STATES) == seen
+    assert "PENDING" not in seen and "REJECTED" not in seen
+
+
+def test_usage_sql_counts_the_held_interval_inside_the_window_and_scopes_the_tenant_query():
+    """The usage SQL clips each lease's held interval (admitted_at to releasing_at, or the transaction's now() for
+    a live one) to the window, sums only measured leases into the hours, counts the rest as unmeasured, and leaves
+    out the internal migration and replication reservations (by the same idem prefixes the work lists skip); the
+    per-project form filters on project_id and the every-project form does not. Guards the hours counting time
+    outside the window, an unmeasured lease's NULL end turning into 'still running' (hours up to now for a lease
+    released long ago), a migration's reservation counting its lease twice, and a tenant's report reading other
+    projects' leases."""
+    flat = " ".join(inventory._USAGE.split())
+    assert "LEAST(COALESCE(l.releasing_at, %(now)s), %(until)s) - GREATEST(l.admitted_at, %(since)s)" in flat
+    assert ("(l.admitted_at IS NOT NULL AND (l.releasing_at IS NOT NULL OR l.state IN "
+            + inventory._LIVE_SQL + ")) AS measured") in flat
+    assert flat.count("FILTER (WHERE measured AND secs > 0)") == 4
+    assert "count(*) FILTER (WHERE NOT measured)" in flat
+    assert "COALESCE(l.releasing_at, l.reclaim_at, 'infinity') > %(since)s" in flat
+    assert f"AND {inventory._USAGE_NOT_RESERVED}" in flat
+    assert sorted(inventory._USAGE_RESERVED.values()) == sorted(p + "%" for p in lease.RESERVED_IDEM_PREFIXES)
+    assert all(f"NOT LIKE %({k})s" in inventory._USAGE_NOT_RESERVED for k in inventory._USAGE_RESERVED)
+    assert "project_id = %(project)s" not in inventory._USAGE
+    assert "AND l.project_id = %(project)s" in inventory._USAGE_PROJECT
+
+
+class _UsageConn:
+    """A connection fake for project_usage: answers SELECT now(), the usage rows and the project ids, and records
+    each statement."""
+
+    def __init__(self, rows: list[tuple], ids: list[str]) -> None:
+        self.rows, self.ids, self.sql, self.commits = rows, ids, [], 0
+        self._next: list[tuple] = []
+
+    def execute(self, sql: str, params: object = None) -> _UsageConn:
+        self.sql.append((sql, params))
+        if sql == "SELECT now()":
+            self._next = [(_NOW,)]
+        elif "WITH held" in sql:
+            self._next = self.rows
+        else:
+            self._next = [(i,) for i in self.ids]
+        return self
+
+    def fetchone(self) -> tuple | None:
+        return self._next[0] if self._next else None
+
+    def fetchall(self) -> list[tuple]:
+        return self._next
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_project_usage_refuses_a_bad_window_before_reading_any_lease():
+    """project_usage answers {"error": "invalid_window"} for a window it cannot read, after reading only now(), and
+    ends its transaction. Guards a bad window reaching the lease query, and the refusal leaving a read transaction
+    open on a pooled connection."""
+    conn = _UsageConn([], [])
+    assert inventory.project_usage(conn, since="2026-10-02", until="2026-10-01") == {"error": "invalid_window"}
+    assert [s for s, _p in conn.sql] == ["SELECT now()"] and conn.commits == 1
+
+
+def test_project_usage_reports_every_project_plus_leases_of_none_and_sums_the_unrounded_figures():
+    """The every-project view lists each project in id order (zeros for one with no usage), then a project_id-null
+    entry for leases of no project; hours are rounded to 3 places, the totals sum the unrounded figures, and the
+    window is echoed in UTC. Guards an idle project vanishing from the report, the no-project hours missing so the
+    totals don't add up, and rounding drift in the totals."""
+    rows = [("b", 2, Decimal("1.00049"), Decimal("2.0001"), Decimal("0.5"), 0),
+            (None, 1, Decimal("0.00049"), Decimal("0.0005"), Decimal("0.25"), 3)]
+    conn = _UsageConn(rows, ["a", "b"])
+    out = inventory.project_usage(conn, since="2026-10-01", until="2026-10-31")
+    assert out["since"] == "2026-10-01T00:00:00+00:00" and out["until"] == "2026-11-01T00:00:00+00:00"
+    assert out["projects"] == [
+        {"project_id": "a", "leases": 0, "lease_hours": 0.0, "cpu_hours": 0.0, "mem_gb_hours": 0.0,
+         "unmeasured_leases": 0},
+        {"project_id": "b", "leases": 2, "lease_hours": 1.0, "cpu_hours": 2.0, "mem_gb_hours": 0.5,
+         "unmeasured_leases": 0},
+        {"project_id": None, "leases": 1, "lease_hours": 0.0, "cpu_hours": 0.001, "mem_gb_hours": 0.25,
+         "unmeasured_leases": 3}]
+    assert out["totals"] == {"leases": 3, "lease_hours": 1.001, "cpu_hours": 2.001, "mem_gb_hours": 0.75,
+                             "unmeasured_leases": 3}
+    params = next(p for s, p in conn.sql if "WITH held" in s)
+    assert params["now"] == _NOW and params["project"] is None
+    assert all(params[k] == v for k, v in inventory._USAGE_RESERVED.items())   # the reservation exclusion's patterns
+    assert conn.commits == 1
+
+
+def test_project_usage_for_one_project_reads_only_it_and_lists_nothing_else():
+    """With a project_id (a tenant token's), project_usage runs the project-filtered query, looks up only that
+    project, and reports it alone even with zero usage; a project since deleted reports nothing. Guards a tenant
+    seeing another project's entry, or the no-project entry, in its own report."""
+    conn = _UsageConn([], ["a"])
+    out = inventory.project_usage(conn, project_id="a")
+    assert [p["project_id"] for p in out["projects"]] == ["a"] and out["totals"]["leases"] == 0
+    usage_sql, params = next((s, p) for s, p in conn.sql if "WITH held" in s)
+    assert usage_sql == inventory._USAGE_PROJECT and params["project"] == "a"
+    assert ("SELECT id FROM project WHERE id = %s", ("a",)) in conn.sql
+    gone = inventory.project_usage(_UsageConn([("a", 1, 1, 1, 1, 0)], []), project_id="a")
+    assert gone["projects"] == [] and gone["totals"]["leases"] == 0

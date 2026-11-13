@@ -121,6 +121,7 @@ full rollback, extract the previous release's archive first, so the compose file
 | 0048 | `lease.provisioning_at`, the `provision_stuck_seconds` setting | never reclaims a lease stuck in PROVISIONING before its TTL. The leases it starts get no `provisioning_at`, so after you upgrade again they are reclaimed only at their TTL too |
 | 0049 | `lease.pinned`, `project.max_pinned` | **does not know pins.** Its reaper expires every pinned lease whose `expires_at` has passed on its first tick, and destroys its VM. Before rolling back past 0049, unpin every pinned lease (unpinning restarts its TTL); while the old image runs, those leases need a heartbeat like any other |
 | 0050 | the `lease_admitted_at` and `lease_active_at` partial indexes | is unaffected: it computes the same fleet stats in its single pass over `lease`, without them |
+| 0051 | `lease.releasing_at` (when a lease stopped holding its ask) | does not stamp it: the leases it releases get none, so the usage report counts them as unmeasured, after you upgrade again too |
 
 Every new migration adds a row here (`tests/unit/test_day2_runbook.py` fails until it does). Rolling back further
 than one release, or undoing what a migration did to the data, means [restoring](#restore-the-ledger-from-a-dump)

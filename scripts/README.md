@@ -133,6 +133,7 @@ Each runs on a database of its own, so any of them can run at the same time as a
 | `harness_inventory.py` | Aggregate inventory reads: a cluster roll-up with no lease-count multiplication, the queue view. |
 | `harness_health.py` | `/healthz` and `/metrics` over a real socket. |
 | `harness_slo.py` | Lease transition timestamps and the `fleet_stats` percentiles; the per-window query matches the old single pass and reads through the 0050 indexes. |
+| `harness_usage.py` | The release statements stamp `releasing_at` (0051); `project_usage` equals a hand-computed total on a three-lease fixture with controls, a tenant sees only its project, a bad window is refused. |
 
 ## Harnesses with their own wrapper (more than one Postgres)
 

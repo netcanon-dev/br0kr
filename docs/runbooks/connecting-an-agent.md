@@ -24,7 +24,7 @@ to be running with `BR0KR_DASHBOARD_TOKEN` set), or without the dashboard, with 
 
 | Tier | Bound to a project? | What it can call |
 |------|---------------------|------------------|
-| `read` | yes | Inspect only — `list_nodes/clusters/storage/projects/templates`, `*_capacity`, `lease_status`, `queue_status`/`queue_view`, `list_leases`, `fleet_stats`, `whoami`. |
+| `read` | yes | Inspect only — `list_nodes/clusters/storage/projects/templates`, `*_capacity`, `lease_status`, `queue_status`/`queue_view`, `list_leases`, `project_usage`, `fleet_stats`, `whoami`. |
 | `consume` | yes | `read` **plus** reserve/renew/release — `request_lease`, `schedule_lease`, `renew_lease`, `release_lease`, `cancel_lease` (and the bulk `*_leases` forms). Every lease counts against **its own** project's quota. |
 | `provision` | yes | `consume` **plus** raise its own project's quota (`set_quota`) up to an operator-set ceiling, and `request_template_download`. The node floor still caps what admits, so it can never overprovision hardware. |
 | `operator` | **no** (project-less) | Cross-tenant infra only — the operator-only verbs (cordon, migration, replication, discovery, build escape hatches), plus the read verbs to observe. **Never** a tenant lease/quota verb. The Docker stack serves the operator-only verbs on the opt-in `gateway-operator`, not the tenant `gateway`. See [operator-tier.md](operator-tier.md). |

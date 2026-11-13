@@ -58,13 +58,13 @@ def test_every_api_route_has_a_dispatch_entry():
     reader in `_API`, so no route can resolve to a tag the handler then KeyErrors on. Guards a route added
     without its reader (or vice-versa) — a 500 on a path that advertises itself as live."""
     api_tags = {tag for path, tag in dashboard._ROUTES.items()
-                # operator-gated reads (tokens/operators/grants/sources/builds/dismissals/settings/audit) + whoami + the
-                # audit download + the per-lease status (needs a ?lease_id= query param) are handled specially
-                # in do_GET, not via the zero-arg _API table
+                # operator-gated reads (tokens/operators/grants/sources/builds/dismissals/settings/audit/usage) +
+                # whoami + the audit download + the per-lease status (needs a ?lease_id= query param) are handled
+                # specially in do_GET, not via the zero-arg _API table
                 # "asset" = the vendored UI files (br0kr/ui_assets.py) — static bytes, no _API reader
                 if tag not in ("page", "health", "meta", "whoami", "tokens", "operators", "grants", "sources",
                                "builds", "dismissals", "settings", "audit", "audit_export", "lease_status",
-                               "asset")}
+                               "usage", "asset")}
     assert api_tags == set(dashboard._API)
     # "ledger" = the LEDGER's own Postgres replication posture (br0kr/ledgerhealth.py) — NOT the same
     # subject as "replications", which is TEMPLATE replication. Same open-read class as fleet/nodes.

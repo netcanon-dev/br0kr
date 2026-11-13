@@ -18,6 +18,8 @@ resolve in this repository.
 ## [Unreleased]
 
 ### Added
+- **Usage per project: lease-hours, cpu-hours and memory GiB-hours over a window.** `project_usage` (a tenant sees
+  its own) and the Tenancy tab (operator) answer who used what; migration 0051 stamps `releasing_at` (FEAT-06).
 - **`br0kr-admin token create|list|revoke`: the first token without the dashboard.** It needs only `PGCONN`,
   validates, audits (surface `cli`) and prints the secret once; first-vm.md uses it (UX-05).
 - **`wait_for_lease`: one call waits server-side (up to 60 s) for a lease to be ready.** Agents polled
