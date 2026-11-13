@@ -15,7 +15,7 @@ PR fast.
 
 | Workflow | Trigger | What it gates |
 |---|---|---|
-| `ci.yml` | PR + push to `main` | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (Python matrix) + `harness` (real-Postgres race and saga proofs) + `alert-rules` (promtool on the shipped alert rules) |
+| `ci.yml` | PR + push to `main` + weekly | `validate` (lint/secrets/syntax via `tests/validate.sh`) + `test` (pytest: Python 3.13 on a PR, 3.11 to 3.13 otherwise) + `harness` (real-Postgres race and saga proofs) + `alert-rules` (promtool on the shipped alert rules) |
 | `security.yml` | PR + push + weekly | gitleaks full-history secret scan + pip-audit dependency CVEs |
 | `pii-guard.yml` | PR + push to `main` | no maintainer identifier in a tracked file or in a merged commit's identity or message |
 | `zizmor.yml` | `.github/**` changes + weekly | GitHub-Actions-specific supply-chain audit (blocking; SARIF to Code scanning) |
@@ -63,11 +63,19 @@ enforces most of them, and a PR that drops one should be rejected in review.
 ## ci.yml — the correctness gate
 
 - **`validate` job** runs `tests/validate.sh` — the *same* script contributors
-  run locally and the deploy host runs on release. One source of truth for "is
-  it green"; green-locally ⇒ green-in-CI by construction. Run it with `--strict`
+  run locally. One source of truth for "is it green"; green-locally ⇒
+  green-in-CI by construction. With `BR0KR_SKIP_UNIT=1` it runs only the
+  repo-hygiene tests, which pin the `test` job, instead of the whole suite. Run it with `--strict`
   in CI so a missing tool is a failure (locally it degrades gracefully).
-- **`test` job** is a Python matrix over `'3.11','3.12','3.13'` with
-  `fail-fast: false` (see the whole pass/fail grid on a red PR) and `cache: pip`.
+- **`test` job** runs the unit suite, the one place CI does (the `validate`
+  job sets `BR0KR_SKIP_UNIT=1`). A PR runs it on Python 3.13 alone, the version
+  the image ships. A push to `main`, the weekly run and a manual run use the
+  whole support range `'3.11','3.12','3.13'`, which must match
+  `pyproject.toml`'s `requires-python` and classifiers; a test pins all three
+  together (review TEST-06). So a break on an older Python first shows on
+  `main`, and it still blocks a release: `release.yml` publishes only when
+  `ci.yml`'s push run for that commit succeeded, every leg included.
+  `fail-fast: false` shows the whole grid on a red run; `cache: pip`.
   - **Convention:** if you exclude a version from the matrix, leave a comment
     *in the matrix* saying why and when to re-add it (e.g. "3.14 deferred: no
     manylinux cp314 wheel for lxml yet"). The exclusion is documented at the
@@ -239,7 +247,11 @@ allows, so there are three tiers.
 | Actions | on | on | disabled |
 
 The `main` ruleset requires green CI rather than a code-owner review: with a
-single maintainer, a required approval can only be met by bypassing it.
+single maintainer, a required approval can only be met by bypassing it. The
+required checks are `validate`, `tests — py3.13`, the image build and the PII
+guard. The older Python legs run only after a merge and weekly, so they are not
+required: a PR never runs them, and a required check that never runs blocks
+the merge.
 `CODEOWNERS` still routes review requests and names the owner.
 
 **A public repository never reaches a self-hosted runner.** The organization's

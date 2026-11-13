@@ -64,10 +64,19 @@ Step "secret-staged" $true {
 Step "types" (Have mypy) { mypy . }
 
 # ── unit (hermetic suite) ──  pytest
+# BR0KR_SKIP_UNIT=1 is for a caller that runs the suite itself: CI's test job does (review TEST-06). It
+# runs only tests/unit/test_repo_hygiene.py (seconds), which pins that test job, so a change that drops or
+# neuters the job still fails here. Keep in lockstep with tests/validate.sh.
 $hasPytest = $false
 if ($py) { & $py.Source -m pytest --version *> $null; $hasPytest = ($LASTEXITCODE -eq 0) }
-Step "unit" $hasPytest {
-  & $py.Source -m pytest -m "not e2e and not slow" -q
+if ($env:BR0KR_SKIP_UNIT -eq '1') {
+  Step "unit-wiring" $hasPytest {
+    & $py.Source -m pytest -q tests/unit/test_repo_hygiene.py
+  }
+} else {
+  Step "unit" $hasPytest {
+    & $py.Source -m pytest -m "not e2e and not slow" -q
+  }
 }
 
 # ── test-docs (meta-test) ──

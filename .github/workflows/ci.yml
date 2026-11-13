@@ -63,7 +63,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'   # the version used to RUN the linters; the
-          cache: pip               # test matrix below covers the support range
+          cache: pip               # test job below covers the Python versions
 
       - name: Install lint toolchain (pinned for determinism)
         # Pin the linter so an unrelated PR doesn't go red because a new ruff
@@ -87,11 +87,15 @@ jobs:
           echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
 
-      - name: validate (the same gate as local + the deploy host)
+      - name: validate (the same gate as local)
         # tests/validate.sh is the single source of truth for "is it green":
-        # contributors run it before commit, CI runs it here, the deploy host
-        # runs it on release. --strict makes a missing tool a failure (in CI
-        # every tool must be present; locally it degrades gracefully).
+        # contributors run it before commit, CI runs it here. --strict makes a
+        # missing tool a failure (in CI every tool must be present; locally it
+        # degrades gracefully). BR0KR_SKIP_UNIT: the test job below runs the
+        # suite, so a PR runs it once, not twice; validate then runs only the
+        # repo-hygiene tests, which pin that job (review TEST-06).
+        env:
+          BR0KR_SKIP_UNIT: '1'
         run: bash tests/validate.sh --strict
 
   test:
@@ -99,14 +103,19 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       # Don't let one Python version's failure hide the others — we want to see
-      # the full pass/fail grid on a red PR.
+      # the full pass/fail grid on a red run.
       fail-fast: false
       matrix:
-        # The support range — keep it in lockstep with pyproject.toml's
-        # `requires-python` + version classifiers. CONVENTION: if you exclude a
-        # version (no wheel yet, upstream gap), leave a comment HERE saying why
-        # and when to re-add it, so the gap is documented at the point of truth.
-        python: ['3.11', '3.12', '3.13']
+        # A pull request runs 3.13 alone: the Python the image ships (Dockerfile
+        # `FROM python:3.13-slim`), so the only one in production (review
+        # TEST-06). A push to main, the weekly run and a manual run test the
+        # whole support range, which must match pyproject.toml's
+        # `requires-python` and version classifiers, so a break on an older
+        # Python shows within minutes of a merge. The main ruleset requires only
+        # `tests — py3.13`. CONVENTION: if you exclude a version (no wheel yet,
+        # upstream gap), leave a comment HERE saying why and when to re-add it,
+        # so the gap is documented at the point of truth.
+        python: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.11", "3.12", "3.13"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -140,7 +149,7 @@ jobs:
         if: ${{ !cancelled() && matrix.python == '3.13' }}
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-py3.13
+          name: coverage-py${{ matrix.python }}
           path: coverage.xml
           if-no-files-found: warn
           retention-days: 30

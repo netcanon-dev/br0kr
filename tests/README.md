@@ -9,6 +9,7 @@ One gate decides "is it green": **`tests/validate`**. The full doctrine is
 # The gate — same checks locally and in CI (lint, secret-scan, types, unit, test-docs)
 bash tests/validate.sh           # workstation: skips tools you don't have
 bash tests/validate.sh --strict  # CI: a missing tool is a failure
+# CI sets BR0KR_SKIP_UNIT=1 on the gate: its test job runs the suite, the gate only the repo-hygiene tests
 ```
 ```powershell
 pwsh tests/validate.ps1          # Windows mirror (-Strict for CI)

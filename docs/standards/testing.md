@@ -20,7 +20,8 @@ There is exactly one answer to *"is the tree healthy?"*, and it is **`tests/vali
 (`validate.sh` on Linux/CI, `validate.ps1` on Windows). The same gate runs:
 
 - **locally** — before you commit (wire it into pre-commit), and
-- **in CI** — as the merge gate, with `--strict`.
+- **in CI** — as the merge gate, with `--strict`. CI sets `BR0KR_SKIP_UNIT=1` there because its test job
+  runs the suite itself, with coverage; the gate then runs only the repo-hygiene tests, which pin that job.
 
 There is no "CI-only" truth. If `tests/validate` is green on your machine, it is green for the same
 reasons CI will be. WHY: a checkmark that means different things locally vs in CI is how

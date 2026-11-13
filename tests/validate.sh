@@ -44,8 +44,15 @@ have mypy; step types $? mypy br0kr
 # ── unit (the hermetic test suite) ────────────────────────────────────────────
 # e2e/slow excluded — the offline default (docs/standards/testing.md §2-3).
 # Skipped gracefully if pytest isn't installed; CI installs tests/requirements-dev.txt.
+# BR0KR_SKIP_UNIT=1 is for a caller that runs the suite itself: CI's test job does (review TEST-06). It
+# runs only tests/unit/test_repo_hygiene.py (seconds), which pins that test job, so a change that drops or
+# neuters the job still fails here. Keep in lockstep with tests/validate.ps1.
 if [ -n "$PY" ] && "$PY" -m pytest --version >/dev/null 2>&1; then
-  step unit 0 "$PY" -m pytest -m "not e2e and not slow" -q
+  if [ "${BR0KR_SKIP_UNIT:-0}" = 1 ]; then
+    step unit-wiring 0 "$PY" -m pytest -q tests/unit/test_repo_hygiene.py
+  else
+    step unit 0 "$PY" -m pytest -m "not e2e and not slow" -q
+  fi
 else
   echo "SKIP  unit (pytest not installed)"; skip=$((skip+1))
   [ "$STRICT" = "--strict" ] && fail=$((fail+1))

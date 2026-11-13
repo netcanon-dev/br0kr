@@ -81,7 +81,7 @@ and must pass.
 ## What CI checks
 
 Every PR runs the required checks on the `main` ruleset: the validate gate, the
-Python test matrix, the image build with its CRITICAL-CVE scan, and the PII
+tests on Python 3.13, the image build with its CRITICAL-CVE scan, and the PII
 guard. CodeQL, zizmor, gitleaks and pip-audit also run, and their findings land
 in the Security tab. [docs/standards/ci-cd.md](docs/standards/ci-cd.md)
 describes each workflow and why it exists.

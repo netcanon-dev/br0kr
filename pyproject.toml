@@ -16,7 +16,7 @@ description = "Postgres-backed capacity broker: race-free, admission-controlled 
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-# The CI test matrix (ci.yml) is the support range: keep the two in lockstep.
+# ci.yml's full test matrix (push to main, weekly) is the support range: keep the two in lockstep.
 requires-python = ">=3.11"
 authors = [{ name = "netcanon-dev" }]
 keywords = ["proxmox", "postgresql", "capacity-planning", "admission-control", "mcp", "vm-provisioning"]

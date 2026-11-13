@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import re
 import subprocess
 import tarfile
@@ -355,3 +356,36 @@ def test_coverage_floor_is_set_and_ci_applies_it():
     assert "--cov-fail-under" not in str(tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
                                          ["tool"]["pytest"]["ini_options"].get("addopts", ""))
     assert "uses: actions/upload-artifact@" in job and "path: coverage.xml" in job
+
+
+def test_prs_gate_on_the_image_python_and_main_tests_the_support_range():
+    """ci.yml's test matrix runs a pull request on the Python the image ships (Dockerfile's `FROM python:X.Y`)
+    and every other event on the whole support range, which equals pyproject.toml's version classifiers, starts
+    at `requires-python` and includes the image's Python; the coverage artifact comes from the image's leg; and
+    the validate job sets BR0KR_SKIP_UNIT, under which both gate scripts run only this file, so a PR runs the
+    suite once and this test still runs in the validate job (review TEST-06).
+
+    Guards the three drifting apart: an image bumped to a new Python while PRs still gate on the old one (the
+    shipped interpreter untested before merge), a classifier claiming a version nothing tests, or the validate
+    job silently running the whole suite a second time."""
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci.split("\n  test:\n", 1)[1].split("\n  harness:\n", 1)[0]
+    m = re.search(r"python: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '(\[[^']*\])' \|\| "
+                  r"'(\[[^']*\])'\) \}\}", job)
+    assert m, "the test matrix must pick its Python list by event"
+    pr_legs, full_legs = json.loads(m[1]), json.loads(m[2])
+    image = re.search(r"^FROM python:(\d+\.\d+)", (_ROOT / "Dockerfile").read_text(encoding="utf-8"), re.M)[1]
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    classifiers = [c.rsplit(" ", 1)[1] for c in project["classifiers"]
+                   if re.fullmatch(r"Programming Language :: Python :: 3\.\d+", c)]
+    assert pr_legs == [image], (pr_legs, image)
+    assert full_legs == classifiers and image in full_legs, (full_legs, classifiers)
+    assert project["requires-python"] == f">={full_legs[0]}"
+    assert f"matrix.python == '{image}'" in job   # the coverage artifact's leg runs on every event
+    validate = ci.split("\n  validate:\n", 1)[1].split("\n  test:\n", 1)[0]
+    assert "BR0KR_SKIP_UNIT: '1'" in validate
+    for gate, switch in (("validate.sh", 'if [ "${BR0KR_SKIP_UNIT:-0}" = 1 ]; then'),
+                         ("validate.ps1", "if ($env:BR0KR_SKIP_UNIT -eq '1') {")):
+        text = (_ROOT / "tests" / gate).read_text(encoding="utf-8")
+        assert switch in text, gate
+        assert "-m pytest -q tests/unit/test_repo_hygiene.py" in text.split(switch, 1)[1].split("else", 1)[0], gate
