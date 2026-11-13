@@ -14,7 +14,7 @@ from types import ModuleType
 
 import pytest
 
-from br0kr import admin, auth, dashboard, gateway
+from br0kr import admin, auth, dashboard, dashboard_actions, gateway
 
 pytestmark = pytest.mark.unit
 
@@ -68,8 +68,8 @@ def test_every_dashboard_action_resolves_to_a_documented_verb():
     # ...and it picks the right function: a module verb, a named helper, a local helper the lambda calls.
     assert verbs["/api/cancel"] is gateway.cancel_lease
     assert verbs["/api/storage/content"] is admin.set_storage_content
-    assert verbs["/api/replication/force-fail"] is dashboard._force_fail_replication_action
-    assert verbs["/api/settings/edit"] is dashboard._apply_settings_edit
+    assert verbs["/api/replication/force-fail"] is dashboard_actions._force_fail_replication_action
+    assert verbs["/api/settings/edit"] is dashboard_actions._apply_settings_edit
 
 
 def test_an_action_missing_from_the_literal_fails_the_render(monkeypatch):

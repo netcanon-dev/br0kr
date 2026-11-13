@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
-from br0kr import admin, audit, auth, build, dashboard, gateway, inventory, ui_assets
+from br0kr import admin, audit, auth, build, dashboard, dashboard_actions, gateway, inventory, ui_assets
 
 pytestmark = pytest.mark.integration
 
@@ -124,11 +124,11 @@ def test_parse_node_forwards_pve_node_for_the_operator_surface():
     build a driver) so an operator can set it from the dashboard — GAP-1: before this it was unsettable through
     the ENTIRE operator surface (dashboard + admin), forcing a raw `UPDATE node SET pve_node` and silently
     leaving the node capacity-only. A blank stays None (set_node COALESCEs None → keep existing)."""
-    out = dashboard._parse_node({"node_id": "pve2", "cpu_total": 16, "mem_total_mb": 32768,
+    out = dashboard_actions._parse_node({"node_id": "pve2", "cpu_total": 16, "mem_total_mb": 32768,
                                  "cluster_id": "pve2", "pve_node": "pve2"})
     assert out == {"node_id": "pve2", "cpu_total": 16.0, "mem_total_mb": 32768,
                    "cluster_id": "pve2", "pve_node": "pve2"}
-    assert dashboard._parse_node({"node_id": "n", "cpu_total": 1, "mem_total_mb": 1})["pve_node"] is None
+    assert dashboard_actions._parse_node({"node_id": "n", "cpu_total": 1, "mem_total_mb": 1})["pve_node"] is None
 
 
 def test_page_node_form_and_table_expose_pve_node():
@@ -455,7 +455,7 @@ def test_lease_create_forwards_to_actas_project_and_commits(monkeypatch):
         def commit(self) -> None:
             committed.append(1)
 
-    monkeypatch.setattr(dashboard.actas, "create_lease", lambda c, **k: (seen.update(k),
+    monkeypatch.setattr(dashboard_actions.actas, "create_lease", lambda c, **k: (seen.update(k),
                         {"lease_id": 5, "admitted": True, "queued": False, "idempotent": False, "reason": None})[1])
     with _serving(lambda: _C(), token="sekret") as port:
         code, body = _post(port, "/api/lease/create",
@@ -479,7 +479,7 @@ def test_lease_create_audits_a_fresh_reservation_but_not_a_rejection(monkeypatch
                 rows.append(params)
             return self
 
-    monkeypatch.setattr(dashboard.actas, "create_lease",
+    monkeypatch.setattr(dashboard_actions.actas, "create_lease",
                         lambda c, **k: {"lease_id": 9, "admitted": True, "queued": False,
                                         "idempotent": False, "reason": None})
     with _serving(lambda: _AuditConn(), token="sekret") as port:
@@ -489,7 +489,7 @@ def test_lease_create_audits_a_fresh_reservation_but_not_a_rejection(monkeypatch
     assert len(rows) == 1 and "team-a" in rows[0] and "9" in rows[0]   # project stamped + lease-id target
 
     rows.clear()
-    monkeypatch.setattr(dashboard.actas, "create_lease",
+    monkeypatch.setattr(dashboard_actions.actas, "create_lease",
                         lambda c, **k: {"lease_id": None, "admitted": False, "queued": False,
                                         "idempotent": False, "reason": "no_capacity"})
     with _serving(lambda: _AuditConn(), token="sekret") as port:
@@ -503,7 +503,7 @@ def test_lease_create_and_renew_require_the_operator_token(monkeypatch):
     """The act-as create + the renew are token-gated writes: no bearer -> 401, wrong bearer -> 401, and with
     NO operator token configured -> 403 disabled. Guards the provisioning surface (which debits a project's
     real quota + injects an ssh key) being reachable unauthenticated."""
-    monkeypatch.setattr(dashboard.actas, "create_lease", lambda c, **k: {"admitted": True, "lease_id": 1})
+    monkeypatch.setattr(dashboard_actions.actas, "create_lease", lambda c, **k: {"admitted": True, "lease_id": 1})
     monkeypatch.setattr(gateway, "renew_lease", lambda c, lid: {"lease_id": lid, "renewed": True})
     body = {"project_id": "team-a", "idem_key": "d", "req_cpu": 1, "req_mem_mb": 1, "ttl_seconds": 60}
     with _serving(lambda: _FakeConn(), token="sekret") as port:
@@ -1135,8 +1135,8 @@ def test_settings_edit_and_reload_are_token_gated_and_reach_the_verb(monkeypatch
     / settings.request_reload with the parsed patch. With NO server token both are 403 and the verb never runs.
     Guards a runtime-knob edit or a fleet-reload trigger bypassing the operator gate."""
     calls: dict[str, object] = {}
-    monkeypatch.setattr(dashboard.settings, "set_settings", lambda c, patch: calls.__setitem__("patch", patch))
-    monkeypatch.setattr(dashboard.settings, "request_reload", lambda c: calls.__setitem__("reload", True))
+    monkeypatch.setattr(dashboard_actions.settings, "set_settings", lambda c, patch: calls.__setitem__("patch", patch))
+    monkeypatch.setattr(dashboard_actions.settings, "request_reload", lambda c: calls.__setitem__("reload", True))
     with _serving(lambda: _FakeConn(), token="") as port:
         assert _post(port, "/api/settings/edit", {"queue_max": 5}, token="x")[0] == 403
         assert _post(port, "/api/reload", {}, token="x")[0] == 403
@@ -1150,7 +1150,7 @@ def test_settings_edit_and_reload_are_token_gated_and_reach_the_verb(monkeypatch
 
 
 def test_force_fail_replication_action_settles_unconditionally_after_commit(monkeypatch):
-    """dashboard._force_fail_replication_action commits the CAS THEN frees the byte reservation via
+    """dashboard_actions._force_fail_replication_action commits the CAS THEN frees the byte reservation via
     settle_forced_reservation UNCONDITIONALLY (idempotent — the repair path on an already_terminal retry).
     Guards the settle being dropped from the surface (regressing the ~4h dangling-reservation leak
     that refuses a re-request target_storage_insufficient) and the CAS-then-settle ordering."""
@@ -1160,20 +1160,20 @@ def test_force_fail_replication_action_settles_unconditionally_after_commit(monk
         def commit(self) -> None:
             order.append("commit")
 
-    monkeypatch.setattr(dashboard.replication, "force_fail_replication",
+    monkeypatch.setattr(dashboard_actions.replication, "force_fail_replication",
                         lambda c, rid, reason: order.append("force") or {"replication_id": rid, "forced": True})
-    monkeypatch.setattr(dashboard.replication, "settle_forced_reservation",
+    monkeypatch.setattr(dashboard_actions.replication, "settle_forced_reservation",
                         lambda c, rid: order.append("settle"))
-    out = dashboard._force_fail_replication_action(_Conn(), replication_id=7, reason="wedged")
+    out = dashboard_actions._force_fail_replication_action(_Conn(), replication_id=7, reason="wedged")
     assert out["forced"] is True
     assert order == ["force", "commit", "settle"]   # settle AFTER the durable CAS, and always (the repair path)
     order.clear()
     # the DISCRIMINATING case: on an already_terminal retry the settle STILL fires — the crash-window
     # repair path. Reverting to the earlier `if r.get("forced"):` guard would drop this and keep the first case green.
-    monkeypatch.setattr(dashboard.replication, "force_fail_replication",
+    monkeypatch.setattr(dashboard_actions.replication, "force_fail_replication",
                         lambda c, rid, reason: order.append("force") or {"replication_id": rid, "forced": False,
                                                                          "reason": "already_terminal"})
-    dashboard._force_fail_replication_action(_Conn(), replication_id=7, reason=None)
+    dashboard_actions._force_fail_replication_action(_Conn(), replication_id=7, reason=None)
     assert order == ["force", "commit", "settle"]   # settle repairs even the no-op force
 
 

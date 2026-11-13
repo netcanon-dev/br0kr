@@ -122,10 +122,8 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   bridge per logical network (a Logical networks panel manages the names, from `inventory.list_networks`); a
   template row sets its net0 network and hand-modified mark; an operator-gated roster lists and clears discovery
   dismissals. The drift REPORT stays on the operator MCP gateway: the dashboard holds no PVE credential, so it
-  confirms what a report found rather than running one. These
-  are privileged config
-  mutations kept OUT of the
-  agent gateway/MCP, dispatched through a data-driven action table; every POST is
+  confirms what a report found rather than running one. These are privileged config mutations kept OUT of the
+  agent gateway/MCP, dispatched through a data-driven action table (`br0kr/dashboard_actions.py`); every POST is
   `authorize()`'d (constant-time `Bearer` check; disabled when no token is set, the read-only default)
   before the body is read, validated by a pure validator before any write, and committed by the dashboard.
   **Race-safety:** a capacity edit (node cpu/mem, storage size, project quota) can't over-allocate —

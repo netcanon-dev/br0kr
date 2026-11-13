@@ -9,8 +9,9 @@ live registries instead, so the reference can't drift:
 - the MCP tools from the FastMCP registry in br0kr/mcp_server.py (tenant tools as registered; the operator-only
   tools registered on a fresh server, so the env flag that hides them from the tenant gateway doesn't matter),
   with each tool's tier from auth.VERB_TIER and the first sentence of its description (its br0kr/verbs.py row);
-- the dashboard routes from dashboard._ROUTES with dashboard.GET_ACCESS, and the actions from dashboard._ACTIONS,
-  each described by the first docstring sentence of the function it runs.
+- the dashboard routes from dashboard._ROUTES with dashboard.GET_ACCESS, and the actions from dashboard._ACTIONS
+  (the table in br0kr/dashboard_actions.py), each described by the first docstring sentence of the function it
+  runs.
 
 Run it from the repo root after changing a tool, a parameter, a tier, a docstring's first sentence or a route:
     python scripts/gen_api_reference.py           # rewrite docs/api.md
@@ -132,20 +133,21 @@ def _resolve_verb(node: ast.AST, module: Any) -> Any:
 
 
 def action_verbs() -> dict[str, Any]:
-    """path → the function each dashboard POST action runs, read from the `_ACTIONS` literal in dashboard.py
-    (each entry is `(parse, verb)`; the verb is a lambda calling one admin/gateway/… function, or a helper)."""
-    from br0kr import dashboard
+    """path → the function each dashboard POST action runs, read from the `_ACTIONS` literal in
+    br0kr/dashboard_actions.py (each entry is `(parse, verb)`; the verb is a lambda calling one admin/gateway/…
+    function, or a helper)."""
+    from br0kr import dashboard_actions
 
-    tree = ast.parse(inspect.getsource(dashboard))
+    tree = ast.parse(inspect.getsource(dashboard_actions))
     table = next((n.value for n in tree.body if isinstance(n, ast.AnnAssign)
                   and isinstance(n.target, ast.Name) and n.target.id == "_ACTIONS"), None)
     if not isinstance(table, ast.Dict):
-        raise SystemExit("dashboard._ACTIONS is no longer an annotated dict literal: update "
+        raise SystemExit("dashboard_actions._ACTIONS is no longer an annotated dict literal: update "
                          "gen_api_reference.action_verbs")
     verbs: dict[str, Any] = {}
     for key, value in zip(table.keys, table.values, strict=True):
         if isinstance(key, ast.Constant) and isinstance(value, ast.Tuple) and len(value.elts) == 2:
-            verbs[str(key.value)] = _resolve_verb(value.elts[1], dashboard)
+            verbs[str(key.value)] = _resolve_verb(value.elts[1], dashboard_actions)
     return verbs
 
 

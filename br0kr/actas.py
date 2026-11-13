@@ -19,8 +19,9 @@ Design (per the Option-1 decision — reuse the existing scope seam, no new fram
   * The per-project image-governance gate (`auth.template_allowed`) is applied for the TARGET project
     here, exactly as the MCP adapter does — so a GUI create cannot bypass image governance.
 
-The HTTP marshalling (`_parse_lease_create`) and the operator auth + audit live in br0kr/dashboard.py;
-this module is the pure governance + queue-ceiling + dispatch seam plus its audit-gating predicate.
+The HTTP marshalling (`_parse_lease_create`) lives in br0kr/dashboard_actions.py and the operator auth + audit in
+br0kr/dashboard.py; this module is the pure governance + queue-ceiling + dispatch seam plus its audit-gating
+predicate.
 """
 from __future__ import annotations
 

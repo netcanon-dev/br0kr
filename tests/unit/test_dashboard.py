@@ -16,7 +16,7 @@ from types import ModuleType
 
 import pytest
 
-from br0kr import dashboard
+from br0kr import dashboard, dashboard_actions
 
 pytestmark = pytest.mark.unit
 
@@ -176,7 +176,8 @@ def test_reason_hint_explains_every_error_code_the_dashboard_request_handling_se
     """Every error code the dashboard's own request handling can answer with gets a hint: an exact REASON_HINT
     entry or a code-family rule (HINT_RULES, read from the page and applied here). The codes are collected
     from source:
-    - the literal `{"error": …}` codes and `_Reject("…")` codes in br0kr/dashboard.py;
+    - the literal `{"error": …}` codes and `_Reject("…")` codes in br0kr/dashboard.py and
+      br0kr/dashboard_actions.py (the handler and the action parsers);
     - the `_Reject(f"{key}_…")` families, such as node_id_required;
     - the validators behind `_Reject(reason)`: br0kr/admin.py's reasons and the settings editor's kind:setting
       codes;
@@ -204,7 +205,9 @@ def test_reason_hint_explains_every_error_code_the_dashboard_request_handling_se
         assert hits, f"no match for {pattern}; the source changed shape, update this collector"
         return hits
 
-    dash, adm, sett = source(dashboard), source(admin), source(settings)
+    # the request handling is the handler (dashboard.py) plus the action table and its parsers (dashboard_actions.py)
+    dash = source(dashboard) + "\n" + source(dashboard_actions)
+    adm, sett = source(admin), source(settings)
     codes = (found(r'"error":\s*"([a-z_]+)"', dash) | found(r'_Reject\("([a-z_]+)"\)', dash)
              | {f"some_field_{s}" for s in found(r'_Reject\(f"\{key\}_([a-z_]+)"\)', dash)}
              | found(r'return "([a-z_]+)"', adm) | {"unauthorized", "disabled"})
@@ -440,13 +443,13 @@ def test_parse_operator_create_validates_and_shapes():
     """_parse_operator_create (0026) keeps {name, expires_in_days}, running the name/expiry validation first (a
     blank name or an out-of-range expiry → a crisp _Reject, never a bad row). Guards a malformed named-operator
     mint reaching the DB."""
-    assert dashboard._parse_operator_create({"name": "dana"}) == {"name": "dana", "expires_in_days": None}
-    assert dashboard._parse_operator_create({"name": "dana", "expires_in_days": 30}) == {
+    assert dashboard_actions._parse_operator_create({"name": "dana"}) == {"name": "dana", "expires_in_days": None}
+    assert dashboard_actions._parse_operator_create({"name": "dana", "expires_in_days": 30}) == {
         "name": "dana", "expires_in_days": 30}
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_operator_create({"name": ""})                         # blank name (_req_str)
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_operator_create({"name": "s", "expires_in_days": 0})   # invalid_expiry (validate)
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_operator_create({"name": ""})                         # blank name (_req_str)
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_operator_create({"name": "s", "expires_in_days": 0})   # invalid_expiry (validate)
 
 
 def test_named_dashboard_operator_is_wired():
@@ -463,8 +466,9 @@ def test_named_dashboard_operator_is_wired():
     assert "def _named_operator_ok(self" in src and "auth.resolve_dashboard_operator(" in src
     assert 'actor=actor or "dashboard-operator"' in src
     assert "self._action(path, kwargs, lambda c: verb(c, **kwargs), actor, actor_token_id" in src
-    # POST actions + the operator-gated reads
-    assert "admin.create_dashboard_operator" in src and "admin.revoke_dashboard_operator" in src
+    # POST actions (their table is in dashboard_actions.py) + the operator-gated reads
+    actions_src = inspect.getsource(dashboard_actions)
+    assert "admin.create_dashboard_operator" in actions_src and "admin.revoke_dashboard_operator" in actions_src
     assert "admin.list_dashboard_operators" in src
     # GUI: the management panel + the 'acting as' indicator, wired into the render loop (the JS now lives in
     # dashboard.PAGE — split into br0kr/dashboard_page.py — so the GUI needles scan the re-exported PAGE).
@@ -619,8 +623,8 @@ def test_replication_panel_is_wired():
     for path in ("/api/replication/create", "/api/replication/cancel", "/api/replication/prune"):
         assert path in dashboard._ACTIONS
     # the act-as create is result-aware: audited only on a fresh request, refused-channel on a final refusal
-    assert dashboard._RESULT_AUDIT["/api/replication/create"] is dashboard.actas.audit_replicate
-    assert dashboard._RESULT_REFUSED["/api/replication/create"] is dashboard.actas.refused_replicate
+    assert dashboard._RESULT_AUDIT["/api/replication/create"] is dashboard_actions.actas.audit_replicate
+    assert dashboard._RESULT_REFUSED["/api/replication/create"] is dashboard_actions.actas.refused_replicate
     page = dashboard.PAGE
     for needle in ('id="replications-sec"', 'id="replications"', "function renderReplications(",
                    "renderReplications();", "DATA.replications", "function openReplicateForm(",
@@ -834,12 +838,12 @@ def test_parse_lease_create_validates_and_shapes():
     out2 = parse({"project_id": "p", "idem_key": "d", "req_cpu": 1, "req_mem_mb": 512,
                   "cluster_id": "c1", "ttl_seconds": 60, "queue": False})
     assert out2["cluster_id"] == "c1" and out2["node_id"] is None and out2["queue"] is False
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"project_id": "p", "idem_key": "d", "req_cpu": 1, "req_mem_mb": 1, "ttl_seconds": 60,
                "node_id": "n1", "cluster_id": "c1"})                                    # both placements
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"idem_key": "d", "req_cpu": 1, "req_mem_mb": 1, "ttl_seconds": 60, "node_id": "n1"})  # no project
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"project_id": "p", "idem_key": "d", "req_cpu": True, "req_mem_mb": 1, "ttl_seconds": 60})  # bool
     assert callable(verb)
 
@@ -867,7 +871,7 @@ def test_lease_renew_and_release_actions_call_gateway(monkeypatch):
     for path, fn_name in (("/api/lease/renew", "renew_lease"), ("/api/lease/release", "release_lease")):
         parse, verb = dashboard._ACTIONS[path]
         assert parse({"lease_id": 7}) == {"lease_id": 7}
-        with pytest.raises(dashboard._Reject):
+        with pytest.raises(dashboard_actions._Reject):
             parse({})                                                  # missing lease_id -> clean 400
         seen: dict = {}
         monkeypatch.setattr(dashboard.gateway, fn_name,
@@ -934,10 +938,10 @@ def test_tenant_download_action_is_act_as_with_result_aware_audit(monkeypatch):
                  "url": "https://x/y.qcow2", "sha256": "a" * 64, "storage_id": "local-zfs", "size_gb": 8,
                  "public": True, "name": "n"})
     assert out["project_id"] == "proj" and out["size_gb"] == 8 and "public" not in out
-    with pytest.raises(dashboard._Reject):   # project_id is REQUIRED (no ungoverned NULL-project download)
+    with pytest.raises(dashboard_actions._Reject):   # project_id is REQUIRED (no ungoverned NULL-project download)
         parse({"cluster_id": "c1", "target_template_id": "t", "url": "https://x", "sha256": "a" * 64,
                "storage_id": "s", "size_gb": 8})
-    with pytest.raises(dashboard._Reject):   # size_gb is REQUIRED (the reserved disk budget)
+    with pytest.raises(dashboard_actions._Reject):   # size_gb is REQUIRED (the reserved disk budget)
         parse({"project_id": "p", "cluster_id": "c1", "target_template_id": "t", "url": "https://x",
                "sha256": "a" * 64, "storage_id": "s"})
     seen: dict = {}
@@ -975,12 +979,12 @@ def test_template_action_parses_required_fields():
     full = parse({"template_id": "d", "cluster_id": "clA", "vmid": 9000, "name": "Deb", "description": "x",
                   "public": False})
     assert full["name"] == "Deb" and full["description"] == "x" and full["public"] is False
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"template_id": "d", "cluster_id": "clA", "vmid": 0})          # non_positive_vmid
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"template_id": "d", "cluster_id": "clA", "vmid": 9000, "public": "yes"})   # bool, not a string
     for bad in ({"cluster_id": "clA", "vmid": 9000}, {"template_id": "d", "vmid": 9000}):
-        with pytest.raises(dashboard._Reject):
+        with pytest.raises(dashboard_actions._Reject):
             parse(bad)                                                       # missing id / cluster
 
 
@@ -993,7 +997,7 @@ def test_template_grant_action_parses_both_ids():
         assert parse({"project_id": "team-a", "template_id": "t1"}) == {
             "project_id": "team-a", "template_id": "t1"}
         for bad in ({"template_id": "t1"}, {"project_id": "team-a"}, {}):
-            with pytest.raises(dashboard._Reject):
+            with pytest.raises(dashboard_actions._Reject):
                 parse(bad)
 
 
@@ -1018,7 +1022,7 @@ def test_download_routes_and_parsers(monkeypatch):
     src_parse, _ = dashboard._ACTIONS["/api/template/source/create"]
     assert src_parse({"url_prefix": "https://cloud.debian.org/"}) == {
         "url_prefix": "https://cloud.debian.org/", "description": None}
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         src_parse({})                                                    # missing url_prefix
     req_parse, _ = dashboard._ACTIONS["/api/template/build/request"]
     long_url = "https://cloud.debian.org/images/cloud/bookworm/latest/" + "x" * 200 + ".qcow2"
@@ -1029,7 +1033,7 @@ def test_download_routes_and_parsers(monkeypatch):
         body = {"cluster_id": "clA", "target_template_id": "deb", "url": "https://x/y.qcow2",
                 "sha256": "a" * 64, "storage_id": "local-zfs"}
         del body[missing]
-        with pytest.raises(dashboard._Reject):
+        with pytest.raises(dashboard_actions._Reject):
             req_parse(body)
     # the source DELETE parser must accept the SAME long prefix the source CREATE does (a >128-char mirror
     # path is realistic), else a long allowlist entry would be undeletable from the dashboard — the
@@ -1050,15 +1054,15 @@ def test_project_template_disk_action_parses_optional_gb():
     assert parse({"project_id": "projA", "max_template_disk_gb": 100}) == {
         "project_id": "projA", "max_template_disk_gb": 100}
     assert parse({"project_id": "projA"}) == {"project_id": "projA", "max_template_disk_gb": None}  # clear
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"project_id": "projA", "max_template_disk_gb": 0})         # non-positive → rejected
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"max_template_disk_gb": 100})                             # missing project_id
     # a JSON float/bool must be REJECTED at the boundary, not silently truncated by _opt_int (10.5→10) past
     # the validator's int-only check (the R2 fix); the dashboard JS only ever sends an integer.
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"project_id": "projA", "max_template_disk_gb": 10.5})
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"project_id": "projA", "max_template_disk_gb": True})
 
 
@@ -1071,9 +1075,9 @@ def test_node_cordon_action_parses_a_strict_bool():
     assert parse({"node_id": "n1", "cordoned": True}) == {"node_id": "n1", "cordoned": True}
     assert parse({"node_id": "n1", "cordoned": False}) == {"node_id": "n1", "cordoned": False}
     for bad in ({"node_id": "n1"}, {"node_id": "n1", "cordoned": 1}, {"node_id": "n1", "cordoned": "true"}):
-        with pytest.raises(dashboard._Reject):
+        with pytest.raises(dashboard_actions._Reject):
             parse(bad)
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         parse({"cordoned": True})                            # missing node_id
 
 
@@ -1234,11 +1238,11 @@ def test_force_delete_parser_reads_strict_force_flag():
     """The node/storage delete parser reads the id + an OPTIONAL strict-bool `force` (absent / non-true →
     False), so a plain delete and a force-sever delete share one endpoint. Guards a force severing terminal
     lease history being triggered by anything but an explicit JSON true (e.g. the string 'true')."""
-    p = dashboard._parse_force_delete("node_id")
+    p = dashboard_actions._parse_force_delete("node_id")
     assert p({"node_id": "nA"}) == {"node_id": "nA", "force": False}
     assert p({"node_id": "nA", "force": True}) == {"node_id": "nA", "force": True}
     assert p({"node_id": "nA", "force": "true"}) == {"node_id": "nA", "force": False}   # a string is not a bool
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         p({})                                                                            # missing id
 
 
@@ -1248,11 +1252,11 @@ def test_parse_instance_delete_reads_int_id_and_strict_force(monkeypatch):
     admin.delete_template_instance — the §4.4 seam. Guards a force severing terminal lease history on anything
     but explicit JSON true (e.g. the string 'true'), and the action dropping `force` (so the GUI's force re-POST
     would silently become a plain delete that re-refuses forever)."""
-    p = dashboard._parse_instance_delete
+    p = dashboard_actions._parse_instance_delete
     assert p({"instance_id": 7}) == {"instance_id": 7, "force": False}
     assert p({"instance_id": 7, "force": True}) == {"instance_id": 7, "force": True}
     assert p({"instance_id": 7, "force": "true"}) == {"instance_id": 7, "force": False}   # a string is not a bool
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         p({"instance_id": "seven"})   # instance_id must be an INT, not a string
     # the action lambda forwards force into the verb (a stub records the kwargs it was called with)
     parse, verb = dashboard._ACTIONS["/api/instance/delete"]
@@ -1267,10 +1271,10 @@ def test_cluster_edit_parser_reads_clear_pdm_endpoint():
     """The cluster-edit parser carries `clear_pdm_endpoint` (strict bool) so an operator can UNSET the one
     nullable connection field a blank can't clear under the COALESCE read-modify-write. Guards a non-true
     value accidentally clearing the endpoint."""
-    out = dashboard._parse_cluster_edit({"cluster_id": "clA", "clear_pdm_endpoint": True})
+    out = dashboard_actions._parse_cluster_edit({"cluster_id": "clA", "clear_pdm_endpoint": True})
     assert out["clear_pdm_endpoint"] is True and out["cluster_id"] == "clA"
-    assert dashboard._parse_cluster_edit({"cluster_id": "clA"})["clear_pdm_endpoint"] is False
-    assert dashboard._parse_cluster_edit(
+    assert dashboard_actions._parse_cluster_edit({"cluster_id": "clA"})["clear_pdm_endpoint"] is False
+    assert dashboard_actions._parse_cluster_edit(
         {"cluster_id": "clA", "clear_pdm_endpoint": "yes"})["clear_pdm_endpoint"] is False
 
 
@@ -1279,14 +1283,14 @@ def test_cluster_parsers_carry_the_optional_pdm_token_fields():
     credential, 0018): present → forwarded; absent → None (CREATE stores NULL, EDIT keeps current). Guards the
     two new fields being dropped between the form and the admin verb (which would leave a cluster silently
     non-migration-capable). The secret ENV NAME is carried, never a secret value."""
-    created = dashboard._parse_cluster({"cluster_id": "clA", "pve_host": "10.0.0.1", "token_id": "root@pam!t",
+    created = dashboard_actions._parse_cluster({"cluster_id": "clA", "pve_host": "10.0.0.1", "token_id": "root@pam!t",
                                         "token_secret_env": "S", "pdm_token_id": "root@pam!m",
                                         "pdm_token_secret_env": "PDM_S"})
     assert created["pdm_token_id"] == "root@pam!m" and created["pdm_token_secret_env"] == "PDM_S"
-    bare = dashboard._parse_cluster({"cluster_id": "clA", "pve_host": "10.0.0.1", "token_id": "t",
+    bare = dashboard_actions._parse_cluster({"cluster_id": "clA", "pve_host": "10.0.0.1", "token_id": "t",
                                      "token_secret_env": "S"})
     assert bare["pdm_token_id"] is None and bare["pdm_token_secret_env"] is None
-    edited = dashboard._parse_cluster_edit({"cluster_id": "clA", "pdm_token_id": "root@pam!m"})
+    edited = dashboard_actions._parse_cluster_edit({"cluster_id": "clA", "pdm_token_id": "root@pam!m"})
     assert edited["pdm_token_id"] == "root@pam!m" and edited["pdm_token_secret_env"] is None
 
 
@@ -1294,10 +1298,10 @@ def test_migrate_parser_marshals_the_operator_migrate_request():
     """The /api/migrate parser marshals idem_key + lease_id (int) + target_node_id; the verb does the
     lease-active / cross-cluster validation. Guards a malformed operator migrate request (missing field or a
     non-int lease) reaching the verb — a missing required field is a crisp 400 (_Reject)."""
-    out = dashboard._parse_migrate({"idem_key": "m1", "lease_id": 7, "target_node_id": "B"})
+    out = dashboard_actions._parse_migrate({"idem_key": "m1", "lease_id": 7, "target_node_id": "B"})
     assert out == {"idem_key": "m1", "lease_id": 7, "target_node_id": "B"}
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_migrate({"idem_key": "m1", "target_node_id": "B"})   # missing lease_id
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_migrate({"idem_key": "m1", "target_node_id": "B"})   # missing lease_id
 
 
 def test_settings_parser_keeps_known_knobs_validates_and_rejects():
@@ -1305,13 +1309,13 @@ def test_settings_parser_keeps_known_knobs_validates_and_rejects():
     settings.validate_patch, and _Rejects a bad edit — a float where an int is required (the truncation
     trap), a below-min int, or an unknown knob. A None value CLEARS an override. Guards a malformed settings
     edit reaching the ledger / a DB CHECK error instead of a clean 400."""
-    out = dashboard._parse_settings({"queue_max": 250, "sweep_dry_run": True, "ignored": "x"})
+    out = dashboard_actions._parse_settings({"queue_max": 250, "sweep_dry_run": True, "ignored": "x"})
     assert out == {"patch": {"queue_max": 250, "sweep_dry_run": True}}   # 'ignored' dropped
-    assert dashboard._parse_settings({"build_limit": None})["patch"] == {"build_limit": None}   # clear
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_settings({"reap_grace": 10.5})     # float → not_an_int (no silent truncation)
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_settings({"queue_max": -1})        # below the knob minimum
+    assert dashboard_actions._parse_settings({"build_limit": None})["patch"] == {"build_limit": None}   # clear
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_settings({"reap_grace": 10.5})     # float → not_an_int (no silent truncation)
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_settings({"queue_max": -1})        # below the knob minimum
 
 
 class _SettingsReadConn:
@@ -1357,12 +1361,12 @@ def test_parse_max_pinned_is_strict_about_the_bound():
     assert parse({"project_id": "p", "max_pinned": 4}) == {"project_id": "p", "max_pinned": 4}
     for bad, reason in ((True, "max_pinned_invalid"), (2.0, "max_pinned_invalid"), ("2", "max_pinned_invalid"),
                         (None, "max_pinned_invalid"), (-1, "negative_max_pinned")):
-        with pytest.raises(dashboard._Reject) as err:
+        with pytest.raises(dashboard_actions._Reject) as err:
             parse({"project_id": "p", "max_pinned": bad})
         assert err.value.reason == reason
     pin_parse = dashboard._ACTIONS["/api/lease/pin"][0]
     assert pin_parse({"lease_id": 3, "pinned": False}) == {"lease_id": 3, "pinned": False}
-    with pytest.raises(dashboard._Reject):
+    with pytest.raises(dashboard_actions._Reject):
         pin_parse({"lease_id": 3, "pinned": 1})   # a 0/1 is not a toggle
 
 
@@ -1484,7 +1488,7 @@ def test_network_bridge_delete_takes_a_strict_force_flag(monkeypatch):
         "node_id": "n1", "logical_network_id": "lan", "force": False}
     assert parse({"node_id": "n1", "logical_network_id": "lan", "force": True})["force"] is True
     for fuzzy in ("true", 1):
-        with pytest.raises(dashboard._Reject):
+        with pytest.raises(dashboard_actions._Reject):
             parse({"node_id": "n1", "logical_network_id": "lan", "force": fuzzy})
 
 
@@ -1535,7 +1539,7 @@ def test_token_create_body_defaults_to_a_finite_lifetime(extra, days):
     `never_expires: true` mints a token that never expires. Guards a scripted or GUI create that names no lifetime
     getting an eternal token, which the operator then forgets (review SEC-07)."""
     body = {"project_id": "team-a", "scope": "consume", "label": "ci", **extra}
-    parsed = dashboard._parse_token_create(body)
+    parsed = dashboard_actions._parse_token_create(body)
     assert parsed["expires_in_days"] == days
     assert parsed["never_expires"] is (days is None)   # the audit row names the choice
 
@@ -1546,8 +1550,8 @@ def test_token_create_body_defaults_to_a_finite_lifetime(extra, days):
 def test_token_create_refuses_an_ambiguous_lifetime(body):
     """Naming a lifetime AND never_expires, or a never_expires that is not a boolean, is refused before any write.
     Guards a client that meant one getting the other: a 30-day token minted as eternal, or the reverse."""
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_token_create({"project_id": "team-a", "scope": "consume", "label": "ci", **body})
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_token_create({"project_id": "team-a", "scope": "consume", "label": "ci", **body})
 
 
 @pytest.mark.parametrize(("body", "days"), [({"expires_in_days": 14}, 14), ({"never_expires": True}, None)],
@@ -1555,7 +1559,7 @@ def test_token_create_refuses_an_ambiguous_lifetime(body):
 def test_token_expiry_body_names_its_choice(body, days):
     """POST /api/token/expiry re-dates a token with expires_in_days, and clears its expiry only with
     `never_expires: true`. Guards the re-date path being the back door to an eternal token."""
-    assert dashboard._parse_token_expiry({"token_id": 3, **body}) == {"token_id": 3, "expires_in_days": days,
+    assert dashboard_actions._parse_token_expiry({"token_id": 3, **body}) == {"token_id": 3, "expires_in_days": days,
                                                                        "never_expires": days is None}
 
 
@@ -1564,8 +1568,8 @@ def test_token_expiry_body_names_its_choice(body, days):
 def test_token_expiry_body_refuses_no_choice_or_both(body):
     """A re-date body that names neither a lifetime nor never_expires, or names both, is refused. An empty body
     used to clear the expiry; it now clears nothing. Guards a typo'd or empty request making a token immortal."""
-    with pytest.raises(dashboard._Reject):
-        dashboard._parse_token_expiry({"token_id": 3, **body})
+    with pytest.raises(dashboard_actions._Reject):
+        dashboard_actions._parse_token_expiry({"token_id": 3, **body})
 
 
 def test_the_token_table_flags_a_token_that_never_expires():

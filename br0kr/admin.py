@@ -1077,8 +1077,8 @@ def validate_template(vmid: int) -> str | None:
     """Reject a malformed template catalog entry: the `vmid` must be > 0 (a Proxmox vmid; the table CHECK
     backstops it) and within the int column (a huge value would overflow as an opaque 503 — give a crisp
     400 instead). The id/cluster_id/name/description are strings validated at the dashboard boundary
-    (_req_str/_opt_str); the cluster's EXISTENCE is checked in the verb (a pre-check, not here). Pure, so
-    the catalog validation is unit-testable without a database."""
+    (dashboard_actions._req_str/_opt_str); the cluster's EXISTENCE is checked in the verb (a pre-check, not
+    here). Pure, so the catalog validation is unit-testable without a database."""
     if vmid <= 0:
         return "non_positive_vmid"
     if vmid > _INT_MAX:

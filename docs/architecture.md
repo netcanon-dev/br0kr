@@ -126,7 +126,8 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `cli.py` | `br0kr-admin`: mints, lists and revokes agent tokens headless, validated and audited. | via admin, audit | — | `unit/test_cli.py`, `harness_cli.py` |
 | `cloudinit.py` | Pure VM-access policy: SSH key checks, cloud-init config, guest-IP pick. | — | — | `unit/test_cloudinit.py`, `harness_cloudinit.py` |
 | `daemon.py` | The leader's reconcile loop: leadership, connections, health; each tick runs the step table. | via the tick steps | via the tick steps | `unit/test_daemon.py`, `harness_daemon.py` |
-| `dashboard.py` | Stdlib HTTP server: read endpoints and the token-gated operator actions. | via admin, gateway, actas, settings, jobs | — | `unit/test_dashboard.py`, `integration/test_dashboard.py` |
+| `dashboard.py` | Stdlib HTTP server: the read endpoints, and the auth, commit and audit around each operator action. | reads; via dashboard_actions, audit, auth | — | `unit/test_dashboard.py`, `integration/test_dashboard.py` |
+| `dashboard_actions.py` | The dashboard's POST actions: a body parser and a verb per path, and the outcome-aware audit tables. | via admin, gateway, actas, pin, replication, settings | — | `unit/test_dashboard.py`, `unit/test_api_reference.py` |
 | `dashboard_page.py` | The dashboard's one HTML page: its CSS and the polling client script. | — | — | `unit/test_dashboard.py`, `integration/test_dashboard_client.py` |
 | `db.py` | The one connection seam: READ COMMITTED pin, keepalives, retry, pools. | — | — | `unit/test_db.py`, `harness_ledger_ha.py` |
 | `envelope.py` | Adds `ok` and a `reason` to every MCP tool answer. | — | — | `unit/test_envelope.py` |
@@ -172,6 +173,16 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `tick_upkeep.py` | Tick steps: reap, guest-IP discovery, orphan sweep, audit retention, discovery report. | via reaper, sweeper, reconciler, audit | via reaper, sweeper, reconciler; reads (discovery) | `unit/test_daemon.py`, `harness_discovery_cadence.py` |
 | `ui_assets.py` | Vendored UI-spec CSS and JS, served with the dashboard. | — | — | `unit/test_ui_assets.py`, `integration/test_dashboard.py` |
 | `verbs.py` | The MCP verb registry: one row per tool with its tier, verdict, shape and description. | — | — | `unit/test_mcp_contract.py`, `unit/test_envelope.py` |
+
+## Module size
+
+"No god files" means no hub that every change must edit, not a line limit. The hubs are tables (the MCP verb
+registry, the dashboard's action table, the tick steps), so a new tool, action or step is a row. Long domain modules
+such as `replication.py`, `placement.py` and `admin.py` stay whole: each holds one subject, and splitting it would be
+churn, not a seam (review CODE-04). No function is longer than 200 lines except the HTTP handler factories
+`dashboard.make_handler` and `oauth._make_handler` (a class built in a closure) and the fenced Proxmox sequences
+`reconciler.provision_lease`, `reconciler.build_template` and `sweeper.orphan_sweep`, mostly comments on how each
+step's failure depends on the steps before it. `tests/unit/test_architecture_doc.py` keeps this list exact.
 
 ## Scale envelope
 

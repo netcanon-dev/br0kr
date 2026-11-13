@@ -45,6 +45,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The dashboard's POST actions moved to `br0kr/dashboard_actions.py`; `discover_reachability` runs as steps.**
+  Same routes and report. A test keeps functions to at most 200 lines unless architecture.md says why (CODE-04).
 - **Every MCP tool is one row of `br0kr/verbs.py`: tier, verdict, shape, description.** A read-only tool was four
   edits, now a function and a row. What agents see is unchanged, pinned by `tests/fixtures/mcp_contract.json` (ARCH-03).
 - **The daemon's tick is a table (`br0kr/tick_steps.py`): a new step was four edits to daemon.py, now a row.** Each

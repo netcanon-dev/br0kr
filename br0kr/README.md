@@ -15,16 +15,16 @@ ledger or acts on Proxmox, and what proves it.
 - **The leader daemon is the only writer to Proxmox.** `daemon.py`, elected by `leader.py`, runs the tick: the step
   table in `tick_steps.py`, whose steps live in the `tick_*.py` modules and drive `reconciler.py`, `reaper.py`,
   `sweeper.py` and the job modules, all through `pve.py`'s fenced driver.
-- **Inputs reach handlers through tables:** the MCP verb registry in `verbs.py`, the route map and `_ACTIONS` in
-  `dashboard.py`, and the daemon's `tick_steps.STEPS`.
+- **Inputs reach handlers through tables:** the MCP verb registry in `verbs.py`, the dashboard's route map in
+  `dashboard.py` and its action table `_ACTIONS` in `dashboard_actions.py`, and the daemon's `tick_steps.STEPS`.
 - **One ledger seam:** every connection is opened by `db.py`, which pins READ COMMITTED and adds keepalives and
   retry.
 
 ## Adding a module
 
 1. Put the capability in a new file whose docstring opens with one line on what the file is.
-2. Wire it where inputs are dispatched: a row in `verbs.py` for an MCP tool (below), a route or `_ACTIONS` entry
-   in `dashboard.py`, or a row in `tick_steps.STEPS` (below).
+2. Wire it where inputs are dispatched: a row in `verbs.py` for an MCP tool (below), a route in `dashboard.py` or
+   an `_ACTIONS` row in `dashboard_actions.py` (below), or a row in `tick_steps.STEPS` (below).
 3. If it grants capacity, it calls `admission.admit()` or `promote_pinned()` and adds no debit of its own; if it
    changes a lease's state, it calls a `lease.py` transition.
 4. Add its row to the module map; `tests/unit/test_architecture_doc.py` fails until you do.
@@ -40,6 +40,18 @@ ledger or acts on Proxmox, and what proves it.
    (operator tier, served only by the operator gateway), calling `mcp_common._authorize` first, and its row.
 3. Rerun `scripts/gen_api_reference.py` and `scripts/gen_mcp_contract.py`: the fixture's diff is what changed
    for agents, and `tests/unit/test_mcp_contract.py` fails until it is committed.
+
+## Adding a dashboard action
+
+1. The verb is a function with a docstring in the module that owns the write (`admin.py`, `gateway.py`, …). It
+   does not commit; the dashboard's `_action` handler commits and writes the audit row. Its first sentence is the
+   action's description in `docs/api.md`.
+2. In `dashboard_actions.py`: a parser that turns the body into the verb's arguments and raises `_Reject(reason)`
+   on a bad one, and the `_ACTIONS` row `path: (parse, verb)`. If whether to audit depends on the result, add its
+   predicate to `_RESULT_AUDIT` (and to `_RESULT_REFUSED` if it can refuse for capacity).
+3. Rerun `scripts/gen_api_reference.py` (`tests/unit/test_api_reference.py` fails until you do), and give each new
+   reason code a hint in the page (`dashboard_page.py`); `tests/unit/test_dashboard.py` fails on a `_Reject` code
+   or an `admin.py` validator code that has none.
 
 ## Adding a tick step
 

@@ -1044,6 +1044,272 @@ def dismissal_subject_fields() -> dict[str, str]:
     return dict(_SUBJECT_FIELD)
 
 
+# discover_reachability's steps, in the order it runs them (review CODE-04): storage, then networks, then the
+# bridge suggestions built from what the network step read, then the unserved nodes, then the dismissal filter
+# over every drift bucket. Each step reads only; their order is the order of the ledger and PVE reads.
+
+
+def _classify_storage(
+    conn: psycopg.Connection[Any], views: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """The storage step: classify each read node's PVE storage listing (`views`, from `_gather_node_views`)
+    against its declared `storage_node` pairs and the `storage` catalog. Returns the eight storage buckets, keyed
+    and ordered as the report shows them (see discover_reachability for each)."""
+    read_nodes = sorted(views)
+    node_cluster: dict[str, Any] = {}
+    if read_nodes:
+        for nid, cid in conn.execute("SELECT id, cluster_id FROM node WHERE id = ANY(%s)",
+                                     (read_nodes,)).fetchall():
+            node_cluster[nid] = cid
+
+    known_pool_new_node: list[dict[str, Any]] = []
+    unknown_pool: list[dict[str, Any]] = []
+    declared_disabled: list[dict[str, Any]] = []
+    declared_absent: list[dict[str, Any]] = []
+    declared_inactive: list[dict[str, Any]] = []
+    quarantined_but_present: list[dict[str, Any]] = []
+    content_report: list[dict[str, Any]] = []
+    declared_incoherent: list[dict[str, Any]] = []
+
+    for node_id in read_nodes:
+        pve_view = views[node_id]
+        node_cid = node_cluster.get(node_id)
+        # (1) declaration-side — classify every declared pair against the PVE view.
+        declared_names: set[str] = set()
+        for storage_id, pve_name, quar_at, content_types in conn.execute(_DISCOVERY_PAIRS, (node_id,)).fetchall():
+            declared_names.add(pve_name)
+            rec = {"storage_id": storage_id, "node_id": node_id, "pve_name": pve_name}
+            entry = pve_view.get(pve_name)
+            if entry is None:
+                declared_absent.append({**rec, "ambiguous": True})   # absence is NEVER removal evidence
+                continue
+            if _storage_is_off(entry):
+                declared_disabled.append({**rec, "ambiguous": False})   # hard, but discovery only reports
+            elif quar_at is not None and not _unmet_clone_content(content_types, entry.get("content")):
+                # A QUARANTINED pair PVE now shows present + enabled AND whose clone content is intact — the
+                # quarantine may be stale, flag it clear-me. But if it STILL drops a clone-relevant declared token
+                # (a valid verify content auto-narrow, §10 #4), PVE has NOT contradicted it — do NOT flag clear-me
+                # (that would steer the operator to clear a valid quarantine and reopen the grant-then-kill); the
+                # content_report line below surfaces the drift + its set_storage_content remedy instead.
+                quarantined_but_present.append(rec)   # a quarantine PVE now contradicts (operator clears)
+            elif quar_at is None and entry.get("active", 1) in (0, "0", False):
+                declared_inactive.append(rec)   # soft (transient blip); a quarantined pair is never 'inactive'
+            drift = _content_drift(content_types, entry.get("content"))   # declared pools only
+            if drift is not None:
+                content_report.append({**rec, **drift})
+        # (1b) declaration-side — CLUSTER-INCOHERENT declared pairs (storage re-bound to another cluster, the
+        # reachability row left stale but still gate-trusted). Surfaced so the operator can remove_storage_node
+        # them; their pve_name is added to declared_names so the pool is NOT ALSO reported unknown/new below.
+        for storage_id, pve_name, storage_cluster in conn.execute(_INCOHERENT_PAIRS, (node_id,)).fetchall():
+            declared_names.add(pve_name)
+            declared_incoherent.append({"storage_id": storage_id, "node_id": node_id, "pve_name": pve_name,
+                                        "storage_cluster": storage_cluster, "node_cluster": node_cid})
+        # (2) PVE-side — pools PVE shows that are NOT declared for this node → widen candidate / unknown.
+        for pve_name in sorted(pve_view):
+            if pve_name in declared_names:
+                continue
+            entry = pve_view[pve_name]
+            srow = (conn.execute("SELECT id, content_types FROM storage "
+                                 "WHERE cluster_id = %s AND COALESCE(pve_name, id) = %s", (node_cid, pve_name))
+                    .fetchone() if node_cid is not None else None)
+            if srow is not None:
+                if not _storage_is_off(entry):   # a disabled pool is not a widen target
+                    known_pool_new_node.append({"storage_id": srow[0], "node_id": node_id, "pve_name": pve_name})
+                    drift = _content_drift(srow[1], entry.get("content"))
+                    if drift is not None:
+                        content_report.append({"storage_id": srow[0], "node_id": node_id,
+                                               "pve_name": pve_name, **drift})
+            else:
+                unknown_pool.append({"node_id": node_id, "pve_name": pve_name,
+                                     "observed_type": entry.get("type"),
+                                     "observed_content": _content_tokens(entry.get("content"))})
+    return {"known_pool_new_node": known_pool_new_node, "unknown_pool": unknown_pool,
+            "declared_disabled": declared_disabled, "declared_absent": declared_absent,
+            "declared_inactive": declared_inactive, "quarantined_but_present": quarantined_but_present,
+            "declared_incoherent": declared_incoherent, "content_report": content_report}
+
+
+@dataclass
+class _NetworkScan:
+    """What the network step found: its three report fields, plus the declarations the bridge-suggestion step
+    reuses, so that step needs no second read of `network_node`."""
+
+    bridge_menu: list[dict[str, Any]]
+    declared_missing_bridge: list[dict[str, Any]]
+    network_quarantined_but_present: list[dict[str, Any]]
+    declared_lnet_nodes: dict[str, set[str]]
+    declared_lnet_bridges: dict[str, set[str]]
+    declared_bridge_nodes: dict[tuple[str, str], set[str]]
+
+
+def _classify_networks(
+    conn: psycopg.Connection[Any], bridge_views: dict[str, dict[str, dict[str, Any]]],
+) -> _NetworkScan:
+    """The network step, over each read node's bridge listing (`bridge_views`, from `_gather_node_bridges`).
+
+    The network read side (0041, PR-C) is a coherent, deliberately PARTIAL parity: ENUMERATE + DRIFT-REPORT
+    only. A RAW per-node bridge MENU + `declared_missing_bridge` rows; discovery NEVER proposes the
+    bridge→logical-network mapping (which L2 a bridge realises is unobservable from PVE — same-name≠same-L2, the
+    0039 footgun), and the post-clone net0 assertion remains the SOLE quarantiner (this only REPORTS, never
+    writes)."""
+    net_read_nodes = sorted(bridge_views)
+    bridge_menu: list[dict[str, Any]] = []
+    declared_missing_bridge: list[dict[str, Any]] = []
+    network_quarantined_but_present: list[dict[str, Any]] = []
+    # Name-coincidence bridge-suggestion inputs (§6), accumulated from the SAME per-node `_NETWORK_DECLARED` reads
+    # the loop already does — NO extra query:
+    #   declared_lnet_nodes[L]       = nodes with ANY network_node row for L (declared → EXCLUDE from suggestions
+    #                                  for L: a node with a row is a re-point, not a widen)
+    #   declared_lnet_bridges[L]     = UN-quarantined declared bridge NAMES for L (the name basis; a quarantined
+    #                                  mapping is known-broken, so it is NOT used as evidence)
+    #   declared_bridge_nodes[(L,B)] = which nodes already map L via a bridge named B (the coincidence evidence)
+    declared_lnet_nodes: dict[str, set[str]] = {}
+    declared_lnet_bridges: dict[str, set[str]] = {}
+    declared_bridge_nodes: dict[tuple[str, str], set[str]] = {}
+    for node_id in net_read_nodes:
+        observed = bridge_views[node_id]
+        for iface in sorted(observed):
+            e = observed[iface]
+            bridge_menu.append({"node_id": node_id, "iface": iface, "type": e.get("type"),
+                                "vlan_aware": e.get("bridge_vlan_aware")})
+        for logical_network_id, bridge, quar_at in conn.execute(_NETWORK_DECLARED, (node_id,)).fetchall():
+            declared_lnet_nodes.setdefault(logical_network_id, set()).add(node_id)   # ANY row → excluded (re-point)
+            present = bridge in observed
+            if quar_at is None and present:
+                # A GOOD name basis = un-quarantined AND the declaring node actually PRESENTS the bridge. An
+                # un-quarantined declaration whose bridge PVE OMITS this run is `declared_missing_bridge` (STRONG
+                # ambiguous:false evidence — the whole-listing Sys.Audit read — that PVE contradicts the mapping),
+                # so it must NOT seed a name-coincidence suggestion nor be cited as `also_declared_on` evidence
+                # (the same "a mapping PVE already contradicted is not evidence" standard the quarantine exclusion
+                # applies). Gating the basis on `present` closes that: only a live, presented, un-quarantined
+                # mapping is a name basis.
+                declared_lnet_bridges.setdefault(logical_network_id, set()).add(bridge)
+                declared_bridge_nodes.setdefault((logical_network_id, bridge), set()).add(node_id)
+            if quar_at is not None:
+                # QUARANTINED pair (the net0 assertion fail-closed it on bridge absence). The storage-discovery
+                # twin's `quarantined_but_present`: if PVE now PRESENTS the declared bridge again, the quarantine
+                # may be stale → report it (operator clears via clear_network_node_quarantine). Still ABSENT →
+                # consistent with the quarantine, NOT news (skipped, like a quarantined storage pair PVE omits).
+                if present:
+                    network_quarantined_but_present.append(
+                        {"node_id": node_id, "logical_network_id": logical_network_id, "bridge": bridge})
+                continue
+            if not present:
+                # Whole-listing Sys.Audit → absence from a SUCCESSFUL listing is STRONGER evidence than a storage
+                # pool's per-pool-ACL-filtered absence (ambiguous=false). Still REPORT-ONLY — the net0 assertion is
+                # the sole quarantiner; discovery hands the operator the diff, never mutates the declaration.
+                declared_missing_bridge.append({"node_id": node_id, "logical_network_id": logical_network_id,
+                                                "bridge": bridge, "ambiguous": False})
+    return _NetworkScan(bridge_menu, declared_missing_bridge, network_quarantined_but_present,
+                        declared_lnet_nodes, declared_lnet_bridges, declared_bridge_nodes)
+
+
+def _bridge_suggestions(
+    conn: psycopg.Connection[Any], bridge_views: dict[str, dict[str, dict[str, Any]]], scan: _NetworkScan,
+) -> list[dict[str, Any]]:
+    """The bridge-suggestion step, from the declarations the network step read (`scan`).
+
+    Name-coincidence bridge SUGGESTIONS (§6 — the ONE deliberate non-build the design deferred as "a footgun with a
+    label", now built WITH the label ON). Which L2 a bridge realises is UNOBSERVABLE from PVE, so same-name ≠
+    same-L2 — discovery must NEVER propose the bridge→logical-network mapping (the exact wrong-L2 footgun 0039
+    closed by keying placement on the logical IDENTITY, not the raw name). So each entry is a HINT tagged
+    `basis:"name_coincidence"`, NEVER a write: for a read node that has NO network_node row for a logical net L
+    which IS declared (un-quarantined AND live-present) elsewhere, if the node PRESENTS a bridge whose NAME matches
+    one already mapped to L, suggest it — the operator VERIFIES the L2 (out of band — a same-name/wrong-L2 confirm
+    is NOT machine-detectable: the post-clone net0 assertion only checks bridge-name PRESENCE, which is true by
+    construction here) then confirms via `set_network_node` (the trust boundary). Uses only the per-node
+    declarations the network step gathered; naturally scoped (a never-declared L has no name basis; a fully-declared
+    L has no missing node). `cross_cluster` flags a suggestion whose evidence node is in a DIFFERENT cluster than
+    the suggestee (only possible in a fleet-wide run — `logical_network` is fleet-global by 0039; cross-cluster
+    same-name is the WEAKEST coincidence, e.g. the `vmbr0` install-default everywhere, so it is flagged for the
+    operator to weigh). Deterministic (nodes/nets/bridges sorted). REPORT-ONLY — writes nothing."""
+    net_read_nodes = sorted(bridge_views)
+    declared_lnet_nodes, declared_lnet_bridges = scan.declared_lnet_nodes, scan.declared_lnet_bridges
+    declared_bridge_nodes = scan.declared_bridge_nodes
+    bridge_suggestions: list[dict[str, Any]] = []
+    net_node_cluster: dict[str, Any] = {}
+    if net_read_nodes:
+        for nid, cid in conn.execute("SELECT id, cluster_id FROM node WHERE id = ANY(%s)",
+                                     (net_read_nodes,)).fetchall():
+            net_node_cluster[nid] = cid
+    for node_id in net_read_nodes:
+        observed_names = set(bridge_views[node_id])
+        for logical_network_id in sorted(declared_lnet_bridges):
+            if node_id in declared_lnet_nodes.get(logical_network_id, set()):
+                continue   # already has a row for this net (even if quarantined) — a re-point, not a widen
+            for bridge in sorted(observed_names & declared_lnet_bridges[logical_network_id]):
+                also_on = sorted(declared_bridge_nodes[(logical_network_id, bridge)])
+                cross = any(net_node_cluster.get(e) != net_node_cluster.get(node_id) for e in also_on)
+                bridge_suggestions.append(
+                    {"node_id": node_id, "logical_network_id": logical_network_id, "bridge": bridge,
+                     "basis": "name_coincidence", "also_declared_on": also_on, "cross_cluster": cross})
+    return bridge_suggestions
+
+
+def _unserved_nodes(conn: psycopg.Connection[Any], registry: Any, cluster_id: str | None) -> list[str]:
+    """The in-scope ledger nodes this daemon does not serve, so a second daemon's blind spot is reported rather
+    than read as 'nothing to report'."""
+    served = set(registry.nodes_in(cluster_id) if cluster_id is not None else registry.node_ids())
+    # Scope-node enumeration: branch on cluster_id (a bare `%s IS NULL` binds an UNTYPED NULL that Postgres
+    # rejects with IndeterminateDatatype — psycopg can't infer the type with no comparison context).
+    if cluster_id is None:
+        scope_rows = conn.execute("SELECT id FROM node ORDER BY id").fetchall()
+    else:
+        scope_rows = conn.execute("SELECT id FROM node WHERE cluster_id = %s ORDER BY id", (cluster_id,)).fetchall()
+    return [r[0] for r in scope_rows if r[0] not in served]
+
+
+def _apply_dismissals(
+    conn: psycopg.Connection[Any], drift_buckets: dict[str, list[dict[str, Any]]], scope_nodes: list[str],
+) -> list[dict[str, Any]]:
+    """The dismissal step: move each dismissed finding out of its bucket in `drift_buckets` (in place: the report
+    holds these lists) and return the `dismissed` roster, stale dismissals included.
+
+    The dismissal filter (0044, PR-H): an operator can DISMISS a known-benign finding (e.g. a node-local scratch
+    pool that will never be declared shared) so it stops re-surfacing in every report and burying live drift.
+    READ-ONLY here: only the operator dismiss/clear verbs write `discovery_dismissal`; discovery still WRITES
+    NOTHING to gate-read state, and NO admission/placement/verify path reads this table (a dismissal can never
+    affect the gate — it is pure reporting suppression). A dismissed row is REMOVED from its actionable bucket
+    (so the report AND the 0043 daemon cadence gauge/log reflect only LIVE, un-dismissed drift) and moved to the
+    `dismissed` roster so it stays visible + clearable. Keyed on (kind, node_id, subject) — the same identity the
+    dismiss verb writes. Bounded to the nodes this run actually classified (storage ∪ network read sets)."""
+    # FAIL-FAST sync guard: the local bucket→list map MUST cover exactly the dismissable kinds, or a dismissal of a
+    # missing kind would silently never filter (the finding leaks back — the defect this feature prevents) and a
+    # stray key would KeyError below. Pinned cross-module (tick_upkeep._DISCOVERY_DRIFT_BUCKETS == _SUBJECT_FIELD) too.
+    assert set(drift_buckets) == set(_SUBJECT_FIELD), "dismissal filter buckets drifted from _SUBJECT_FIELD"
+    dismissed: list[dict[str, Any]] = []
+    if scope_nodes:
+        dset: dict[tuple[str, str | None, str], Any] = {}
+        for kind, d_node, subject, d_note in conn.execute(
+                "SELECT kind, node_id, subject, note FROM discovery_dismissal WHERE node_id = ANY(%s)",
+                (scope_nodes,)).fetchall():
+            dset[(kind, d_node, subject)] = d_note
+        if dset:
+            matched: set[tuple[str, str | None, str]] = set()
+            for kind, rows in drift_buckets.items():
+                subj_field = _SUBJECT_FIELD[kind]
+                kept: list[dict[str, Any]] = []
+                for row in rows:
+                    subject = row.get(subj_field)
+                    key = (kind, row.get("node_id"), subject)
+                    if subject is not None and key in dset:
+                        matched.add(key)
+                        dismissed.append({"kind": kind, "node_id": row.get("node_id"), "subject": subject,
+                                          "note": dset[key], "stale": False})
+                    else:
+                        kept.append(row)
+                rows[:] = kept   # replace the bucket contents in place (the return dict references these lists)
+            # STALE dismissals: an in-scope dismissal whose finding is NO LONGER firing (the pool was declared, the
+            # drift resolved, …). It suppresses nothing now, but roster it (`stale=true`) so it is still VISIBLE +
+            # clearable — otherwise a dismissal that outlived its finding would be invisible on every surface and
+            # silently re-suppress a future re-occurrence of the same (kind, node, subject).
+            for dkey, note in dset.items():
+                if dkey not in matched:
+                    dismissed.append({"kind": dkey[0], "node_id": dkey[1], "subject": dkey[2],
+                                      "note": note, "stale": True})
+    return dismissed
+
+
 def discover_reachability(
     conn: psycopg.Connection[Any], registry: Any, *, cluster_id: str | None = None,
     on_progress: Callable[[], None] | None = None,
@@ -1151,233 +1417,22 @@ def discover_reachability(
     blocking PVE GETs (the MCP verb passes None). Pure reads — never commits, never raises out of the verb."""
     views, unreachable, acl_denied = _gather_node_views(registry, cluster_id, abort_on_acl=False,
                                                         on_progress=on_progress)
-    read_nodes = sorted(views)
-    node_cluster: dict[str, Any] = {}
-    if read_nodes:
-        for nid, cid in conn.execute("SELECT id, cluster_id FROM node WHERE id = ANY(%s)",
-                                     (read_nodes,)).fetchall():
-            node_cluster[nid] = cid
-
-    known_pool_new_node: list[dict[str, Any]] = []
-    unknown_pool: list[dict[str, Any]] = []
-    declared_disabled: list[dict[str, Any]] = []
-    declared_absent: list[dict[str, Any]] = []
-    declared_inactive: list[dict[str, Any]] = []
-    quarantined_but_present: list[dict[str, Any]] = []
-    content_report: list[dict[str, Any]] = []
-    declared_incoherent: list[dict[str, Any]] = []
-
-    for node_id in read_nodes:
-        pve_view = views[node_id]
-        node_cid = node_cluster.get(node_id)
-        # (1) declaration-side — classify every declared pair against the PVE view.
-        declared_names: set[str] = set()
-        for storage_id, pve_name, quar_at, content_types in conn.execute(_DISCOVERY_PAIRS, (node_id,)).fetchall():
-            declared_names.add(pve_name)
-            rec = {"storage_id": storage_id, "node_id": node_id, "pve_name": pve_name}
-            entry = pve_view.get(pve_name)
-            if entry is None:
-                declared_absent.append({**rec, "ambiguous": True})   # absence is NEVER removal evidence
-                continue
-            if _storage_is_off(entry):
-                declared_disabled.append({**rec, "ambiguous": False})   # hard, but discovery only reports
-            elif quar_at is not None and not _unmet_clone_content(content_types, entry.get("content")):
-                # A QUARANTINED pair PVE now shows present + enabled AND whose clone content is intact — the
-                # quarantine may be stale, flag it clear-me. But if it STILL drops a clone-relevant declared token
-                # (a valid verify content auto-narrow, §10 #4), PVE has NOT contradicted it — do NOT flag clear-me
-                # (that would steer the operator to clear a valid quarantine and reopen the grant-then-kill); the
-                # content_report line below surfaces the drift + its set_storage_content remedy instead.
-                quarantined_but_present.append(rec)   # a quarantine PVE now contradicts (operator clears)
-            elif quar_at is None and entry.get("active", 1) in (0, "0", False):
-                declared_inactive.append(rec)   # soft (transient blip); a quarantined pair is never 'inactive'
-            drift = _content_drift(content_types, entry.get("content"))   # declared pools only
-            if drift is not None:
-                content_report.append({**rec, **drift})
-        # (1b) declaration-side — CLUSTER-INCOHERENT declared pairs (storage re-bound to another cluster, the
-        # reachability row left stale but still gate-trusted). Surfaced so the operator can remove_storage_node
-        # them; their pve_name is added to declared_names so the pool is NOT ALSO reported unknown/new below.
-        for storage_id, pve_name, storage_cluster in conn.execute(_INCOHERENT_PAIRS, (node_id,)).fetchall():
-            declared_names.add(pve_name)
-            declared_incoherent.append({"storage_id": storage_id, "node_id": node_id, "pve_name": pve_name,
-                                        "storage_cluster": storage_cluster, "node_cluster": node_cid})
-        # (2) PVE-side — pools PVE shows that are NOT declared for this node → widen candidate / unknown.
-        for pve_name in sorted(pve_view):
-            if pve_name in declared_names:
-                continue
-            entry = pve_view[pve_name]
-            srow = (conn.execute("SELECT id, content_types FROM storage "
-                                 "WHERE cluster_id = %s AND COALESCE(pve_name, id) = %s", (node_cid, pve_name))
-                    .fetchone() if node_cid is not None else None)
-            if srow is not None:
-                if not _storage_is_off(entry):   # a disabled pool is not a widen target
-                    known_pool_new_node.append({"storage_id": srow[0], "node_id": node_id, "pve_name": pve_name})
-                    drift = _content_drift(srow[1], entry.get("content"))
-                    if drift is not None:
-                        content_report.append({"storage_id": srow[0], "node_id": node_id,
-                                               "pve_name": pve_name, **drift})
-            else:
-                unknown_pool.append({"node_id": node_id, "pve_name": pve_name,
-                                     "observed_type": entry.get("type"),
-                                     "observed_content": _content_tokens(entry.get("content"))})
-
-    # ── network (vmbr) read-side (0041, PR-C) — the coherent, deliberately PARTIAL parity: ENUMERATE + DRIFT-
-    # REPORT only. A RAW per-node bridge MENU + `declared_missing_bridge` rows; discovery NEVER proposes the
-    # bridge→logical-network mapping (which L2 a bridge realises is unobservable from PVE — same-name≠same-L2, the
-    # 0039 footgun), and the post-clone net0 assertion remains the SOLE quarantiner (this only REPORTS, never
-    # writes). Independent PVE call from the storage gather, so a node readable on one axis but not the other is
-    # honestly reported on each.
+    storage = _classify_storage(conn, views)
+    # The bridge listing is a PVE call independent of the storage one, so a node readable on one axis but not the
+    # other is honestly reported on each.
     bridge_views, net_unreachable, net_acl_denied = _gather_node_bridges(registry, cluster_id,
                                                                          on_progress=on_progress)
-    net_read_nodes = sorted(bridge_views)
-    bridge_menu: list[dict[str, Any]] = []
-    declared_missing_bridge: list[dict[str, Any]] = []
-    network_quarantined_but_present: list[dict[str, Any]] = []
-    bridge_suggestions: list[dict[str, Any]] = []
-    # Name-coincidence bridge-suggestion inputs (§6), accumulated from the SAME per-node `_NETWORK_DECLARED` reads
-    # the loop already does — NO extra query:
-    #   declared_lnet_nodes[L]       = nodes with ANY network_node row for L (declared → EXCLUDE from suggestions
-    #                                  for L: a node with a row is a re-point, not a widen)
-    #   declared_lnet_bridges[L]     = UN-quarantined declared bridge NAMES for L (the name basis; a quarantined
-    #                                  mapping is known-broken, so it is NOT used as evidence)
-    #   declared_bridge_nodes[(L,B)] = which nodes already map L via a bridge named B (the coincidence evidence)
-    declared_lnet_nodes: dict[str, set[str]] = {}
-    declared_lnet_bridges: dict[str, set[str]] = {}
-    declared_bridge_nodes: dict[tuple[str, str], set[str]] = {}
-    for node_id in net_read_nodes:
-        observed = bridge_views[node_id]
-        for iface in sorted(observed):
-            e = observed[iface]
-            bridge_menu.append({"node_id": node_id, "iface": iface, "type": e.get("type"),
-                                "vlan_aware": e.get("bridge_vlan_aware")})
-        for logical_network_id, bridge, quar_at in conn.execute(_NETWORK_DECLARED, (node_id,)).fetchall():
-            declared_lnet_nodes.setdefault(logical_network_id, set()).add(node_id)   # ANY row → excluded (re-point)
-            present = bridge in observed
-            if quar_at is None and present:
-                # A GOOD name basis = un-quarantined AND the declaring node actually PRESENTS the bridge. An
-                # un-quarantined declaration whose bridge PVE OMITS this run is `declared_missing_bridge` (STRONG
-                # ambiguous:false evidence — the whole-listing Sys.Audit read — that PVE contradicts the mapping),
-                # so it must NOT seed a name-coincidence suggestion nor be cited as `also_declared_on` evidence
-                # (the same "a mapping PVE already contradicted is not evidence" standard the quarantine exclusion
-                # applies). Gating the basis on `present` closes that: only a live, presented, un-quarantined
-                # mapping is a name basis.
-                declared_lnet_bridges.setdefault(logical_network_id, set()).add(bridge)
-                declared_bridge_nodes.setdefault((logical_network_id, bridge), set()).add(node_id)
-            if quar_at is not None:
-                # QUARANTINED pair (the net0 assertion fail-closed it on bridge absence). The storage-discovery
-                # twin's `quarantined_but_present`: if PVE now PRESENTS the declared bridge again, the quarantine
-                # may be stale → report it (operator clears via clear_network_node_quarantine). Still ABSENT →
-                # consistent with the quarantine, NOT news (skipped, like a quarantined storage pair PVE omits).
-                if present:
-                    network_quarantined_but_present.append(
-                        {"node_id": node_id, "logical_network_id": logical_network_id, "bridge": bridge})
-                continue
-            if not present:
-                # Whole-listing Sys.Audit → absence from a SUCCESSFUL listing is STRONGER evidence than a storage
-                # pool's per-pool-ACL-filtered absence (ambiguous=false). Still REPORT-ONLY — the net0 assertion is
-                # the sole quarantiner; discovery hands the operator the diff, never mutates the declaration.
-                declared_missing_bridge.append({"node_id": node_id, "logical_network_id": logical_network_id,
-                                                "bridge": bridge, "ambiguous": False})
-
-    # ── name-coincidence bridge SUGGESTIONS (§6 — the ONE deliberate non-build the design deferred as "a footgun
-    # with a label", now built WITH the label ON). Which L2 a bridge realises is UNOBSERVABLE from PVE, so
-    # same-name ≠ same-L2 — discovery must NEVER propose the bridge→logical-network mapping (the exact wrong-L2
-    # footgun 0039 closed by keying placement on the logical IDENTITY, not the raw name). So each entry is a HINT
-    # tagged `basis:"name_coincidence"`, NEVER a write: for a read node that has NO network_node row for a logical
-    # net L which IS declared (un-quarantined AND live-present) elsewhere, if the node PRESENTS a bridge whose NAME
-    # matches one already mapped to L, suggest it — the operator VERIFIES the L2 (out of band — a same-name/wrong-L2
-    # confirm is NOT machine-detectable: the post-clone net0 assertion only checks bridge-name PRESENCE, which is
-    # true by construction here) then confirms via `set_network_node` (the trust boundary). Uses only the per-node
-    # declarations gathered above; naturally scoped (a never-declared L has no name basis; a fully-declared L has no
-    # missing node). `cross_cluster` flags a suggestion whose evidence node is in a DIFFERENT cluster than the
-    # suggestee (only possible in a fleet-wide run — `logical_network` is fleet-global by 0039; cross-cluster
-    # same-name is the WEAKEST coincidence, e.g. the `vmbr0` install-default everywhere, so it is flagged for the
-    # operator to weigh). Deterministic (nodes/nets/bridges sorted). REPORT-ONLY — writes nothing.
-    net_node_cluster: dict[str, Any] = {}
-    if net_read_nodes:
-        for nid, cid in conn.execute("SELECT id, cluster_id FROM node WHERE id = ANY(%s)",
-                                     (net_read_nodes,)).fetchall():
-            net_node_cluster[nid] = cid
-    for node_id in net_read_nodes:
-        observed_names = set(bridge_views[node_id])
-        for logical_network_id in sorted(declared_lnet_bridges):
-            if node_id in declared_lnet_nodes.get(logical_network_id, set()):
-                continue   # already has a row for this net (even if quarantined) — a re-point, not a widen
-            for bridge in sorted(observed_names & declared_lnet_bridges[logical_network_id]):
-                also_on = sorted(declared_bridge_nodes[(logical_network_id, bridge)])
-                cross = any(net_node_cluster.get(e) != net_node_cluster.get(node_id) for e in also_on)
-                bridge_suggestions.append(
-                    {"node_id": node_id, "logical_network_id": logical_network_id, "bridge": bridge,
-                     "basis": "name_coincidence", "also_declared_on": also_on, "cross_cluster": cross})
-
-    served = set(registry.nodes_in(cluster_id) if cluster_id is not None else registry.node_ids())
-    # Scope-node enumeration: branch on cluster_id (a bare `%s IS NULL` binds an UNTYPED NULL that Postgres
-    # rejects with IndeterminateDatatype — psycopg can't infer the type with no comparison context).
-    if cluster_id is None:
-        scope_rows = conn.execute("SELECT id FROM node ORDER BY id").fetchall()
-    else:
-        scope_rows = conn.execute("SELECT id FROM node WHERE cluster_id = %s ORDER BY id", (cluster_id,)).fetchall()
-    unserved_nodes = [r[0] for r in scope_rows if r[0] not in served]
-
-    # ── dismissal filter (0044, PR-H) — an operator can DISMISS a known-benign finding (e.g. a node-local scratch
-    # pool that will never be declared shared) so it stops re-surfacing in every report and burying live drift.
-    # READ-ONLY here: only the operator dismiss/clear verbs write `discovery_dismissal`; discovery still WRITES
-    # NOTHING to gate-read state, and NO admission/placement/verify path reads this table (a dismissal can never
-    # affect the gate — it is pure reporting suppression). A dismissed row is REMOVED from its actionable bucket
-    # (so the report AND the 0043 daemon cadence gauge/log reflect only LIVE, un-dismissed drift) and moved to the
-    # `dismissed` roster so it stays visible + clearable. Keyed on (kind, node_id, subject) — the same identity the
-    # dismiss verb writes. Bounded to the nodes this run actually classified (storage ∪ network read sets).
-    _drift_buckets = {
-        "known_pool_new_node": known_pool_new_node, "unknown_pool": unknown_pool,
-        "declared_disabled": declared_disabled, "declared_absent": declared_absent,
-        "declared_inactive": declared_inactive, "quarantined_but_present": quarantined_but_present,
-        "declared_incoherent": declared_incoherent, "content_report": content_report,
-        "declared_missing_bridge": declared_missing_bridge,
-        "network_quarantined_but_present": network_quarantined_but_present,
-    }
-    # FAIL-FAST sync guard: the local bucket→list map MUST cover exactly the dismissable kinds, or a dismissal of a
-    # missing kind would silently never filter (the finding leaks back — the defect this feature prevents) and a
-    # stray key would KeyError below. Pinned cross-module (tick_upkeep._DISCOVERY_DRIFT_BUCKETS == _SUBJECT_FIELD) too.
-    assert set(_drift_buckets) == set(_SUBJECT_FIELD), "dismissal filter buckets drifted from _SUBJECT_FIELD"
-    dismissed: list[dict[str, Any]] = []
-    scope_nodes = sorted(set(read_nodes) | set(net_read_nodes))
-    if scope_nodes:
-        dset: dict[tuple[str, str | None, str], Any] = {}
-        for kind, d_node, subject, d_note in conn.execute(
-                "SELECT kind, node_id, subject, note FROM discovery_dismissal WHERE node_id = ANY(%s)",
-                (scope_nodes,)).fetchall():
-            dset[(kind, d_node, subject)] = d_note
-        if dset:
-            matched: set[tuple[str, str | None, str]] = set()
-            for kind, rows in _drift_buckets.items():
-                subj_field = _SUBJECT_FIELD[kind]
-                kept: list[dict[str, Any]] = []
-                for row in rows:
-                    subject = row.get(subj_field)
-                    key = (kind, row.get("node_id"), subject)
-                    if subject is not None and key in dset:
-                        matched.add(key)
-                        dismissed.append({"kind": kind, "node_id": row.get("node_id"), "subject": subject,
-                                          "note": dset[key], "stale": False})
-                    else:
-                        kept.append(row)
-                rows[:] = kept   # replace the bucket contents in place (the return dict references these lists)
-            # STALE dismissals: an in-scope dismissal whose finding is NO LONGER firing (the pool was declared, the
-            # drift resolved, …). It suppresses nothing now, but roster it (`stale=true`) so it is still VISIBLE +
-            # clearable — otherwise a dismissal that outlived its finding would be invisible on every surface and
-            # silently re-suppress a future re-occurrence of the same (kind, node, subject).
-            for dkey, note in dset.items():
-                if dkey not in matched:
-                    dismissed.append({"kind": dkey[0], "node_id": dkey[1], "subject": dkey[2],
-                                      "note": note, "stale": True})
-
-    return {"ok": True, "checked_nodes": read_nodes,
-            "known_pool_new_node": known_pool_new_node, "unknown_pool": unknown_pool,
-            "declared_disabled": declared_disabled, "declared_absent": declared_absent,
-            "declared_inactive": declared_inactive, "quarantined_but_present": quarantined_but_present,
-            "declared_incoherent": declared_incoherent, "content_report": content_report,
+    network = _classify_networks(conn, bridge_views)
+    bridge_suggestions = _bridge_suggestions(conn, bridge_views, network)
+    unserved_nodes = _unserved_nodes(conn, registry, cluster_id)
+    dismissed = _apply_dismissals(conn, {
+        **storage, "declared_missing_bridge": network.declared_missing_bridge,
+        "network_quarantined_but_present": network.network_quarantined_but_present,
+    }, sorted(set(views) | set(bridge_views)))
+    return {"ok": True, "checked_nodes": sorted(views), **storage,
             "acl_denied_nodes": acl_denied, "unreachable_nodes": unreachable, "unserved_nodes": unserved_nodes,
-            "bridge_menu": bridge_menu, "declared_missing_bridge": declared_missing_bridge,
-            "network_quarantined_but_present": network_quarantined_but_present,
+            "bridge_menu": network.bridge_menu, "declared_missing_bridge": network.declared_missing_bridge,
+            "network_quarantined_but_present": network.network_quarantined_but_present,
             "bridge_suggestions": bridge_suggestions,
-            "network_checked_nodes": net_read_nodes, "network_acl_denied_nodes": net_acl_denied,
+            "network_checked_nodes": sorted(bridge_views), "network_acl_denied_nodes": net_acl_denied,
             "network_unreachable_nodes": net_unreachable, "dismissed": dismissed}

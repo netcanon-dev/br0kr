@@ -13,13 +13,14 @@ rollout.
 ## Core doctrine
 
 - **Deeply modular. No god files.** Adding a driver/scope = create a new file,
-  never edit a hub file. Capability is added additively.
+  never edit a hub file. Capability is added additively. A function past the length ceiling in
+  [docs/architecture.md](docs/architecture.md#module-size) is split into named steps, or its reason is written there.
 - **One race-critical seam.** Every capacity grant is made under the scope advisory locks in
   `br0kr/admission.py`: `admit()` and its sibling `promote_pinned()` share one locked core, and nothing else adds
   a debit. Capacity is freed only by the guarded-CAS lease transitions in `br0kr/lease.py`, which need no lock
   (each targets one existing row). Inputs reach their handlers through explicit tables (the dashboard's route
-  map and `_ACTIONS`, the MCP verb registry `br0kr/verbs.py`, the daemon's `tick_steps.STEPS`), never
-  through per-case branching scattered across the codebase.
+  map and its action table `dashboard_actions._ACTIONS`, the MCP verb registry `br0kr/verbs.py`, the daemon's
+  `tick_steps.STEPS`), never through per-case branching scattered across the codebase.
 - **Config-as-data, validated.** node/storage/quota limits (SQL rows) are data; they must pass
   validation before they run.
 - **Tests, docs, and logging are first-class.** A behaviour change isn't *done*

@@ -5,10 +5,13 @@ The notes moved, word for word, to docs/designs/runtime.md, docs/designs/surface
 the doc kept its invariants and gained a one-row-per-module map and a scale envelope (review PERF-05). These tests
 read the docs as text and fail when a module has no row, two rows, or a row that outlives it; a row's proof file
 does not exist; the prose regrows past its limit; a scale-envelope default drifts from the code; the roadmap loses
-a number other files cite; or a link breaks, on the restructured pages or into their headings from anywhere.
+a number other files cite; or a link breaks, on the restructured pages or into their headings from anywhere. One
+more test holds every function in br0kr/ to a length ceiling, except the ones the doc names as long on purpose
+(review CODE-04).
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -26,6 +29,13 @@ _ARCH = _ROOT / "docs" / "architecture.md"
 _MAX_PROSE_LINES = 200
 _MAX_PROSE_WIDTH = 120
 _MAX_ROW_WIDTH = 260
+# The longest a function in br0kr/ may be (docstring and comments count), and the functions longer on purpose, each
+# named in architecture.md's "Module size" section with its reason.
+_MAX_FUNCTION_LINES = 200
+_LONG_ON_PURPOSE = {
+    ("dashboard.py", "make_handler"), ("oauth.py", "_make_handler"),          # handler classes built in a closure
+    ("reconciler.py", "provision_lease"), ("reconciler.py", "build_template"), ("sweeper.py", "orphan_sweep"),
+}
 _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 _ROW = re.compile(r"^\| `([^`]+\.py)` \|")
 # The map's proof paths are short: tests/ and scripts/ are implied by the prefix.
@@ -118,6 +128,40 @@ def test_architecture_prose_stays_short():
     long_rows = [line[:60] for line in _prose(_ARCH) if line.startswith("|") and len(line) > _MAX_ROW_WIDTH]
     assert not wide, f"prose lines over {_MAX_PROSE_WIDTH} columns: {wide}"
     assert not long_rows, f"table rows over {_MAX_ROW_WIDTH} columns: {long_rows}"
+
+
+def _functions(tree: ast.AST, prefix: str = ""):
+    """Every function in a module with its qualified name (`make_handler.Handler.do_GET`), so a nested or
+    same-named function is never mistaken for an exempt top-level one."""
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = prefix + node.name
+            if not isinstance(node, ast.ClassDef):
+                yield name, node
+            yield from _functions(node, name + ".")
+        else:
+            yield from _functions(node, prefix)
+
+
+def test_no_function_outgrows_the_ceiling_unless_the_doc_says_why():
+    """Every function in br0kr/ is at most _MAX_FUNCTION_LINES long, except the ones architecture.md's "Module
+    size" section names as long on purpose, and that list is exact: each listed function is still over the ceiling
+    and named in that section, which states the ceiling. Guards a function that changes keep editing growing past
+    the point of reading (discover_reachability had reached 337 lines before review CODE-04 split it into steps)
+    with nobody deciding it should, and the doc's list going stale in either direction."""
+    over = set()
+    for path in sorted((_ROOT / "br0kr").rglob("*.py")):
+        module = path.relative_to(_ROOT / "br0kr").as_posix()
+        for qualname, fn in _functions(ast.parse(path.read_text(encoding="utf-8"))):
+            if fn.end_lineno is not None and fn.end_lineno - fn.lineno + 1 > _MAX_FUNCTION_LINES:
+                over.add((module, qualname))
+    assert over - _LONG_ON_PURPOSE == set(), (
+        f"functions over {_MAX_FUNCTION_LINES} lines: split them into named steps, or say why in architecture.md")
+    assert _LONG_ON_PURPOSE - over == set(), "now under the ceiling: drop them from the list and the doc"
+    section = " ".join(_section("## Module size"))
+    assert f"{_MAX_FUNCTION_LINES} lines" in section
+    for module, name in sorted(_LONG_ON_PURPOSE):
+        assert f"`{module.removesuffix('.py')}.{name}`" in section, f"{module}:{name} is not named in the doc"
 
 
 def _default(fn, name):

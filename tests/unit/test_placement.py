@@ -1222,15 +1222,17 @@ def test_no_gate_path_reads_discovery_dismissal():
     suppression — NO admission/placement-gate/verify path reads `discovery_dismissal`, so it can NEVER change
     where a lease lands. Pinned by SOURCE INSPECTION (the repo's convention for a load-bearing claim, like the
     content_capable-outside-lockstep pin above): the table name appears in EXACTLY the intended reader
-    (`discover_reachability`) + writers (the two admin verbs), and NOT in the admission transaction, the scheduler,
-    or the gate functions `resolve_placement` / `recheck_instance` / `verify_declarations`. A future PR wiring a
+    (`_apply_dismissals`, discover_reachability's dismissal step, which only discovery calls) + writers (the two
+    admin verbs), and NOT in the admission transaction, the scheduler, or the gate functions `resolve_placement` /
+    `recheck_instance` / `verify_declarations`, none of which calls the step either. A future PR wiring a
     dismissal read into the gate fails HERE, not silently."""
     import inspect
 
     from br0kr import admin, admission, scheduler
     T = "discovery_dismissal"
-    # the ONLY reader is discovery; the ONLY writers are the two operator verbs
-    assert T in inspect.getsource(placement.discover_reachability)
+    # the ONLY reader is discovery's dismissal step; the ONLY writers are the two operator verbs
+    assert T in inspect.getsource(placement._apply_dismissals)
+    assert "_apply_dismissals(" in inspect.getsource(placement.discover_reachability)
     assert T in inspect.getsource(admin.dismiss_discovery_finding)
     assert T in inspect.getsource(admin.clear_discovery_dismissal)
     # NO gate / admission / scheduler / verify path may read it
@@ -1238,6 +1240,7 @@ def test_no_gate_path_reads_discovery_dismissal():
     assert T not in inspect.getsource(scheduler), "scheduler must NOT read discovery_dismissal"
     for gate_fn in (placement.resolve_placement, placement.recheck_instance, placement.verify_declarations):
         assert T not in inspect.getsource(gate_fn), f"{gate_fn.__name__} must NOT read discovery_dismissal"
+        assert "_apply_dismissals" not in inspect.getsource(gate_fn), f"{gate_fn.__name__} must NOT filter on it"
 
 
 def test_discover_reachability_splits_known_new_node_from_unknown_pool():

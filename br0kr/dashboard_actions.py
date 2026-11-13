@@ -1,0 +1,797 @@
+"""dashboard_actions.py — the dashboard's POST action surface: one table row per operator action.
+
+`_ACTIONS` maps each POST path to `(parse, verb)`. `parse(body)` coerces and validates the JSON body into the
+verb's keyword arguments, or raises `_Reject(reason)` for a clean 400 (a coercion error is a generic 400).
+`verb(conn, **kwargs)` runs the write through an admin, gateway, actas, pin, replication or settings function,
+looked up at call time, so a test that patches one in its home module is seen here. The verbs do NOT commit:
+in br0kr/dashboard.py, do_POST authorizes the caller before reading the body, and its `_action` runs the verb,
+commits and writes the audit row (the commit is load-bearing for the admin verbs and a no-op for cancel, whose
+lease helpers commit themselves).
+Write correctness and race safety live in the verbs; this module only marshals.
+
+`_RESULT_AUDIT` and `_RESULT_REFUSED` are the outcome-aware tables `_action` consults for the few actions whose
+audit row depends on the result: whether it is worth recording, and whether it is a final refusal.
+
+This is its own module (review CODE-04) because adding an action is the edit most operator-surface changes make,
+and it should touch this table and its parser, not the HTTP server. br0kr/dashboard.py imports the three tables
+and `_Reject` back, so `dashboard._ACTIONS` stays the table its handler dispatches on. docs/api.md lists every
+action with the first sentence of its verb's docstring, generated from this table by scripts/gen_api_reference.py.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+import psycopg
+
+from br0kr import actas, admin, gateway, pin, replication, settings
+
+
+class _Reject(Exception):
+    """A clean validation rejection (a control-flow signal, not an error) → HTTP 400 with `reason`."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+def _req_str(body: dict[str, Any], key: str, maxlen: int = 128) -> str:
+    """A required string field (an id or a connection field). STRIPPED (a trailing-space id would make a
+    confusing duplicate), rejected if blank-after-strip, and length-bounded (a pathological id). `maxlen`
+    overrides the default 128 cap for a longer field (a download url / a sha256 prefix list)."""
+    v = body.get(key)
+    if not isinstance(v, str):
+        raise _Reject(f"{key}_required")
+    v = v.strip()
+    if not v:
+        raise _Reject(f"{key}_required")
+    if len(v) > maxlen:
+        raise _Reject(f"{key}_too_long")
+    return v
+
+
+def _req_int(body: dict[str, Any], key: str) -> int:
+    v = body.get(key)
+    if not isinstance(v, int) or isinstance(v, bool):   # bool is an int subclass — reject it
+        raise _Reject(f"{key}_required")
+    return v
+
+
+def _req_bool(body: dict[str, Any], key: str) -> bool:
+    """A required JSON boolean (the node cordon toggle's `cordoned`). Strict: a 0/1/"true" is rejected so
+    the cordon state can never be set from an ambiguous truthy value — only a real bool."""
+    v = body.get(key)
+    if not isinstance(v, bool):
+        raise _Reject(f"{key}_required")
+    return v
+
+
+def _opt_bool(body: dict[str, Any], key: str, default: bool) -> bool:
+    """An OPTIONAL JSON boolean with a fallback: absent / null → `default` (so an API caller that omits
+    `public` gets the verb's default, matching admin.create_template's public=True); a PRESENT value must be
+    a real bool (a 0/1/"true" is rejected, like _req_bool) so visibility can't be set from an ambiguous
+    truthy value."""
+    v = body.get(key)
+    if v is None:
+        return default
+    if not isinstance(v, bool):
+        raise _Reject(f"{key}_invalid")
+    return v
+
+
+def _opt_str(body: dict[str, Any], key: str) -> str | None:
+    """An optional string field: absent / null / blank (after strip) → None (so a blank form field means
+    'unchanged' for a cluster edit, or 'unassigned' for a node's cluster_id)."""
+    v = body.get(key)
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise _Reject(f"{key}_invalid")
+    return v.strip() or None
+
+
+def _num(body: dict[str, Any], key: str, conv: Callable[[Any], Any]) -> Any:
+    """Coerce a REQUIRED numeric field with `conv` (int/float), rejecting a JSON bool up front — bool is an
+    int subclass, so `float(True)` is 1.0 and would silently become a phantom 1-unit capacity/quota. A
+    missing/non-coercible value raises (KeyError/TypeError/ValueError/OverflowError) → handler bad_request."""
+    v = body[key]
+    if isinstance(v, bool):
+        raise _Reject(f"{key}_invalid")
+    return conv(v)
+
+
+def _opt_int(body: dict[str, Any], key: str) -> int | None:
+    """An OPTIONAL int field: absent / null / blank → None (e.g. a named operator's 'expires in days', where
+    blank means 'never expires'). A present value is coerced like _num (rejecting bool)."""
+    v = body.get(key)
+    if v is None or v == "":
+        return None
+    return int(_num(body, key, int))
+
+
+def _opt_num(body: dict[str, Any], key: str, conv: Callable[[Any], Any]) -> Any:
+    """An OPTIONAL numeric field coerced with `conv` (int/float): absent / null / blank → None (e.g. a
+    project's self-service ceiling, where blank = that dimension not self-raisable). Present → _num."""
+    v = body.get(key)
+    if v is None or v == "":
+        return None
+    return _num(body, key, conv)
+
+
+def _parse_lease_create(body: dict[str, Any]) -> dict[str, Any]:
+    """Marshal + validate the operator 'create VM' (act-as-project) body. Enforces the act-as binding
+    (`project_id` REQUIRED - a GUI-created lease is always governed + attributable, like every MCP lease)
+    and the placement contract (`node_id` XOR `cluster_id` - pinned vs broker-placed; both set -> a clean
+    'node_and_cluster' reject). Types are strict (`_num` rejects a JSON bool as a phantom 1; `_opt_bool` for
+    queue). The cloud-init strings (ssh_pubkey / ci_user / ip_config) are only SHAPED here - admission
+    (cloudinit.validate_*) owns their format + length + the crisp reasons - and reserved-idem +
+    template-governance are enforced downstream (gateway / actas.create_lease). Pure marshalling, like the
+    other _parse_* builders; the verb does the work."""
+    node_id = _opt_str(body, "node_id")
+    cluster_id = _opt_str(body, "cluster_id")
+    if node_id is not None and cluster_id is not None:
+        raise _Reject("node_and_cluster")
+    return {
+        "project_id": _req_str(body, "project_id"),
+        "idem_key": _req_str(body, "idem_key"),
+        "node_id": node_id,
+        "cluster_id": cluster_id,
+        "req_cpu": _num(body, "req_cpu", float),
+        "req_mem_mb": _num(body, "req_mem_mb", int),
+        "storage_id": _opt_str(body, "storage_id"),
+        "req_disk_gb": _opt_int(body, "req_disk_gb") or 0,
+        "ssh_pubkey": _opt_str(body, "ssh_pubkey"),
+        "ci_user": _opt_str(body, "ci_user"),
+        "ip_config": _opt_str(body, "ip_config"),
+        "template_id": _opt_str(body, "template_id"),
+        "ttl_seconds": _num(body, "ttl_seconds", int),
+        "queue": _opt_bool(body, "queue", True),
+    }
+
+
+def _parse_quota(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a project create/edit (and the /api/quota back-compat alias): the base quota (cpu/mem/lease
+    + optional max_queued) AND the optional self-service ceilings (the `*_max` envelope the provision tier
+    raises within; blank = that dimension not self-raisable). NOTE the result is the FULL state — a blank
+    ceiling SETS it NULL, so the project edit form (which pre-fills the ceilings) can clear one by blanking
+    it, and a caller that omits a ceiling clears it (the GUI uses /api/project/edit which sends all fields;
+    /api/quota is a back-compat alias)."""
+    pid = _req_str(body, "project_id")
+    cpu, mem = _num(body, "cpu_limit", float), _num(body, "mem_limit_mb", int)
+    leases = _num(body, "max_leases", int)
+    max_queued = _opt_int(body, "max_queued")
+    reason = admin.validate_quota(cpu, mem, leases, max_queued)
+    if reason is not None:
+        raise _Reject(reason)
+    cpu_max = _opt_num(body, "cpu_limit_max", float)
+    mem_max, leases_max = _opt_int(body, "mem_limit_mb_max"), _opt_int(body, "max_leases_max")
+    creason = admin.validate_ceilings(cpu_max, mem_max, leases_max)
+    if creason is not None:
+        raise _Reject(creason)
+    return {"project_id": pid, "cpu_limit": cpu, "mem_limit_mb": mem, "max_leases": leases,
+            "max_queued": max_queued, "cpu_limit_max": cpu_max, "mem_limit_mb_max": mem_max,
+            "max_leases_max": leases_max}
+
+
+def _parse_base_quota(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse the /api/quota BASE-quota editor: cpu/mem/lease + optional queue cap, and DELIBERATELY no
+    ceilings — so a base-quota edit PRESERVES the project's self-service ceilings (it routes to
+    admin.set_base_quota, which leaves the `*_max` columns untouched). This is what keeps /api/quota's
+    documented base-only contract from silently wiping a tenant's self-service envelope (the full-state
+    project edit, with ceilings, is /api/project/edit via `_parse_quota`)."""
+    pid = _req_str(body, "project_id")
+    cpu, mem = _num(body, "cpu_limit", float), _num(body, "mem_limit_mb", int)
+    leases = _num(body, "max_leases", int)
+    max_queued = _opt_int(body, "max_queued")
+    reason = admin.validate_quota(cpu, mem, leases, max_queued)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"project_id": pid, "cpu_limit": cpu, "mem_limit_mb": mem, "max_leases": leases,
+            "max_queued": max_queued}
+
+
+def _parse_template_disk(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse the per-project template-disk quota setter (phase A4.2): project_id + an OPTIONAL
+    max_template_disk_gb (blank/absent = CLEAR it, disabling the tenant's self-service downloads). Validated by
+    admin.validate_template_disk_quota. A DEDICATED endpoint so enabling a tenant's downloads never disturbs
+    its cpu/mem/lease quota (separate from the project-edit full-state write)."""
+    pid = _req_str(body, "project_id")
+    # Match the validator's int-only intent at the boundary: a JSON float (10.5/10.0) or bool would otherwise
+    # be SILENTLY truncated by _opt_int (int(10.5)=10, int(True)=1), never reaching the float-rejecting
+    # validator. Reject it here instead (a typo must not quietly set a different ceiling). The dashboard JS
+    # always sends an integer; a numeric STRING still coerces via _opt_int for non-JS clients.
+    raw = body.get("max_template_disk_gb")
+    if isinstance(raw, (bool, float)):
+        raise _Reject("max_template_disk_gb_invalid")
+    gb = _opt_int(body, "max_template_disk_gb")
+    reason = admin.validate_template_disk_quota(gb)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"project_id": pid, "max_template_disk_gb": gb}
+
+
+def _parse_max_pinned(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse the per-project pin bound setter (0049): project_id + max_pinned, a REQUIRED non-negative integer
+    (0 = pinning off). Strict at the boundary like the template-disk setter: a bool, a float or a numeric string
+    is refused rather than coerced, so a typo can't quietly set a different bound. Validated by
+    admin.validate_max_pinned. A DEDICATED endpoint so allowing pins never re-sends the project's quota."""
+    pid = _req_str(body, "project_id")
+    raw = body.get("max_pinned")
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise _Reject("max_pinned_invalid")
+    reason = admin.validate_max_pinned(raw)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"project_id": pid, "max_pinned": raw}
+
+
+def _parse_node(body: dict[str, Any]) -> dict[str, Any]:
+    nid = _req_str(body, "node_id")
+    cpu, mem = _num(body, "cpu_total", float), _num(body, "mem_total_mb", int)
+    reason = admin.validate_node(cpu, mem)
+    if reason is not None:
+        raise _Reject(reason)
+    # pve_node = the in-cluster node NAME the daemon needs to build a driver (blank = capacity-only). Passed
+    # through; admin.create_node/set_node reject a non-bare-hostname `invalid_pve_node` (it lands in the API path).
+    return {"node_id": nid, "cpu_total": cpu, "mem_total_mb": mem, "cluster_id": _opt_str(body, "cluster_id"),
+            "pve_node": _opt_str(body, "pve_node")}
+
+
+def _parse_cluster(body: dict[str, Any]) -> dict[str, Any]:
+    """CREATE: all connection fields required (the columns are NOT NULL). pve_host AND pdm_endpoint go
+    through the bare-host SSRF guard (validate_cluster)."""
+    cid = _req_str(body, "cluster_id")
+    host, tid = _req_str(body, "pve_host"), _req_str(body, "token_id")
+    tse = _req_str(body, "token_secret_env")
+    pdm = _opt_str(body, "pdm_endpoint")
+    reason = admin.validate_cluster(host, tid, tse, pdm)
+    if reason is not None:
+        raise _Reject(reason)
+    # The optional cross-cluster-migration credential (0018). pdm_token_id / pdm_token_secret_env are a token
+    # id + the env-var NAME of its secret (never the secret) — no host to SSRF-guard; the verb stores them.
+    return {"cluster_id": cid, "pve_host": host, "token_id": tid, "token_secret_env": tse, "pdm_endpoint": pdm,
+            "pdm_token_id": _opt_str(body, "pdm_token_id"),
+            "pdm_token_secret_env": _opt_str(body, "pdm_token_secret_env")}
+
+
+def _parse_cluster_edit(body: dict[str, Any]) -> dict[str, Any]:
+    """EDIT: read-modify-write — every connection field is OPTIONAL ('leave blank to keep'). The read
+    surface doesn't expose the connection config, so the form sends only changed fields; set_cluster
+    COALESCEs a None to the existing value. A provided host/pdm still passes the bare-host SSRF guard."""
+    cid = _req_str(body, "cluster_id")
+    host, tid = _opt_str(body, "pve_host"), _opt_str(body, "token_id")
+    tse, pdm = _opt_str(body, "token_secret_env"), _opt_str(body, "pdm_endpoint")
+    if host is not None and not admin.valid_pve_host(host):
+        raise _Reject("invalid_pve_host")
+    if pdm is not None and not admin.valid_pve_host(pdm):
+        raise _Reject("invalid_pdm_endpoint")
+    # `clear_pdm_endpoint` (a strict bool) UNSETS the pdm_endpoint — the field a blank can't clear under the
+    # read-modify-write COALESCE — which DISABLES migration for the cluster (it needs all three PDM fields).
+    # set_cluster lets it win over any pdm value. pdm_token_id / pdm_token_secret_env are COALESCE keep-current
+    # (blank = keep), like the other edit fields.
+    return {"cluster_id": cid, "pve_host": host, "token_id": tid, "token_secret_env": tse, "pdm_endpoint": pdm,
+            "pdm_token_id": _opt_str(body, "pdm_token_id"),
+            "pdm_token_secret_env": _opt_str(body, "pdm_token_secret_env"),
+            "clear_pdm_endpoint": body.get("clear_pdm_endpoint") is True}
+
+
+def _parse_storage(body: dict[str, Any]) -> dict[str, Any]:
+    sid = _req_str(body, "storage_id")
+    total = _num(body, "total_gb", int)
+    reason = admin.validate_storage(total)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"storage_id": sid, "total_gb": total}
+
+
+def _parse_storage_create(body: dict[str, Any]) -> dict[str, Any]:
+    """Create a storage pool: size (validated) + the OPTIONAL 0031 physical binding — `cluster_id` (which
+    cluster's PVE holds the pool) and `pve_name` (the physical PVE name; blank → the id IS the name). Both
+    blank = an UNBOUND legacy quota row (unchanged behaviour). The verb re-validates (unknown_cluster /
+    invalid_pve_name / duplicate_pve_storage)."""
+    base = _parse_storage(body)
+    return {**base, "cluster_id": _opt_str(body, "cluster_id"), "pve_name": _opt_str(body, "pve_name")}
+
+
+def _parse_storage_placement(body: dict[str, Any]) -> dict[str, Any]:
+    """Bind/re-bind an existing pool's physical identity (0031): required `cluster_id`, optional `pve_name`
+    (blank → the id IS the name). The verb guards unknown_storage/unknown_cluster/invalid_pve_name/
+    duplicate_pve_storage."""
+    return {"storage_id": _req_str(body, "storage_id"), "cluster_id": _req_str(body, "cluster_id"),
+            "pve_name": _opt_str(body, "pve_name")}
+
+
+def _parse_storage_nodes(body: dict[str, Any]) -> dict[str, Any]:
+    """Declare which nodes physically reach a pool (0031 reachability). `node_ids` is a JSON array of node-id
+    strings (blank entries dropped; the set REPLACES the pool's reachable nodes — [] clears them). Bounded to
+    64 so a pathological body can't blow up. The verb validates each id (unknown_node/node_wrong_cluster) and
+    that the pool is cluster-bound (storage_unbound)."""
+    sid = _req_str(body, "storage_id")
+    raw = body.get("node_ids")
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise _Reject("node_ids_required")
+    if len(raw) > 64:
+        raise _Reject("too_many_nodes")
+    nodes = list(dict.fromkeys(x.strip() for x in raw if x.strip()))
+    return {"storage_id": sid, "node_ids": nodes}
+
+
+def _parse_storage_content(body: dict[str, Any]) -> dict[str, Any]:
+    """Declare which PVE CONTENT types a pool supports (0041 `storage.content_types`). `content_types` is a JSON
+    array of lowercase tokens (blank entries dropped; the list REPLACES the pool's declared content — [] =
+    'declared, capable of nothing', distinct from the NULL undeclared start). Bounded to 32 so a pathological body
+    can't blow up. The verb charset-validates each token (invalid_content_type) and checks the pool exists
+    (unknown_storage)."""
+    sid = _req_str(body, "storage_id")
+    raw = body.get("content_types")
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise _Reject("content_types_required")
+    if len(raw) > 32:
+        raise _Reject("too_many_content_types")
+    content = list(dict.fromkeys(x.strip() for x in raw if x.strip()))
+    return {"storage_id": sid, "content_types": content}
+
+
+def _parse_network_node(body: dict[str, Any]) -> dict[str, Any]:
+    """Declare the concrete BRIDGE a node presents for a logical network (0039 `network_node`) — the reachability
+    + rewrite target the placement gate resolves for a CROSS-NODE clone. `node_id`, `logical_network_id`, and
+    `bridge` are all required (the verb validates the bridge charset (`invalid_bridge`), the node (`unknown_node`)
+    and the logical net (`unknown_logical_network`))."""
+    return {"node_id": _req_str(body, "node_id"),
+            "logical_network_id": _req_str(body, "logical_network_id"),
+            "bridge": _req_str(body, "bridge")}
+
+
+def _parse_template(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a template catalog create/edit: the operator id + the cluster it lives on + the vmid, with an
+    optional name/description and the `public` visibility flag (phase A3; absent → True, the verb default,
+    so a template is public until an operator restricts it). vmid is validated (positive, in-column) by
+    admin.validate_template; the cluster's existence is checked by the verb. name/description are optional
+    (blank -> None)."""
+    tid, cluster_id = _req_str(body, "template_id"), _req_str(body, "cluster_id")
+    vmid = int(_num(body, "vmid", int))
+    reason = admin.validate_template(vmid)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"template_id": tid, "cluster_id": cluster_id, "vmid": vmid,
+            "name": _opt_str(body, "name"), "description": _opt_str(body, "description"),
+            "public": _opt_bool(body, "public", True)}
+
+
+def _parse_grant(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a template grant/revoke body: the project to (un)grant + the template (phase A3). Both required
+    ids; the verb pre-checks they exist (grant) or treats absence as not_granted (revoke)."""
+    return {"project_id": _req_str(body, "project_id"), "template_id": _req_str(body, "template_id")}
+
+
+def _parse_id(key: str, maxlen: int = 128) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """A parse fn for a delete: just the required id key. `maxlen` overrides the default 128 cap for a long
+    id — e.g. a download-source url_prefix, which CREATE accepts up to 2048, so DELETE must too or a
+    >128-char allowlist entry would be undeletable from the dashboard (the create/delete caps must agree)."""
+    def parse(body: dict[str, Any]) -> dict[str, Any]:
+        return {key: _req_str(body, key, maxlen=maxlen)}
+    return parse
+
+
+def _parse_force_delete(key: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """A node/storage DELETE parser that also reads an optional strict-bool `force`. force=True asks the verb
+    to SEVER terminal lease history (those rows' node_id/storage_id → NULL, keeping the audit row) so a retired
+    node/pool can be decommissioned from the dashboard; a LIVE/queued lease still blocks it. Absent → False."""
+    def parse(body: dict[str, Any]) -> dict[str, Any]:
+        return {key: _req_str(body, key), "force": body.get("force") is True}
+    return parse
+
+
+def _parse_instance_delete(body: dict[str, Any]) -> dict[str, Any]:
+    """An instance DELETE parser: the INT instance_id + an optional strict-bool `force` (like _parse_force_delete
+    for node/storage, but instance_id is an int not a string). force=True asks the verb to SEVER terminal lease
+    history (those rows' template_instance_id → NULL, keeping the audit row, 0033) so a retired instance can be
+    decommissioned from the dashboard; a LIVE/queued lease still blocks it. Absent → False."""
+    return {"instance_id": _req_int(body, "instance_id"), "force": body.get("force") is True}
+
+
+def _parse_source(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a download-source allowlist add (phase A4.1): the required url_prefix + an optional description.
+    The verb (admin.create_template_source) validates the prefix is a well-formed https URL
+    (invalid_source_prefix), so this just marshals."""
+    return {"url_prefix": _req_str(body, "url_prefix", maxlen=2048), "description": _opt_str(body, "description")}
+
+
+def _parse_build_request(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a template DOWNLOAD request (phase A4.1): the cluster + target catalog id + source url + sha256
+    + the Proxmox storage to download/import on, with an optional name/description and the `public` flag.
+    Marshals only — the allowlist + checksum gate (imgbuild.validate_build_request) runs in the verb against
+    the DB-held allowlist and returns the reason (source_not_allowed / invalid_sha256 / …) the GUI surfaces."""
+    return {"cluster_id": _req_str(body, "cluster_id"),
+            "target_template_id": _req_str(body, "target_template_id"),
+            "url": _req_str(body, "url", maxlen=2048), "sha256": _req_str(body, "sha256"),
+            "storage_id": _req_str(body, "storage_id"),
+            "name": _opt_str(body, "name"), "description": _opt_str(body, "description"),
+            "public": _opt_bool(body, "public", True)}
+
+
+def _parse_template_download(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse an act-as TENANT template-download (PR-2): a dashboard operator fetches a net-new OS image ON
+    BEHALF OF a CHOSEN project, debiting THAT project's template-disk quota. Requires project_id (the acted-as
+    tenant — no ungoverned NULL-project download from the GUI) + the same cluster/target/url/sha256/storage as
+    the operator build + size_gb (the declared disk budget reserved against the project's ceiling). NO `public`
+    flag — the verb forces the image PRIVATE + owned by the project. Marshals only —
+    gateway.request_template_download enforces the allowlist + sha256 + FOR-UPDATE disk quota + ownership and
+    returns the reason the GUI surfaces (source_not_allowed / template_downloads_disabled /
+    template_disk_quota_exceeded / template_exists / …)."""
+    return {"project_id": _req_str(body, "project_id"), "cluster_id": _req_str(body, "cluster_id"),
+            "target_template_id": _req_str(body, "target_template_id"),
+            "url": _req_str(body, "url", maxlen=2048), "sha256": _req_str(body, "sha256"),
+            "storage_id": _req_str(body, "storage_id"), "size_gb": _req_int(body, "size_gb"),
+            "name": _opt_str(body, "name"), "description": _opt_str(body, "description")}
+
+
+def _parse_migrate(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse an operator cross-cluster MIGRATE request (PDM pre-wire): the idem_key + the lease to move + the
+    target node (which must be in ANOTHER cluster). Marshals only — the verb (gateway.migrate_lease →
+    migration.request_migration) validates lease-active / cross-cluster / provisionable and returns the reason
+    (lease_not_active / same_cluster / unknown_target_node / storage_migration_unsupported / …) the GUI shows."""
+    return {"idem_key": _req_str(body, "idem_key"), "lease_id": _req_int(body, "lease_id"),
+            "target_node_id": _req_str(body, "target_node_id")}
+
+
+def _parse_replicate(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse an act-as REPLICATE request (0034): copy `template_id` onto (`target_cluster_id`,
+    `target_storage_id`). `project_id` is OPTIONAL — set it to attribute the copy to a tenant (its image
+    governance then applies), omit it for an operator (governance-exempt) copy; `mechanism` defaults to
+    clone_shared. Marshals only — gateway.request_replication (via actas.replicate) enforces the mechanism
+    allowlist + governance + the post-copy placement simulation and returns the reason the GUI surfaces
+    (mechanism_not_allowed / no_replicable_source / storage_unreachable / already_present / …). `requested_by`
+    is NOT taken from the body (unspoofable — actas.replicate stamps the coarse surface label; the audit trail
+    records the named operator)."""
+    d: dict[str, Any] = {"template_id": _req_str(body, "template_id"),
+                         "target_cluster_id": _req_str(body, "target_cluster_id"),
+                         "target_storage_id": _req_str(body, "target_storage_id")}
+    pid = _opt_str(body, "project_id")
+    if pid:
+        d["project_id"] = pid
+    mech = _opt_str(body, "mechanism")
+    if mech:
+        d["mechanism"] = mech
+    # rebuild_source only: the audited operator override for the source_hand_modified refusal (PR-6). A strict
+    # bool (an ambiguous 0/1/"true" is rejected) so a dirty rebuild is never forced from a fuzzy value.
+    if _opt_bool(body, "force_source_dirty", False):
+        d["force_source_dirty"] = True
+    return d
+
+
+def _parse_prune_replications(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a replication-retention prune (0034): `older_than_days` (<=0 = a no-op, per the verb) + an OPTIONAL
+    `cluster_id` scope. Marshals only — replication.prune_replications deletes only SETTLED TERMINAL jobs past
+    the horizon and returns {pruned}."""
+    cid = _opt_str(body, "cluster_id")
+    return {"older_than_days": _req_int(body, "older_than_days"), "cluster_id": cid if cid else None}
+
+
+def _expiry_choice(body: dict[str, Any], *, default: int | None) -> int | None:
+    """A token's lifetime in days from a body: `expires_in_days`, or None (never expires) when `never_expires` is
+    true, or `default` when the body says neither. Naming both is `invalid_expiry`, so a client that meant one
+    never silently gets the other. A `default` of None means the body must say which (re-dating a token)."""
+    never = _opt_bool(body, "never_expires", False)
+    days = _opt_int(body, "expires_in_days")
+    if never and days is not None:
+        raise _Reject("invalid_expiry")
+    if never:
+        return None
+    if days is None and default is None:
+        raise _Reject("invalid_expiry")
+    return default if days is None else days
+
+
+def _parse_token_expiry(body: dict[str, Any]) -> dict[str, Any]:
+    """Re-date-a-token body: `token_id`, plus `expires_in_days`, or `never_expires: true` to clear the expiry. An
+    empty body clears nothing: making a token immortal takes the explicit flag (review SEC-07)."""
+    days = _expiry_choice(body, default=None)
+    return {"token_id": _req_int(body, "token_id"), "expires_in_days": days, "never_expires": days is None}
+
+
+def _parse_token_create(body: dict[str, Any]) -> dict[str, Any]:
+    """Mint-a-token body: scope (a tier) + label, optional expires_in_days, and project_id — REQUIRED for a
+    tenant tier (read/consume/provision) but OMITTED for an 'operator' token, which is project-less (0020).
+    project_id is therefore OPTIONAL here; the tenant-project requirement is enforced by the verb
+    (create_token → 'project_required' / 'unknown_project'). validate_token enforces the known tier set
+    (read/consume/provision/operator) + the label/expiry bounds before any write (a typo'd tier is a crisp
+    400, not an un-resolvable token). With neither `expires_in_days` nor `never_expires`, the token gets
+    admin.DEFAULT_TOKEN_DAYS (review SEC-07): a token that never expires takes `never_expires: true`, which the
+    audit trail records with the other params; both at once is `invalid_expiry`."""
+    scope, label = _req_str(body, "scope"), _req_str(body, "label")
+    expires_in_days = _expiry_choice(body, default=admin.DEFAULT_TOKEN_DAYS)
+    reason = admin.validate_token(scope, label, expires_in_days)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"project_id": _opt_str(body, "project_id"), "scope": scope, "label": label,
+            "expires_in_days": expires_in_days, "never_expires": expires_in_days is None}
+
+
+def _parse_operator_create(body: dict[str, Any]) -> dict[str, Any]:
+    """Mint-a-named-dashboard-operator body (0026): `name` (the audit actor) + optional `expires_in_days`. No
+    scope/project — a dashboard operator has one fixed authority. validate_dashboard_operator enforces the
+    name/expiry bounds before any write (a crisp 400, not a bad row)."""
+    name = _req_str(body, "name")
+    expires_in_days = _opt_int(body, "expires_in_days")
+    reason = admin.validate_dashboard_operator(name, expires_in_days)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"name": name, "expires_in_days": expires_in_days}
+
+
+def _parse_settings(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse a settings edit: keep ONLY known knob keys from the body (each value the raw JSON value, or None
+    to CLEAR the override → fall back to env/default), then validate via settings.validate_patch. Rejects an
+    unknown key, a wrong type, a FLOAT where an int is required (the JSON-float-truncation trap), or a
+    below-min int — a clean 400 via _Reject, never a DB CHECK error."""
+    patch = {k.name: body[k.name] for k in settings.KNOBS if k.name in body}
+    reason = settings.validate_patch(patch)
+    if reason is not None:
+        raise _Reject(reason)
+    return {"patch": patch}
+
+
+def _apply_settings_edit(conn: psycopg.Connection[Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply a validated patch to the operator settings, the ledger override layer the daemon and gateway hot-apply.
+
+    The verb for /api/settings/edit: settings.set_settings returns None, so this returns the dict the action
+    contract expects."""
+    settings.set_settings(conn, patch)
+    return {"updated": True}
+
+
+def _do_reload(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    """Ask the daemon to reload its fleet config on its next tick, by setting the flag it reads and clears.
+
+    The verb for /api/reload (the dashboard can't signal the daemon's process): settings.request_reload returns
+    None, so this returns the dict the action contract expects."""
+    settings.request_reload(conn)
+    return {"reload_requested": True}
+
+
+def _force_fail_replication_action(c: psycopg.Connection[Any], **k: Any) -> dict[str, Any]:
+    """Force-fail a wedged replication job, then free its byte reservation.
+
+    That pairing is the documented contract. The CAS is committed HERE before the settle
+    so a crash can't settle a still-non-terminal job — mirrors the MCP surface's CAS-then-settle ordering. The
+    settle is UNCONDITIONAL (idempotent): on an already_terminal retry it REPAIRS a reservation left ADMITTED by a
+    crash between a prior CAS commit and its settle.
+    `_action`'s own trailing commit then no-ops."""
+    r = replication.force_fail_replication(c, k["replication_id"], k["reason"])
+    c.commit()   # commit the (possibly no-op) CAS before settling
+    replication.settle_forced_reservation(c, k["replication_id"])
+    return r
+
+
+# path → (parse, verb). Verbs resolved at CALL time so a test monkeypatching admin/gateway is seen.
+_ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
+                          Callable[..., dict[str, Any]]]] = {
+    "/api/cancel": (lambda b: {"lease_id": _req_int(b, "lease_id")},
+                    lambda c, **k: gateway.cancel_lease(c, k["lease_id"])),
+    # Operator "create VM" - act-as-project provisioning (br0kr/actas.py): reserve a VM on behalf of a
+    # CHOSEN project, debiting ITS real quota through the proven admission path (node_id -> request_lease
+    # pinned, else schedule_lease broker-placed). Audited result-aware (see _RESULT_AUDIT) so a rejection /
+    # idempotent replay isn't recorded. project_id is REQUIRED (no ungoverned NULL-project lease from the GUI).
+    "/api/lease/create": (_parse_lease_create, lambda c, **k: actas.create_lease(c, **k)),
+    # Human lifecycle for a GUI-created lease (which has no heartbeating agent): extend its TTL (renew) or
+    # end it early (release). Cross-tenant operator verbs - they debit nothing, so no act-as project needed.
+    "/api/lease/renew": (lambda b: {"lease_id": _req_int(b, "lease_id")},
+                         lambda c, **k: gateway.renew_lease(c, k["lease_id"])),
+    "/api/lease/release": (lambda b: {"lease_id": _req_int(b, "lease_id")},
+                           lambda c, **k: gateway.release_lease(c, k["lease_id"])),
+    # 0049: pin/unpin a live lease (the TTL reaper skips a pinned one), bounded by its project's max_pinned under
+    # the project row lock (br0kr/pin.py). Does not commit; _action does, which also frees the row locks.
+    "/api/lease/pin": (lambda b: {"lease_id": _req_int(b, "lease_id"), "pinned": _req_bool(b, "pinned")},
+                       lambda c, **k: pin.set_pinned(c, k["lease_id"], pinned=k["pinned"])),
+    # /api/quota is the BASE-quota editor — preserves the *_max ceilings (set_base_quota). /api/project/edit
+    # is the full project edit (set_project_quota, which also writes the ceilings).
+    "/api/quota": (_parse_base_quota, lambda c, **k: admin.set_base_quota(c, **k)),
+    "/api/project/edit": (_parse_quota, lambda c, **k: admin.set_project_quota(c, **k)),
+    "/api/project/create": (_parse_quota, lambda c, **k: admin.create_project(c, **k)),
+    "/api/project/delete": (_parse_id("project_id"), lambda c, **k: admin.delete_project(c, **k)),
+    # phase A4.2: the per-project template-disk ceiling — a DEDICATED setter so enabling a tenant's downloads
+    # doesn't disturb its cpu/mem/lease quota (it is not part of the project-edit full-state write).
+    "/api/project/template-disk": (_parse_template_disk,
+                                   lambda c, **k: admin.set_project_template_disk_quota(
+                                       c, k["project_id"], k["max_template_disk_gb"])),
+    # 0049: the per-project pin bound — a DEDICATED setter like template-disk, so allowing pins never re-sends
+    # (or clears) the rest of the project's quota.
+    "/api/project/max-pinned": (_parse_max_pinned,
+                                lambda c, **k: admin.set_project_max_pinned(c, k["project_id"], k["max_pinned"])),
+    "/api/node/create": (_parse_node, lambda c, **k: admin.create_node(c, **k)),
+    "/api/node/edit": (_parse_node, lambda c, **k: admin.set_node(c, **k)),
+    "/api/node/cordon": (lambda b: {"node_id": _req_str(b, "node_id"), "cordoned": _req_bool(b, "cordoned")},
+                         lambda c, **k: admin.set_node_cordon(c, k["node_id"], cordoned=k["cordoned"])),
+    "/api/node/delete": (_parse_force_delete("node_id"), lambda c, **k: admin.delete_node(c, **k)),
+    "/api/cluster/create": (_parse_cluster, lambda c, **k: admin.create_cluster(c, **k)),
+    "/api/cluster/edit": (_parse_cluster_edit, lambda c, **k: admin.set_cluster(c, **k)),
+    "/api/cluster/delete": (_parse_id("cluster_id"), lambda c, **k: admin.delete_cluster(c, **k)),
+    # Cross-cluster migration (PDM pre-wire): an OPERATOR asks the broker to move a lease's guest to a node in
+    # ANOTHER cluster. Control-plane only — gateway.migrate_lease records the intent; the leader daemon
+    # reserves target capacity + actuates the move (disabled by default; BR0KR_MIGRATE_LIMIT + a PDM-configured
+    # cluster). Token-gated like every write action.
+    "/api/migrate": (_parse_migrate,
+                     lambda c, **k: gateway.migrate_lease(c, idem_key=k["idem_key"], lease_id=k["lease_id"],
+                                                          target_node_id=k["target_node_id"])),
+    # Cancel a wedged migration (S07/F6): release its held target reservation without destroying the workload.
+    # Confirm-safe — a pre-copy saga aborts inline; an in-flight copy is refused (the daemon settles it safely).
+    "/api/migration/cancel": (lambda b: {"migration_id": _req_int(b, "migration_id")},
+                              lambda c, **k: gateway.cancel_migration(c, k["migration_id"])),
+    "/api/storage/create": (_parse_storage_create, lambda c, **k: admin.create_storage(c, **k)),
+    "/api/storage/edit": (_parse_storage, lambda c, **k: admin.set_storage(c, **k)),
+    "/api/storage/delete": (_parse_force_delete("storage_id"), lambda c, **k: admin.delete_storage(c, **k)),
+    # 0031 physical placement + reachability (the template-reachability floor). `placement` binds a pool to a
+    # cluster + PVE name; `nodes` declares which nodes physically reach it (the map the future placement gate
+    # reads); `quarantine/clear` re-widens a pair the post-clone assertion fail-closed. Token-gated + audited.
+    "/api/storage/placement": (_parse_storage_placement, lambda c, **k: admin.set_storage_placement(c, **k)),
+    "/api/storage/nodes": (_parse_storage_nodes, lambda c, **k: admin.set_storage_nodes(c, **k)),
+    # 0041: declare a pool's PVE CONTENT capability (import/images/rootdir/…) — the gate template builds +
+    # rebuild_source read via placement.content_capable. Token-gated + audited.
+    "/api/storage/content": (_parse_storage_content,
+                             lambda c, **k: admin.set_storage_content(
+                                 c, k["storage_id"], content_types=k["content_types"])),
+    "/api/storage/quarantine/clear": (lambda b: {"storage_id": _req_str(b, "storage_id"),
+                                                 "node_id": _req_str(b, "node_id")},
+                                      lambda c, **k: admin.clear_storage_node_quarantine(
+                                          c, k["storage_id"], k["node_id"])),
+    # 0041/PR-B: single-pair reachability CONFIRM verbs — the operator's one-click action on a
+    # discover_reachability finding. `node/add` widens (additive, born-unverified — the known_pool_new_node
+    # confirm); `node/remove` un-declares, REFUSING a QUARANTINED pair without force (else remove+add would
+    # launder the audited quarantine). Token-gated + audited.
+    "/api/storage/node/add": (lambda b: {"storage_id": _req_str(b, "storage_id"),
+                                         "node_id": _req_str(b, "node_id")},
+                              lambda c, **k: admin.add_storage_node(c, k["storage_id"], k["node_id"])),
+    "/api/storage/node/remove": (lambda b: {"storage_id": _req_str(b, "storage_id"),
+                                            "node_id": _req_str(b, "node_id"),
+                                            "force": _opt_bool(b, "force", False)},
+                                 lambda c, **k: admin.remove_storage_node(
+                                     c, k["storage_id"], k["node_id"], force=k["force"])),
+    # 0044/PR-H: dismiss / clear a discover_reachability finding so a known-benign drift row (e.g. a node-local
+    # scratch pool) stops re-surfacing in every report. Pure reporting suppression — NO gate path reads
+    # discovery_dismissal. Token-gated + audited (the dismissal's `dismissed_by` is left NULL on this dashboard
+    # path — the route lambda has no operator identity; the attribution lives in the audited operator_audit row).
+    "/api/discovery/dismiss": (lambda b: {"kind": _req_str(b, "kind"), "node_id": _req_str(b, "node_id"),
+                                          "subject": _req_str(b, "subject"), "note": _opt_str(b, "note")},
+                               lambda c, **k: admin.dismiss_discovery_finding(
+                                   c, kind=k["kind"], node_id=k["node_id"], subject=k["subject"],
+                                   note=k["note"])),
+    "/api/discovery/dismissal/clear": (lambda b: {"kind": _req_str(b, "kind"), "node_id": _req_str(b, "node_id"),
+                                                  "subject": _req_str(b, "subject")},
+                                       lambda c, **k: admin.clear_discovery_dismissal(
+                                           c, kind=k["kind"], node_id=k["node_id"], subject=k["subject"])),
+    # 0039 logical-network reachability (0038's raw-bridge twin, re-keyed onto a logical identity). `network/
+    # create`+`network/delete` manage the fleet-global identity; `network/node` declares the concrete bridge a
+    # node presents for it (the map + rewrite target the placement gate resolves for a CROSS-NODE clone);
+    # `network/quarantine/clear` re-widens a (node, logical net) pair the post-clone net0 assertion fail-closed.
+    # Token-gated + audited.
+    "/api/network/create": (lambda b: {"network_id": _req_str(b, "network_id"),
+                                       "description": _opt_str(b, "description")},
+                            lambda c, **k: admin.create_logical_network(
+                                c, k["network_id"], description=k["description"])),
+    "/api/network/delete": (lambda b: {"network_id": _req_str(b, "network_id")},
+                            lambda c, **k: admin.delete_logical_network(c, k["network_id"])),
+    "/api/network/node": (_parse_network_node,
+                          lambda c, **k: admin.set_network_node(
+                              c, k["node_id"], k["logical_network_id"], bridge=k["bridge"])),
+    # A quarantined pair is refused without a strict-bool `force` (pair_quarantined): delete + re-declare would
+    # otherwise launder the quarantine, as /api/storage/node/remove already guards.
+    "/api/network/node/delete": (lambda b: {"node_id": _req_str(b, "node_id"),
+                                            "logical_network_id": _req_str(b, "logical_network_id"),
+                                            "force": _opt_bool(b, "force", False)},
+                                 lambda c, **k: admin.delete_network_node(
+                                     c, k["node_id"], k["logical_network_id"], force=k["force"])),
+    "/api/network/quarantine/clear": (lambda b: {"node_id": _req_str(b, "node_id"),
+                                                 "logical_network_id": _req_str(b, "logical_network_id")},
+                                      lambda c, **k: admin.clear_network_node_quarantine(
+                                          c, k["node_id"], k["logical_network_id"])),
+    "/api/template/create": (_parse_template, lambda c, **k: admin.create_template(c, **k)),
+    "/api/template/edit": (_parse_template, lambda c, **k: admin.set_template(c, **k)),
+    # 0039: point a template's net0 at a logical network. Empty/absent clears it (template_bridge_undeclared).
+    # Token-gated + audited.
+    "/api/template/network": (lambda b: {"template_id": _req_str(b, "template_id"),
+                                         "logical_network_id": _opt_str(b, "logical_network_id")},
+                              lambda c, **k: admin.set_template_logical_network(
+                                  c, k["template_id"], logical_network_id=k["logical_network_id"])),
+    # PR-6: SET/CLEAR a template's source_dirty hand-modification attestation (0040) so rebuild_source refuses
+    # (source_hand_modified) a built template hand-edited in PVE. `dirty` defaults True (the common "I just
+    # touched it" action). Token-gated + audited.
+    "/api/template/source-dirty": (lambda b: {"template_id": _req_str(b, "template_id"),
+                                              "dirty": _opt_bool(b, "dirty", True)},
+                                   lambda c, **k: admin.set_template_source_dirty(
+                                       c, k["template_id"], dirty=k["dirty"])),
+    "/api/template/delete": (_parse_id("template_id"), lambda c, **k: admin.delete_template(c, **k)),
+    "/api/template/grant": (_parse_grant, lambda c, **k: admin.grant_template(c, **k)),
+    "/api/template/revoke": (_parse_grant, lambda c, **k: admin.revoke_template(c, **k)),
+    "/api/template/source/create": (_parse_source, lambda c, **k: admin.create_template_source(c, **k)),
+    "/api/template/source/delete": (_parse_id("url_prefix", maxlen=2048),
+                                    lambda c, **k: admin.delete_template_source(c, **k)),
+    "/api/template/build/request": (_parse_build_request, lambda c, **k: admin.request_template_build(c, **k)),
+    # OPERATOR escape hatch (review S04/F4): force a STUCK build → FAILED (a wedged reclaim that keeps pinning a
+    # project's disk-quota reserve). Does NOT tear down the guest — a stamped vmid may be a running orphan the
+    # operator cleans up by hand. Token-gated + audited like every write.
+    "/api/template/build/force-fail": (lambda b: {"build_id": _req_int(b, "build_id"),
+                                                  "reason": _opt_str(b, "reason")},
+                                       lambda c, **k: admin.force_fail_build(c, k["build_id"], k["reason"])),
+    # Act-as TENANT template-download (PR-2, br0kr/actas.py): an operator downloads a net-new PRIVATE image on
+    # behalf of a CHOSEN project, debiting ITS template-disk quota via gateway.request_template_download (the
+    # same verb the provision-tier MCP tool calls, with the project CHOSEN instead of token-bound). Audited
+    # result-aware (see _RESULT_AUDIT) so an allowlist/quota refusal isn't recorded. project_id REQUIRED.
+    "/api/template/download": (_parse_template_download, lambda c, **k: actas.tenant_download(c, **k)),
+    # Template instances (0032): bind a seed to a concrete (node, storage) placement, retire it (so a fresh
+    # copy can replace it), or delete the row. Token-gated + audited; driven from the Images-tab "Template
+    # instances" panel (renderInstances → openBindForm/retireInstance/deleteInstance in dashboard_page.py).
+    "/api/instance/bind": (lambda b: {"instance_id": _req_int(b, "instance_id"),
+                                      "node_id": _req_str(b, "node_id"), "storage_id": _req_str(b, "storage_id"),
+                                      "size_gb": _req_int(b, "size_gb")},
+                           lambda c, **k: admin.bind_instance_placement(
+                               c, k["instance_id"], node_id=k["node_id"], storage_id=k["storage_id"],
+                               size_gb=k["size_gb"])),
+    "/api/instance/retire": (lambda b: {"instance_id": _req_int(b, "instance_id")},
+                             lambda c, **k: admin.retire_instance(c, k["instance_id"])),
+    "/api/instance/delete": (_parse_instance_delete,
+                             lambda c, **k: admin.delete_template_instance(
+                                 c, k["instance_id"], force=k["force"])),
+    # Template REPLICATION control plane (0034): request an async copy of a template onto another (cluster,
+    # storage) pool ON BEHALF OF a chosen project (act-as; project OPTIONAL = operator copy), cancel a REQUESTED
+    # one, or prune settled terminal job history. Control plane only — no capacity/guest until the data plane
+    # ships (a later PR). Token-gated + audited; `create` is result-aware (see _RESULT_AUDIT/_RESULT_REFUSED).
+    "/api/replication/create": (_parse_replicate, lambda c, **k: actas.replicate(c, **k)),
+    "/api/replication/cancel": (lambda b: {"replication_id": _req_int(b, "replication_id")},
+                                lambda c, **k: replication.cancel_replication(c, k["replication_id"])),
+    "/api/replication/prune": (_parse_prune_replications,
+                               lambda c, **k: replication.prune_replications(
+                                   c, k["older_than_days"], cluster_id=k["cluster_id"])),
+    # Force a WEDGED replication copy job terminal WITHOUT teardown (PR-5 data plane; the build force-fail
+    # pattern) — the manual release valve when the automated reclaim keeps raising and the job keeps holding the
+    # one-active slot + byte reservation. A stamped vmid may be a running orphan the operator cleans up by hand;
+    # the returned vmid is its fence handle. Token-gated + audited like every write.
+    "/api/replication/force-fail": (lambda b: {"replication_id": _req_int(b, "replication_id"),
+                                               "reason": _opt_str(b, "reason")},
+                                    _force_fail_replication_action),
+    # `never_expires` is in the parsed params so the audit row names the choice; the verb takes only the days.
+    "/api/token/create": (_parse_token_create, lambda c, **k: admin.create_token(
+        c, **{key: v for key, v in k.items() if key != "never_expires"})),
+    "/api/token/revoke": (lambda b: {"token_id": _req_int(b, "token_id")},
+                          lambda c, **k: admin.revoke_token(c, k["token_id"])),
+    # Re-date (or clear) an existing token's expiry — token lifecycle beyond mint-time. expires_in_days re-bases
+    # it from now; never_expires: true clears it; a body naming neither is invalid_expiry (review SEC-07).
+    "/api/token/expiry": (_parse_token_expiry,
+                          lambda c, **k: admin.set_token_expiry(c, k["token_id"], k["expires_in_days"])),
+    # NAMED dashboard operators (0026): mint/revoke a per-human dashboard credential so the audit records WHO
+    # (vs the shared 'dashboard-operator'). Managed ONLY here (never over MCP). The secret is a create RESULT,
+    # never audited (audit stores params only, redacted).
+    "/api/operator/create": (_parse_operator_create, lambda c, **k: admin.create_dashboard_operator(c, **k)),
+    "/api/operator/revoke": (lambda b: {"operator_id": _req_int(b, "operator_id")},
+                             lambda c, **k: admin.revoke_dashboard_operator(c, k["operator_id"])),
+    # Operator settings (migration 0021): edit the operator_setting ledger override layer (hot-applied by the
+    # daemon each tick / the gateway per request), and the cross-process "reload fleet now" (the dashboard
+    # can't SIGHUP the daemon, so it sets a flag the daemon read-and-clears). Token-gated like every write.
+    "/api/settings/edit": (_parse_settings, lambda c, **k: _apply_settings_edit(c, k["patch"])),
+    "/api/reload": (lambda b: {}, lambda c, **k: _do_reload(c)),
+}
+
+
+# Result-aware audit predicates: for the few actions whose trail-worthiness depends on the OUTCOME (not just
+# that the write committed), path -> a predicate `(result, params) -> (should_audit, target)`. A create is
+# audited ONLY when it actually reserved/queued (not a rejection or an idempotent replay), keyed on the created
+# lease id; a download only when a build actually started, keyed on the request's target_template_id - each
+# mirroring its MCP adapter's gating + target so a double-submit can't flood the trail and a who-touched-this
+# search is cross-surface complete. A path ABSENT here uses _action's default (audit always, target from
+# params). One small table, not a branch scattered per verb.
+_RESULT_AUDIT: dict[str, Callable[[dict[str, Any], dict[str, Any]], tuple[bool, str | None]]] = {
+    "/api/lease/create": actas.audit_create,
+    "/api/template/download": actas.audit_download,
+    "/api/replication/create": actas.audit_replicate,
+}
+
+# The complement of _RESULT_AUDIT for the FINAL-refusal channel (0033/PR-3): path -> a predicate
+# `(result, params) -> (is_refused, reason)`. When it reports a refusal, `_action` records a throttled
+# outcome='refused' audit row (its own coalescing recorder) so an operator sees WHAT the act-as admission
+# refused (capacity/placement/governance), filterable under the dashboard 'refused' pill — WITHOUT counting an
+# idempotent replay or a fresh reserve. A path absent here records no refusal (only the two act-as admission
+# verbs refuse capacity). One small table, mirroring _RESULT_AUDIT.
+_RESULT_REFUSED: dict[str, Callable[[dict[str, Any], dict[str, Any]], tuple[bool, str | None]]] = {
+    "/api/lease/create": actas.refused_create,
+    "/api/template/download": actas.refused_download,
+    "/api/replication/create": actas.refused_replicate,
+}
