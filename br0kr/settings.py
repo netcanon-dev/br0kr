@@ -27,8 +27,10 @@ class Knob:
     only — e.g. the reaper's release ceiling, which had no env before) + the code default + a `kind` used to
     parse the env value and validate an edit. `minimum` bounds an int knob (defense-in-depth behind the DB
     CHECK). `gateway` marks a knob read in the gateway process (queue_max, replication_cooldown_seconds), not
-    only in the daemon tick; the dashboard shows it. Under the bundled compose every broker process receives every
-    knob's env seed (docker-compose.yml x-broker-env), so the env layer agrees across containers."""
+    only in the daemon tick; the dashboard shows it. `daemon` marks one the daemon's tick copies onto its
+    attribute of the same name (review ARCH-06); log_level is not one: the tick applies it as the root log
+    level. Under the bundled compose every broker process receives every knob's env seed (docker-compose.yml
+    x-broker-env), so the env layer agrees across containers."""
 
     name: str
     kind: str          # 'int' | 'bool' | 'str'
@@ -37,27 +39,28 @@ class Knob:
     minimum: int | None = None
     gateway: bool = False
     choices: tuple[str, ...] | None = None   # enum str knob (e.g. log_level) — validated + a GUI dropdown
+    daemon: bool = False   # applied each tick as the daemon attribute of the same name (tick_config.apply_settings)
 
 
 # Display + apply order. Mirrors the env reads in daemon.main() / mcp_common._queue_max() / reaper.
 KNOBS: tuple[Knob, ...] = (
     Knob("queue_max", "int", "BR0KR_QUEUE_MAX", 1000, minimum=0, gateway=True),
-    Knob("reap_grace", "int", "BR0KR_REAP_GRACE", 30, minimum=0),
-    Knob("sweep_every", "int", "BR0KR_SWEEP_EVERY", 12, minimum=0),
-    Knob("sweep_dry_run", "bool", "BR0KR_SWEEP_DRY_RUN", False),
-    Knob("provision_limit", "int", "BR0KR_PROVISION_LIMIT", 8, minimum=0),
-    Knob("promote_limit", "int", "BR0KR_PROMOTE_LIMIT", 16, minimum=0),
-    Knob("max_release_attempts", "int", None, 5, minimum=0),
+    Knob("reap_grace", "int", "BR0KR_REAP_GRACE", 30, minimum=0, daemon=True),
+    Knob("sweep_every", "int", "BR0KR_SWEEP_EVERY", 12, minimum=0, daemon=True),
+    Knob("sweep_dry_run", "bool", "BR0KR_SWEEP_DRY_RUN", False, daemon=True),
+    Knob("provision_limit", "int", "BR0KR_PROVISION_LIMIT", 8, minimum=0, daemon=True),
+    Knob("promote_limit", "int", "BR0KR_PROMOTE_LIMIT", 16, minimum=0, daemon=True),
+    Knob("max_release_attempts", "int", None, 5, minimum=0, daemon=True),
     # The PROVISIONING budget in seconds (0048, review REL-01): the reaper reclaims a lease still PROVISIONING
     # this long after begin_provisioning as RELEASING(provision_stuck), whatever its expires_at (PROVISIONING is
     # renewable, so expiry alone never ended it for a heartbeating agent). Default 1200 = 20 min, above the
     # provisioner's own clone + grow + start wait budgets (see lease.PROVISION_STUCK_SECONDS for why reclaiming is
     # safe even when PVE is slower); 0 = OFF. Daemon-only (the reaper runs in its tick);
     # no env seed, like max_release_attempts: an operator dial set from the dashboard, hot-applied.
-    Knob("provision_stuck_seconds", "int", None, 1200, minimum=0),
-    Knob("build_limit", "int", "BR0KR_BUILD_LIMIT", 0, minimum=0),
-    Knob("migrate_limit", "int", "BR0KR_MIGRATE_LIMIT", 0, minimum=0),
-    Knob("guest_ip_prefix", "str", "BR0KR_GUEST_IP_PREFIX", None),
+    Knob("provision_stuck_seconds", "int", None, 1200, minimum=0, daemon=True),
+    Knob("build_limit", "int", "BR0KR_BUILD_LIMIT", 0, minimum=0, daemon=True),
+    Knob("migrate_limit", "int", "BR0KR_MIGRATE_LIMIT", 0, minimum=0, daemon=True),
+    Knob("guest_ip_prefix", "str", "BR0KR_GUEST_IP_PREFIX", None, daemon=True),
     # The reconciler daemon's log level, hot-applied each tick (0022). Default INFO matches configure_logging's
     # startup default, so an all-NULL row + no env is byte-identical; the daemon resolves ledger→LOG_LEVEL→INFO
     # and setLevel()s. Daemon-only (the gateway/dashboard have no tick loop → keep their startup LOG_LEVEL env).
@@ -65,7 +68,7 @@ KNOBS: tuple[Knob, ...] = (
     # Audit-trail retention in DAYS (0024): the daemon prunes operator_audit rows older than this, on a
     # throttled cadence. Default 0 = OFF (keep forever — enabling the one sanctioned DELETE on the append-only
     # trail is a deliberate opt-in); a byte-identical all-NULL seed. Daemon-only (the prune runs in the tick).
-    Knob("audit_retention_days", "int", "BR0KR_AUDIT_RETENTION_DAYS", 0, minimum=0),
+    Knob("audit_retention_days", "int", "BR0KR_AUDIT_RETENTION_DAYS", 0, minimum=0, daemon=True),
     # Placement gate (0033). full_clone: the clone-storage resolution (br0kr/placement.py §4.2) branches
     # full-vs-linked, and the gate runs in BOTH the gateway's admit() AND the daemon. The bundled compose now
     # passes BR0KR_VM_FULL_CLONE to both (x-broker-env, review OPS-02), but a hand-run process may still see a
@@ -73,8 +76,8 @@ KNOBS: tuple[Knob, ...] = (
     # containers class §3.5 closes): all-NULL + the env = full clones, byte-identical to before.
     # placement_assert: the mandatory post-clone disk-location assertion's audited break-glass — default ON
     # (True); set false only to disable the tripwire deliberately.
-    Knob("full_clone", "bool", "BR0KR_VM_FULL_CLONE", True),
-    Knob("placement_assert", "bool", None, True),
+    Knob("full_clone", "bool", "BR0KR_VM_FULL_CLONE", True, daemon=True),
+    Knob("placement_assert", "bool", None, True, daemon=True),
     # Cross-node placement (0037). OFF (default) = v1 node-local: a templated lease is served ONLY from an instance
     # HOSTED ON its own node (placement._USABLE_INSTANCE_PICK). ON = the gate ALSO admits a READY instance on a
     # DIFFERENT node in the SAME cluster whose storage REACHES the placement node (i.e. genuinely SHARED) — the
@@ -84,7 +87,7 @@ KNOBS: tuple[Knob, ...] = (
     # the instance's storage to reach the placement node, so ON only ever admits a shared-storage copy; every
     # other guard (post-clone assertion, vmid fence, same-cluster) is unchanged. all-NULL row = OFF, byte-
     # identical to the shipped node-local gate.
-    Knob("cross_node_clone", "bool", "BR0KR_CROSS_NODE_CLONE", False),
+    Knob("cross_node_clone", "bool", "BR0KR_CROSS_NODE_CLONE", False, daemon=True),
     # Replication control plane (0034). The enabled-mechanism allowlist a replication request is checked against
     # (gateway.request_replication) — a COMMA list, so it can widen to more mechanisms without a schema change;
     # default 'clone_shared' (the only mechanism implemented). A SHARED operator_setting so the gateway and the
@@ -108,7 +111,7 @@ KNOBS: tuple[Knob, ...] = (
     # refuses. Read in admit() AND recheck_instance AND the scheduler's placeability probe → a SHARED
     # operator_setting, never env-only (the §3.5 anti-env-drift rule, like cross_node_clone/full_clone). An UNBOUND
     # seed (no storage row) is skipped even when ON (nothing to declare; pre-0041 parity).
-    Knob("clone_content_enforcement", "bool", "BR0KR_CLONE_CONTENT_ENFORCEMENT", False),
+    Knob("clone_content_enforcement", "bool", "BR0KR_CLONE_CONTENT_ENFORCEMENT", False, daemon=True),
     # Reachability-discovery CADENCE in SECONDS (0043, PR-D backlog). 0 = OFF (the default — no periodic
     # discovery, byte-identical: no extra PVE traffic, no new log surface). > 0 = the daemon runs the READ-ONLY
     # placement.discover_reachability drift report every this-many seconds (monotonic elapsed, a real wall-clock
@@ -118,7 +121,7 @@ KNOBS: tuple[Knob, ...] = (
     # the gateway/dashboard have no tick loop). REPORT-ONLY: discover_reachability WRITES NOTHING to gate-read
     # declarations (the §11 discovery-writes-nothing hard rule — a future auto_confirm on any discovery cadence is
     # FORBIDDEN); this knob only sets HOW OFTEN the report runs. all-NULL row + no env = 0 = OFF, byte-identical.
-    Knob("discovery_interval_seconds", "int", "BR0KR_DISCOVERY_INTERVAL_SECONDS", 0, minimum=0),
+    Knob("discovery_interval_seconds", "int", "BR0KR_DISCOVERY_INTERVAL_SECONDS", 0, minimum=0, daemon=True),
     # Multi-disk request-surface master switch (0047, the multi-disk arc PR-5). OFF (default) = the request
     # surface (gateway.request_lease/schedule_lease) REFUSES a non-empty `data_disks` ask `multi_disk_disabled`
     # BEFORE any admission lock/debit — so the surface can DEPLOY while multi-disk stays inert (an empty ask
@@ -131,6 +134,8 @@ KNOBS: tuple[Knob, ...] = (
     Knob("multi_disk_enabled", "bool", "BR0KR_MULTI_DISK_ENABLED", False, gateway=True),
 )
 _BY_NAME: dict[str, Knob] = {k.name: k for k in KNOBS}
+# The knobs the daemon's tick hot-applies as attributes (tick_config.apply_settings), in KNOBS order.
+DAEMON_KNOBS: tuple[Knob, ...] = tuple(k for k in KNOBS if k.daemon)
 _COLS: tuple[str, ...] = tuple(k.name for k in KNOBS)
 MAX_STR_LEN = 64   # guest_ip_prefix ceiling — mirrors the 0021 CHECK
 _INT4_MAX = 2_147_483_647   # every operator_setting int knob is an int4 column (migration 0021)

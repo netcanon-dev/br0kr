@@ -73,12 +73,32 @@ def test_apply_settings_hot_applies_every_knob_from_the_ledger(monkeypatch):
     monkeypatch.setattr(settings, "effective", lambda _c: resolved)
     monkeypatch.setattr(settings, "take_reload", lambda _c: False)   # no reload pending this tick
     tick_config.apply_settings(ns, object())   # type: ignore[arg-type]
+    # the knobs flagged daemon=True are exactly the ones the daemon holds as attributes (review ARCH-06)
+    assert {k.name for k in settings.DAEMON_KNOBS} == set(_KNOB_ATTRS)
     for attr in _KNOB_ATTRS:
         assert getattr(ns, attr) == resolved[attr], attr
     assert ns._reload_requested is False           # take_reload False → no reload triggered
     assert logging.getLogger().level == logging.DEBUG   # log_level applied via setLevel (0022), not a knob attr
     # queue_max is read in the gateway process, and log_level is applied via setLevel — neither is a daemon attr
     assert not hasattr(ns, "queue_max") and not hasattr(ns, "log_level")
+
+
+def test_every_daemon_knob_is_an_attribute_the_daemon_sets_at_startup():
+    """The knobs flagged daemon=True are exactly the knobs whose name Daemon.__init__ assigns as an attribute (its
+    startup value, before the first tick's hot-apply). Guards both halves of the tick's one setattr loop (review
+    ARCH-06): a misspelled or renamed flagged knob makes setattr create an attribute nothing reads, and a knob the
+    daemon holds but nobody flagged is never copied, so a dashboard edit to either one silently does nothing."""
+    import ast
+    import inspect
+    import textwrap
+    init = ast.parse(textwrap.dedent(inspect.getsource(daemon.Daemon.__init__)))
+    assigned = {t.attr for n in ast.walk(init) if isinstance(n, (ast.Assign, ast.AnnAssign))
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self"}
+    missing = [k.name for k in settings.DAEMON_KNOBS if k.name not in assigned]
+    assert not missing, f"daemon knobs Daemon.__init__ never sets: {missing}"
+    unflagged = [k.name for k in settings.KNOBS if k.name in assigned and not k.daemon]
+    assert not unflagged, f"knobs the daemon holds but the tick never applies (flag them daemon=True): {unflagged}"
 
 
 def test_apply_settings_consumes_the_reload_flag(monkeypatch):

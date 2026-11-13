@@ -64,6 +64,23 @@ ledger or acts on Proxmox, and what proves it.
    `migration.py` and fails on an edge the machine does not list, a declared edge no step takes, or a guard it
    cannot read.
 
+## Adding an operator setting (a knob)
+
+A knob is a column on the `operator_setting` row, so each new one is a migration. That is the accepted price,
+decided over moving the knobs into one JSON column (review ARCH-06): about one knob per feature, and every knob
+stays a typed, CHECKed column.
+
+1. A migration: `ALTER TABLE operator_setting ADD COLUMN IF NOT EXISTS <name> <type>` (NULL = not overridden),
+   with a CHECK for a bound.
+2. One `Knob(...)` row in `settings.KNOBS`: its env seed, default, kind and bounds. `settings.effective`, the
+   edit validator and the dashboard's Settings form all read it from there.
+3. `daemon=True` if the daemon reads it as `self.<name>`, plus that attribute's startup value in
+   `Daemon.__init__`: `tick_config.apply_settings` copies every daemon knob onto it each tick, and
+   `tests/unit/test_daemon.py` fails if the flag and the attribute do not come together. `gateway=True` if the
+   gateway reads it per request; the dashboard labels it so.
+4. An env seed is documented in `.env.example` and passed in the compose `x-broker-env` block, so every container
+   resolves the same value (`tests/unit/test_env_contract.py` checks both).
+
 ## Adding a tick step
 
 1. Write the step's `run(daemon, conn, summary)` in the `tick_*.py` module that owns that kind of work, or in a new

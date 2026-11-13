@@ -45,6 +45,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **A knob stays a column on `operator_setting`, by decision; the daemon applies its knobs in one loop.** Adding
+  one is a migration and a `Knob` row (`daemon=True` if the daemon reads it); see br0kr/README (ARCH-06).
 - **The Proxmox driver contract is named: `br0kr/driver.py`, a Protocol the engine is typed against.** mypy now
   fails on an engine call outside it or a `pve.Pve` that stops satisfying it; no behaviour change (ARCH-05).
 - **The job state machines are declared once, in `br0kr/statemachine.py`, and the jobs' guarded UPDATEs are checked.**

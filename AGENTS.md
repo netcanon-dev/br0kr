@@ -24,7 +24,8 @@ rollout.
   the MCP verb registry `br0kr/verbs.py`, the daemon's `tick_steps.STEPS`), never through per-case branching
   scattered across the codebase.
 - **Config-as-data, validated.** node/storage/quota limits (SQL rows) are data; they must pass
-  validation before they run.
+  validation before they run. An operator setting (a knob) is a column on `operator_setting`: adding one is one
+  migration and one `settings.Knob` row, a price accepted by decision over a JSON column (review ARCH-06).
 - **Tests, docs, and logging are first-class.** A behaviour change isn't *done*
   until the test that proves it (with its what-and-why docstring), its log line,
   and the doc it renders stale all land in the **same commit**.

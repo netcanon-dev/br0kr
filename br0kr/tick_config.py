@@ -37,25 +37,13 @@ def apply_settings(d: Daemon, conn: psycopg.Connection[Any]) -> None:
     and is DAEMON-ONLY (the gateway/dashboard have no tick loop; they keep their startup LOG_LEVEL env)."""
     try:
         eff = settings.effective(conn)
-        d.reap_grace = eff["reap_grace"]
-        d.sweep_every = eff["sweep_every"]
-        d.sweep_dry_run = eff["sweep_dry_run"]
-        d.provision_limit = eff["provision_limit"]
-        d.promote_limit = eff["promote_limit"]
-        d.max_release_attempts = eff["max_release_attempts"]
-        d.provision_stuck_seconds = eff["provision_stuck_seconds"]   # 0048; the reaper's PROVISIONING budget
-        d.build_limit = eff["build_limit"]
-        d.migrate_limit = eff["migrate_limit"]
-        d.guest_ip_prefix = eff["guest_ip_prefix"]
-        d.audit_retention_days = eff["audit_retention_days"]   # 0024 retention; gates tick_upkeep.prune_audit
-        d.discovery_interval_seconds = eff["discovery_interval_seconds"]   # 0043; gates the tick_upkeep.discover report
-        # 0033 placement knobs (SHARED with the gateway's admit() gate via operator_setting). full_clone
-        # here MUST match what the gate resolved so the daemon's clone mode + the gate's clone-storage
-        # resolution agree; placement_assert arms/disarms the post-clone disk-location tripwire.
-        d.full_clone = eff["full_clone"]
-        d.placement_assert = eff["placement_assert"]
-        d.cross_node_clone = eff["cross_node_clone"]   # 0037: match the gate so admit + provision agree
-        d.clone_content_enforcement = eff["clone_content_enforcement"]   # 0042: same-value lockstep w/ admit
+        # Every daemon knob lands on the daemon attribute of the same name (settings.DAEMON_KNOBS, review ARCH-06).
+        # full_clone, cross_node_clone and clone_content_enforcement are SHARED with the gateway's admit() gate
+        # (0033/0037/0042): reading them from the same ledger row here keeps the daemon's clone mode and the gate's
+        # clone-storage resolution in lockstep; placement_assert arms or disarms the post-clone disk-location
+        # tripwire.
+        for knob in settings.DAEMON_KNOBS:
+            setattr(d, knob.name, eff[knob.name])
         # Hot-apply THIS daemon's log level (0022, daemon-only). Resolve is ledger→LOG_LEVEL→'INFO'; a
         # cleared override reverts to env/default. Normalize + validate DEFENSIVELY: an env LOG_LEVEL
         # bypasses the settings validator, so a lowercase / garbage value must never crash setLevel — an
