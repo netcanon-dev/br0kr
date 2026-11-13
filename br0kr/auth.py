@@ -44,7 +44,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import reasons
+from br0kr import reasons, verbs
 
 log = logging.getLogger(__name__)
 
@@ -60,95 +60,10 @@ TIER_RANK: dict[str, int] = {"read": 0, "consume": 1, "provision": 2}
 OPERATOR_SCOPE = "operator"
 VALID_SCOPES: frozenset[str] = frozenset(TIER_RANK) | {OPERATOR_SCOPE}
 
-# Each gateway verb's MINIMUM tier. The one dispatch table the gateway authorizes against — adding a tool
-# means adding its required tier here (an unlisted verb is denied by default, so a new tool can't slip
-# onto the surface unauthorized). 'read' = inventory/capacity/status; 'consume' = lease lifecycle;
-# 'provision' = self-service config (raise the token's OWN project quota within an operator-set ceiling).
-VERB_TIER: dict[str, str] = {
-    # read tier — look, don't touch
-    "node_capacity": "read",
-    "cluster_capacity": "read",
-    "project_capacity": "read",
-    "list_nodes": "read",
-    "list_clusters": "read",
-    "list_storage": "read",
-    "list_projects": "read",
-    "list_templates": "read",
-    "queue_view": "read",
-    "list_leases": "read",          # the caller's ACTIVE leases (operator token: all tenants')
-    "lease_status": "read",
-    "wait_for_lease": "read",       # lease_status, waited for server-side (at most 60 s)
-    "lease_statuses": "read",       # bulk read: status of many of your leases in one call
-    "queue_status": "read",
-    "migration_status": "read",
-    "fleet_stats": "read",
-    "whoami": "read",               # reflect the token's own project/scope/id (no ledger read)
-    # consume tier — reserve / hold / release capacity (always against the token's own project)
-    "request_lease": "consume",
-    "schedule_lease": "consume",
-    "renew_lease": "consume",
-    "release_lease": "consume",
-    "cancel_lease": "consume",
-    # consume tier, bulk forms — fan a lifecycle verb over many of the token's OWN leases in one call
-    # (br0kr/bulk.py). Same tier + per-lease ownership gate as their single counterparts, no new authority.
-    "renew_leases": "consume",
-    "release_leases": "consume",
-    "cancel_leases": "consume",
-    # provision tier — self-service: raise/lower the token's OWN project quota within the operator ceiling,
-    # and (phase A4.2) download a net-new template for the token's OWN project, bounded by its disk quota.
-    "set_quota": "provision",
-    "request_template_download": "provision",
-    # operator tier — cross-tenant INFRA actions (NOT a tenant lease/quota op). An operator token is not
-    # bound to a project; these act fleet-wide: node_cordon closes/opens a node to new provisioning,
-    # migrate_lease relocates ANY lease's guest cross-cluster. A tenant token can NEVER call these; an
-    # operator token may ALSO call the read-tier verbs to observe (see tier_allows).
-    "node_cordon": "operator",
-    "migrate_lease": "operator",
-    # pin_lease: pin/unpin ANY tenant's live lease (0049) — a permanent capacity hold on someone's quota, bounded
-    # by that project's max_pinned. A tenant asks for a pin only at request time (request_lease pinned=true).
-    "pin_lease": "operator",
-    # force_fail_build: force a STUCK template-build → FAILED (a wedged reclaim that keeps pinning a project's
-    # disk-quota reserve). Fleet-wide config action across ANY project's build, so operator-only.
-    "force_fail_build": "operator",
-    # cancel_migration: release a wedged migration's held target reservation (guest untouched). A cross-tenant
-    # infra action on ANY lease's migration — operator-only, like migrate_lease that starts one.
-    "cancel_migration": "operator",
-    # verify_declarations: reconcile declared storage reachability vs PVE's live view (0033/PR-3). Read-only
-    # against PVE but it MUTATES the ledger (auto-quarantines a proven-wrong (storage,node) pair) — a
-    # fleet-wide reachability action, operator-only, never a tenant verb.
-    "verify_declarations": "operator",
-    # discover_reachability: the WIDEN-half twin of verify_declarations (0041/PR-B) — reads every served node's
-    # live PVE storage listing and REPORTS drift (new-node widen candidates, unknown pools, disabled/absent
-    # declarations, content drift) WITHOUT writing anything. Read-only (unlike verify, which quarantines), but it
-    # reaches into fleet PVE infra a tenant can't see, so operator-only.
-    "discover_reachability": "operator",
-    # dismiss_discovery_finding / clear_discovery_dismissal: an operator silences a KNOWN-benign discovery
-    # finding so it stops re-surfacing in every report (0044/PR-H). Pure reporting suppression (no gate path
-    # reads discovery_dismissal), fleet-scoped like the report they act on, so operator-only.
-    "dismiss_discovery_finding": "operator",
-    "clear_discovery_dismissal": "operator",
-    # detect_template_bridge: advisory READ of a template's net0 bridge from PVE (0038 → read-only in 0039), the
-    # diagnostic that helps an operator map a template to a logical net — reads a node's guest config, so
-    # operator-only, never a tenant verb (even read-only, it reaches into fleet infra a tenant can't see).
-    "detect_template_bridge": "operator",
-    # Template REPLICATION control plane (0034). replicate_template requests an async copy of a template onto
-    # another (cluster, storage) — a fleet-wide config action across ANY project (operator-initiated; a project
-    # may be named for attribution/governance), so operator-only; cancel_replication / prune_replications are
-    # likewise operator infra verbs. replication_status is a READ (a tenant may poll its OWN job — the verb
-    # scopes to the caller's project). list_template_instances mirrors the dashboard's operator view of where
-    # each template physically lives (unscoped); it is operator-only in this arc because the only caller that
-    # can act on it (replicate_template) is operator — the tenant-scoped, auth-visibility-filtered agent view
-    # ships with the tenant self-service path in a later PR.
-    "replicate_template": "operator",
-    "cancel_replication": "operator",
-    "prune_replications": "operator",
-    "force_fail_replication": "operator",   # PR-5: force a wedged copy job terminal (no teardown) — operator infra
-    "replication_status": "read",
-    "list_template_instances": "operator",
-    # mark_template_source_dirty: attest that a BUILT template's guest was hand-modified (PR-6, 0040) so
-    # rebuild_source refuses it — a fleet-wide provenance action on the catalog, operator-only.
-    "mark_template_source_dirty": "operator",
-}
+# Each MCP verb's MINIMUM tier: the `tier` column of the verb registry (br0kr/verbs.py, review ARCH-03), where each
+# row says why. The one table the gateway authorizes against; a verb with no row is denied (fail closed), so a new
+# tool can't slip onto the surface unauthorized.
+VERB_TIER: dict[str, str] = {v.name: v.tier for v in verbs.VERBS}
 
 
 @dataclass(frozen=True)

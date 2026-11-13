@@ -80,4 +80,6 @@ tests/
                                #   the fake DOM keeps element identity and focus, so dialog and tab focus are tested
   harness/                     # the real-Postgres ledger harnesses as pytest items (opt-in: harness marker)
   e2e/                         # the real booted app (opt-in: e2e marker)
+  fixtures/                    # recorded data a test compares against (mcp_contract.json:
+                               #   what agents see of the MCP gateway; scripts/gen_mcp_contract.py)
 ```

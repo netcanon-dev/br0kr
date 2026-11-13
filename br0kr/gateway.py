@@ -611,7 +611,7 @@ def set_quota(
     conn: psycopg.Connection[Any], project_id: str, *, cpu_limit: float, mem_limit_mb: int, max_leases: int
 ) -> dict[str, Any]:
     """Set a project's cpu/mem/lease quota within its operator-set ceiling — the provision tier's
-    self-service. The caller (br0kr/mcp_server.py) has already bound `project_id` to the token's own
+    self-service. The caller (br0kr/mcp_tools.py) has already bound `project_id` to the token's own
     project and checked the `provision` scope, so this verb trusts WHO is asking and only enforces the
     ceiling. Does NOT touch `max_queued` (operator-managed). Returns {project_id, updated, reason, quota,
     ceiling}: `quota` is the resulting (on success) or current (on refusal) cpu/mem/lease limits and
@@ -657,7 +657,7 @@ def request_template_download(
     sha256: str, storage_id: str, size_gb: int, name: str | None = None, description: str | None = None,
 ) -> dict[str, Any]:
     """Self-service (phase A4.2): a PROVISION-tier token requests a DOWNLOAD of a net-new image for its OWN
-    project, bounded by the project's per-tenant template-disk quota. The caller (br0kr/mcp_server.py) has
+    project, bounded by the project's per-tenant template-disk quota. The caller (br0kr/mcp_tools.py) has
     already bound `project_id` to the token's project and checked the `provision` scope, so this verb trusts
     WHO is asking and enforces WHAT: the SAME operator source allowlist + mandatory sha256 as the operator
     path (a tenant can only fetch from operator-curated sources), plus the disk quota.

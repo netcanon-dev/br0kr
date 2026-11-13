@@ -176,9 +176,9 @@ def test_mcp_server_imports_and_registers_the_tools():
 
     assert isinstance(m.mcp, FastMCP)
     assert callable(m.main)
-    # Assert each tool is REGISTERED on the FastMCP surface (the @mcp.tool() decorator ran), not merely that
-    # the module attribute is callable — the decorator returns the function unchanged, so a callable check
-    # alone can't detect a dropped decorator that would silently remove the tool from an agent's view (F3).
+    # Assert each tool is REGISTERED on the FastMCP surface (its verbs.py row was registered), not merely that
+    # the module attribute is callable — the plain function exists either way, so a callable check alone
+    # can't detect a row the registration skipped, which would silently remove the tool from an agent's view (F3).
     registered = {t.name for t in m.mcp._tool_manager.list_tools()}
     for name in ("request_lease", "schedule_lease", "renew_lease", "release_lease", "lease_status",
                  "cancel_lease", "queue_status", "node_capacity", "cluster_capacity", "project_capacity",

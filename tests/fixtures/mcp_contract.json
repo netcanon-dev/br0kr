@@ -1,0 +1,780 @@
+{
+ "tenant_gateway": [
+  "request_lease",
+  "schedule_lease",
+  "renew_lease",
+  "release_lease",
+  "lease_status",
+  "wait_for_lease",
+  "cancel_lease",
+  "queue_status",
+  "renew_leases",
+  "release_leases",
+  "cancel_leases",
+  "lease_statuses",
+  "migration_status",
+  "node_capacity",
+  "cluster_capacity",
+  "project_capacity",
+  "whoami",
+  "set_quota",
+  "request_template_download",
+  "list_nodes",
+  "list_clusters",
+  "list_storage",
+  "list_projects",
+  "list_templates",
+  "queue_view",
+  "list_leases",
+  "fleet_stats",
+  "replication_status"
+ ],
+ "operator_gateway_adds": [
+  "node_cordon",
+  "pin_lease",
+  "verify_declarations",
+  "discover_reachability",
+  "dismiss_discovery_finding",
+  "clear_discovery_dismissal",
+  "detect_template_bridge",
+  "force_fail_build",
+  "migrate_lease",
+  "cancel_migration",
+  "replicate_template",
+  "cancel_replication",
+  "prune_replications",
+  "force_fail_replication",
+  "mark_template_source_dirty",
+  "list_template_instances"
+ ],
+ "tools": {
+  "request_lease": {
+   "tier": "consume",
+   "sha256": "6f2bb9ba3250514c8da18af0689bc600430526105b1986d0fce3427e55dcf2a0",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.request_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "_admitted_or_queued",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "schedule_lease": {
+   "tier": "consume",
+   "sha256": "3b03e1f69527f0c86b5147f29f3a37dcb52dad34ffab3ca5398c68ab86ed86e1",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.schedule_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "_admitted_or_queued",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "renew_lease": {
+   "tier": "consume",
+   "sha256": "ca871a66974db9ffdd31d1e23d81c5fbea85d4b5bc45b7b5970d46c447ffdfe9",
+   "row": {
+    "kind": "own_lease",
+    "call": "gateway.renew_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "renewed",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "release_lease": {
+   "tier": "consume",
+   "sha256": "22f611f616df967ea13bd2b11e695da53a414ce311aa19e777c36cdd2a5ee587",
+   "row": {
+    "kind": "own_lease",
+    "call": "gateway.release_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "released",
+    "audit": "_released",
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "lease_status": {
+   "tier": "read",
+   "sha256": "20a548804d92a93b9291756ffbfc4e41b1e519ada6156737dc52b29f7f07913c",
+   "row": {
+    "kind": "own_lease",
+    "call": "gateway.lease_status",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "exists",
+    "audit": null,
+    "not_found": "unknown_lease",
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "wait_for_lease": {
+   "tier": "read",
+   "sha256": "c5ee8761cdcdc5b03c2841d01ed91108e100cd791d55898513361b83912de330",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.wait_for_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "reached",
+    "audit": null,
+    "not_found": "unknown_lease",
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "cancel_lease": {
+   "tier": "consume",
+   "sha256": "f1da66cc1d6fa7dfe0ca96d8bd8661344f7099a1b2b8cfe780bea4d9e96e82dd",
+   "row": {
+    "kind": "own_lease",
+    "call": "gateway.cancel_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "cancelled",
+    "audit": "_cancel_acted",
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "queue_status": {
+   "tier": "read",
+   "sha256": "0fc45999c1565bfe0bc2e98e72ca16e10ea9103a9053c7bfe1b0aff007ff16a2",
+   "row": {
+    "kind": "own_lease",
+    "call": "gateway.queue_status",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "exists",
+    "audit": null,
+    "not_found": "unknown_lease",
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "renew_leases": {
+   "tier": "consume",
+   "sha256": "41f2409318d5c6557370eafdde61b3a5bb0fbf3753a9dfdf0a15c6a58b892260",
+   "row": {
+    "kind": "own_leases",
+    "call": "gateway.renew_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": "renewed",
+    "params": []
+   }
+  },
+  "release_leases": {
+   "tier": "consume",
+   "sha256": "07065b2dd26e893f0ccfbd8a0f22a3e9b698f831657f35bb285109e962be8189",
+   "row": {
+    "kind": "own_leases",
+    "call": "gateway.release_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": "_released",
+    "not_found": null,
+    "bulk_item": "released",
+    "params": []
+   }
+  },
+  "cancel_leases": {
+   "tier": "consume",
+   "sha256": "120f5ab1563490f2b637f54905e0e5cd7f239943a0e571423af83d6c581f5bbf",
+   "row": {
+    "kind": "own_leases",
+    "call": "gateway.cancel_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": "_cancel_item_acted",
+    "not_found": null,
+    "bulk_item": "cancelled",
+    "params": []
+   }
+  },
+  "lease_statuses": {
+   "tier": "read",
+   "sha256": "26b532dfec6a60b001a1e2444a871d0efc681a0c3e451750c0010e7655abf777",
+   "row": {
+    "kind": "own_leases",
+    "call": "gateway.lease_status",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": "exists",
+    "params": []
+   }
+  },
+  "migration_status": {
+   "tier": "read",
+   "sha256": "f15e2239eb4fd43d9dd4e3b4762d9576ff68d79a61220f6ff0d991a3aad4668b",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.migration_status",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "exists",
+    "audit": null,
+    "not_found": "unknown_migration",
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "node_capacity": {
+   "tier": "read",
+   "sha256": "d4e586727821eb699e420d9d25a1dcd73cb47845b7fd09e8441af92e78741534",
+   "row": {
+    "kind": "lookup",
+    "call": "gateway.node_capacity",
+    "scope": "shared",
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "exists",
+    "audit": null,
+    "not_found": "unknown_node",
+    "bulk_item": null,
+    "params": [
+     [
+      "node_id",
+      "str",
+      null
+     ]
+    ]
+   }
+  },
+  "cluster_capacity": {
+   "tier": "read",
+   "sha256": "dbfcfeb04708c158af3435e68568864ea64c4c44000b4a304b125081a82b16f7",
+   "row": {
+    "kind": "lookup",
+    "call": "gateway.cluster_capacity",
+    "scope": "shared",
+    "wrap": null,
+    "acting_as": "last",
+    "verdict": "exists",
+    "audit": null,
+    "not_found": "unknown_cluster",
+    "bulk_item": null,
+    "params": [
+     [
+      "cluster_id",
+      "str",
+      null
+     ]
+    ]
+   }
+  },
+  "project_capacity": {
+   "tier": "read",
+   "sha256": "0e7a4c21eb5a0f71174a3e77f0000c091c97d1086593b6515f7b0ce08412da92",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.project_capacity",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "exists",
+    "audit": null,
+    "not_found": "unknown_project",
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "whoami": {
+   "tier": "read",
+   "sha256": "b2bd7134645f748a5e582025eccd942e6ecf6d6f4574206c426096ec137b83e6",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.whoami",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "set_quota": {
+   "tier": "provision",
+   "sha256": "d66d136c945bb2523216d6dc3cb030aa66244cecf84d416cb81ccf4ce812de3e",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.set_quota",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "updated",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "request_template_download": {
+   "tier": "provision",
+   "sha256": "68f81311ca7fff711f6806929901f59c0bd3a2e3fa254f1522cecdf7064b8413",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.request_template_download",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "requested",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "list_nodes": {
+   "tier": "read",
+   "sha256": "6dbd56bdd2ce40d325154a9bdf79cb07fbb73736226ddd6ccda428cb4cbef512",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_nodes",
+    "scope": "shared",
+    "wrap": "nodes",
+    "acting_as": "first",
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "list_clusters": {
+   "tier": "read",
+   "sha256": "2c19bf5cef5e7c1a5ff123ae39f5eb52e3115135810278d9bded129d9ba1c046",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_clusters",
+    "scope": "shared",
+    "wrap": "clusters",
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "list_storage": {
+   "tier": "read",
+   "sha256": "36ec7d0e7540ae1bb59c8bdb30e413f408ed1e849f4961d8f17a2b8d2bca7f29",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_storage",
+    "scope": "shared",
+    "wrap": "storage",
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "list_projects": {
+   "tier": "read",
+   "sha256": "9f7f5b966714232ea6fea4c617e7355a96498b03e6ab60f88560db9b0d0a869b",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_projects",
+    "scope": "tenant",
+    "wrap": "projects",
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "list_templates": {
+   "tier": "read",
+   "sha256": "d94254cb6120a043a552a96bc0679872af9a431ff8fcb9213082d0a47a97dc89",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_templates",
+    "scope": "tenant",
+    "wrap": "templates",
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "queue_view": {
+   "tier": "read",
+   "sha256": "cccdb8a9801ec0de0f62daf1ea014d543b4acdb9886515f498e9fdb41a4e1f7b",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.queue_view",
+    "scope": "tenant",
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": [
+     [
+      "limit",
+      "int",
+      100
+     ]
+    ]
+   }
+  },
+  "list_leases": {
+   "tier": "read",
+   "sha256": "e3b43ef5d6fe619daccdfc5a49c585c3c0689f8779f2cdea4ec9cc400f87e9c3",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_leases",
+    "scope": "tenant",
+    "wrap": "leases",
+    "acting_as": "first",
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": [
+     [
+      "limit",
+      "int",
+      100
+     ]
+    ]
+   }
+  },
+  "fleet_stats": {
+   "tier": "read",
+   "sha256": "ace4d8684a5986cef8237ed3b80c1cc85fee6fdb1c5dbd3b50eee1b45b83c27c",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.fleet_stats",
+    "scope": "shared",
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "replication_status": {
+   "tier": "read",
+   "sha256": "ea159cd08ee483c166f8a59c070fcb08f1fd3dd41d3409d0b162f065d166ef99",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_tools.replication_status",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "exists",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "node_cordon": {
+   "tier": "operator",
+   "sha256": "57f6db79bc31dd68a6b42722a94b48f9d409c2e7cd01362cdc95a228cb208062",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.node_cordon",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "updated",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "pin_lease": {
+   "tier": "operator",
+   "sha256": "c1df7fe546b945e6dd349f2f1c7e36a81a054408083319911b59525b9a7c264f",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.pin_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "_no_reason",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "verify_declarations": {
+   "tier": "operator",
+   "sha256": "f70ccbd2203e3239c4f90f8342a61707bf9184b623a1ffd72809c853b0a4358b",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.verify_declarations",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "discover_reachability": {
+   "tier": "operator",
+   "sha256": "6412a2cb2413468996f7ed51d3b785cf8a5e949cb5d70ccb283889113221fc29",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.discover_reachability",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "dismiss_discovery_finding": {
+   "tier": "operator",
+   "sha256": "a3e563d152319d34d992a8e22308479d6b8acbd50990e90b180bb72e7ae14503",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.dismiss_discovery_finding",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "_no_reason",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "clear_discovery_dismissal": {
+   "tier": "operator",
+   "sha256": "a2e14c101f0d78d4c9a24a0662816456c3d2902cb79153bd2d48ac1da08494db",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.clear_discovery_dismissal",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "cleared",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "detect_template_bridge": {
+   "tier": "operator",
+   "sha256": "e613f2f404bf111eba2a9f96196ad3b5bb19d49688f7b639d469bb9b79072e6e",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.detect_template_bridge",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "force_fail_build": {
+   "tier": "operator",
+   "sha256": "0646cce1f513860c2c0c1026a6f9d2bc9b86c282023926ff914420c2767549a2",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.force_fail_build",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "forced",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "migrate_lease": {
+   "tier": "operator",
+   "sha256": "a50c95c2ecd92633db280a61c462c318fc5b928dd03c3b671bae2dc26f6b3059",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.migrate_lease",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "accepted",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "cancel_migration": {
+   "tier": "operator",
+   "sha256": "c451b0bbdd6037c1a9495c79be058447c5033f6a63100d412a818ff824f86aa8",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.cancel_migration",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "cancelled",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "replicate_template": {
+   "tier": "operator",
+   "sha256": "5f25a8444272dee86b987dfa3567e1c8307dfda20f7b3ebbf267a6260ec5868e",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.replicate_template",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "requested",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "cancel_replication": {
+   "tier": "operator",
+   "sha256": "3c03df4ffb597f4ab72224cacc8c503cc4ea268f495e9e501976462006db8abf",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.cancel_replication",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "cancelled",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "prune_replications": {
+   "tier": "operator",
+   "sha256": "aef9310c8579ed89f6db4a015c6b5cda1a2310b64876affbe92d9278988778fc",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.prune_replications",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "force_fail_replication": {
+   "tier": "operator",
+   "sha256": "357b242a094b5d18b0408da22865db082837136753cb35612a3e791412fd6164",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.force_fail_replication",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "forced",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "mark_template_source_dirty": {
+   "tier": "operator",
+   "sha256": "e6de5ce6cbf5859b83d9a8e82025b372698e613ae07b45cd111ac6314379d502",
+   "row": {
+    "kind": "handler",
+    "call": "mcp_operator_tools.mark_template_source_dirty",
+    "scope": null,
+    "wrap": null,
+    "acting_as": null,
+    "verdict": "updated",
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  },
+  "list_template_instances": {
+   "tier": "operator",
+   "sha256": "9b7bd25f9de3701589c654880c488f5817b22dd99262fd6da271493e5e65eeaf",
+   "row": {
+    "kind": "lookup",
+    "call": "inventory.list_template_instances",
+    "scope": "shared",
+    "wrap": "template_instances",
+    "acting_as": null,
+    "verdict": null,
+    "audit": null,
+    "not_found": null,
+    "bulk_item": null,
+    "params": []
+   }
+  }
+ }
+}

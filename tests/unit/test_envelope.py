@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from br0kr import envelope, mcp_server, reasons
+from br0kr import envelope, mcp_common, mcp_server, reasons
 
 pytestmark = pytest.mark.unit
 
@@ -42,7 +42,7 @@ def _dummy_args(fn: Any) -> dict[str, Any]:
     for name, param in list(inspect.signature(fn).parameters.items())[1:]:
         if param.default is not inspect.Parameter.empty:
             continue
-        ann = str(param.annotation)
+        ann = param.annotation if isinstance(param.annotation, str) else getattr(param.annotation, "__name__", "")
         out[name] = (1 if ann.startswith("int") else 1.0 if ann.startswith("float") else
                      [] if ann.startswith("list") else False if ann.startswith("bool") else "x")
     return out
@@ -62,7 +62,7 @@ def test_a_refused_call_is_not_ok_and_names_the_refusal_on_every_tool(monkeypatc
     `reason: "forbidden_scope"`, and keeps the old `error` key. Guards the review's case: a generic agent loop must
     be able to branch on `ok` and `reason` for any tool, including the refusal the authorisation layer gives before
     the tool runs."""
-    monkeypatch.setattr(mcp_server, "_authorize",
+    monkeypatch.setattr(mcp_common, "_authorize",
                         lambda _ctx, _verb: {"error": reasons.FORBIDDEN_SCOPE, "scope": "read"})
     tools = _registered()
     assert len(tools) == len(envelope.RESULT_FLAG)
@@ -147,7 +147,7 @@ def test_tools_are_enveloped_where_registered_and_plain_where_called(monkeypatch
     """The function an agent reaches through the registry answers with `ok`; the module function, which the unit
     tests and the API reference generator call directly, answers as written. Guards the envelope being applied
     twice, or not at all, on one of the two paths."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _verb: {"error": reasons.NO_TOKEN})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _verb: {"error": reasons.NO_TOKEN})
     plain = mcp_server.whoami(SimpleNamespace())
     registered = _registered()["whoami"].fn(SimpleNamespace())
     assert plain == {"error": reasons.NO_TOKEN}
@@ -162,7 +162,7 @@ def test_the_envelope_survives_the_real_mcp_dispatch(monkeypatch):
     import asyncio
     import json
 
-    monkeypatch.setattr(mcp_server, "_authorize",
+    monkeypatch.setattr(mcp_common, "_authorize",
                         lambda _ctx, _verb: {"error": reasons.FORBIDDEN_SCOPE, "scope": "read"})
     content, structured = asyncio.run(mcp_server.mcp.call_tool("renew_lease", {"lease_id": 5}))
     expected = {"ok": False, "error": reasons.FORBIDDEN_SCOPE, "scope": "read", "reason": reasons.FORBIDDEN_SCOPE}

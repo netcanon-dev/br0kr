@@ -32,7 +32,7 @@ def apply_settings(d: Daemon, conn: psycopg.Connection[Any]) -> None:
     knobs keep their current values, no reload is triggered, and the tick continues to reconcile. A
     settings-table problem must NEVER wedge the reconcile pass (mirrors maybe_reload); putting take_reload
     OUTSIDE this guard would re-raise the very error the knob read just swallowed and abort the whole tick.
-    `queue_max` is intentionally absent — it is read in the GATEWAY process (mcp_server._queue_max).
+    `queue_max` is intentionally absent — it is read in the GATEWAY process (mcp_common._queue_max).
     `log_level` (0022) is applied here via setLevel on the root logger — a side-effect, not a knob attr —
     and is DAEMON-ONLY (the gateway/dashboard have no tick loop; they keep their startup LOG_LEVEL env)."""
     try:

@@ -19,7 +19,8 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   (`request_lease`/`schedule_lease` take an optional `project_id`); `mcp_server.py` is a thin **MCP** adapter
   exposing them as tools (the broker's users are AI agents). Verbs proven end-to-end in
   `scripts/harness_gateway.py`; the secret (`PGCONN`) lives in the server env, never a tool arg.
-  The operator-only tools are collected by `_operator_tool` and registered only where
+  Every tool is a row of the verb registry (`br0kr/verbs.py`, review ARCH-03): its tier, verdict, shape and
+  description. The operator-tier rows are registered only where
   `BR0KR_MCP_OPERATOR_TOOLS` is not `0`, so the compose tenant `gateway` leaves them out of `tools/list`
   and the opt-in `gateway-operator`, which alone holds the PVE token, serves them (review UX-02;
   [operator-tier.md §2](../runbooks/operator-tier.md)).
@@ -32,7 +33,7 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
 ## 2. Agent auth
 
 - **Agent auth (`br0kr/auth.py`)** — the gateway is no longer anonymous: every tool requires a per-project
-  API token (operator-minted from the dashboard, `br0kr/admin.py`). `mcp_server._authorize` resolves the
+  API token (operator-minted from the dashboard, `br0kr/admin.py`). `mcp_common._authorize` resolves the
   bearer (HTTP `Authorization` header, or `BR0KR_API_TOKEN` on stdio) to a `Principal(project_id, scope)`
   via `auth.resolve` (an indexed lookup by the stored SHA-256 hash) and enforces, on every tool: a
   fail-closed tier gate (`read` = inventory/capacity/status, `consume` = also the lease lifecycle,

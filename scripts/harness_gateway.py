@@ -8,7 +8,7 @@ and is smoke-tested by import; the broker logic is proven here and in the module
 harnesses, so this gate is a deterministic flow check, not a concurrency test.
 
 One check is concurrent on purpose: pooled_connections drives 20 concurrent request_lease calls through the
-gateway's own connection pool (mcp_server._conn, review PERF-02) and samples pg_stat_activity, proving the pool
+gateway's own connection pool (mcp_common._conn, review PERF-02) and samples pg_stat_activity, proving the pool
 holds the gateway to at most 10 backend connections while every call is admitted; it also prints the p50 latency
 of a request_lease on a pooled connection against one on a fresh connection per call. read_only_session_replaced
 proves db.check_writable on real Postgres: a pooled session that turns read-only (as a fenced primary's sessions
@@ -24,6 +24,7 @@ import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from br0kr import gateway, migrate  # noqa: E402
+from br0kr import mcp_common
 
 CONN = os.environ["PGCONN"]
 
@@ -123,7 +124,7 @@ def check_pooled_connections() -> bool:
 
     def call(i: int) -> None:
         barrier.wait()
-        with mcp_server._conn() as c:
+        with mcp_common._conn() as c:
             a = gateway.request_lease(c, idem_key=f"pool-{i}", node_id="n1", req_cpu=1, req_mem_mb=256)
         with lock:
             answers.append(a)
@@ -148,15 +149,15 @@ def check_pooled_connections() -> bool:
             times.append((time.perf_counter() - t0) * 1000)
         return statistics.median(times)
 
-    pooled_ms = p50(mcp_server._conn)
+    pooled_ms = p50(mcp_common._conn)
     fresh_ms = p50(lambda: closing(db.connect()))
-    for pool in mcp_server._pools.values():
+    for pool in mcp_common._pools.values():
         pool.close()
-    mcp_server._pools.clear()
+    mcp_common._pools.clear()
     admitted = sum(1 for a in answers if a.get("admitted"))
     ok = admitted == 20 and len({a["lease_id"] for a in answers}) == 20 and 1 <= peak[0] <= 10
     print(f"[pooled_connections] 20 concurrent request_lease: admitted={admitted}, peak gateway backends={peak[0]} "
-          f"(pool max {mcp_server.GATEWAY_POOL_MAX}); p50 pooled {pooled_ms:.1f} ms vs fresh connection "
+          f"(pool max {mcp_common.GATEWAY_POOL_MAX}); p50 pooled {pooled_ms:.1f} ms vs fresh connection "
           f"{fresh_ms:.1f} ms  | {'PASS' if ok else 'FAIL'}")
     return ok
 

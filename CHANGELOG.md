@@ -45,6 +45,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **Every MCP tool is one row of `br0kr/verbs.py`: tier, verdict, shape, description.** A read-only tool was four
+  edits, now a function and a row. What agents see is unchanged, pinned by `tests/fixtures/mcp_contract.json` (ARCH-03).
 - **The daemon's tick is a table (`br0kr/tick_steps.py`): a new step was four edits to daemon.py, now a row.** Each
   step ends in a leadership check; its log lines carry `step=<name>`, logger `br0kr.tick_*` (`test_tick_steps.py`).
 - **Agent tokens expire after 90 days unless the creator chooses otherwise.** A never-expiring token, or clearing

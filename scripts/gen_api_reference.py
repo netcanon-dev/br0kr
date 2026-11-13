@@ -8,7 +8,7 @@ live registries instead, so the reference can't drift:
 
 - the MCP tools from the FastMCP registry in br0kr/mcp_server.py (tenant tools as registered; the operator-only
   tools registered on a fresh server, so the env flag that hides them from the tenant gateway doesn't matter),
-  with each tool's tier from auth.VERB_TIER and its first docstring sentence;
+  with each tool's tier from auth.VERB_TIER and the first sentence of its description (its br0kr/verbs.py row);
 - the dashboard routes from dashboard._ROUTES with dashboard.GET_ACCESS, and the actions from dashboard._ACTIONS,
   each described by the first docstring sentence of the function it runs.
 

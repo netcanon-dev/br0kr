@@ -39,7 +39,7 @@ class Knob:
     choices: tuple[str, ...] | None = None   # enum str knob (e.g. log_level) — validated + a GUI dropdown
 
 
-# Display + apply order. Mirrors the env reads in daemon.main() / mcp_server._queue_max() / reaper.
+# Display + apply order. Mirrors the env reads in daemon.main() / mcp_common._queue_max() / reaper.
 KNOBS: tuple[Knob, ...] = (
     Knob("queue_max", "int", "BR0KR_QUEUE_MAX", 1000, minimum=0, gateway=True),
     Knob("reap_grace", "int", "BR0KR_REAP_GRACE", 30, minimum=0),

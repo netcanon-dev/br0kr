@@ -64,7 +64,7 @@ def create_lease(
     allowed, terr = auth.template_allowed(conn, template_id, project_id)
     if not allowed:
         return {"lease_id": None, "admitted": False, "queued": False, "idempotent": False, "reason": terr}
-    queue_max = int(settings.resolve(conn)["queue_max"].value)   # operator ceiling, mirrors mcp_server._queue_max
+    queue_max = int(settings.resolve(conn)["queue_max"].value)   # operator ceiling, mirrors mcp_common._queue_max
     common: dict[str, Any] = {
         "idem_key": idem_key, "req_cpu": req_cpu, "req_mem_mb": req_mem_mb, "storage_id": storage_id,
         "req_disk_gb": req_disk_gb, "project_id": project_id, "ssh_pubkey": ssh_pubkey, "ci_user": ci_user,

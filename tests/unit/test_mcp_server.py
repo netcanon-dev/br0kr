@@ -16,8 +16,31 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 
-from br0kr import auth, db, gateway, mcp_server, multidisk, ratelimit, reasons, settings
+from br0kr import (
+    admin,
+    audit,
+    auth,
+    db,
+    gateway,
+    inventory,
+    logging_setup,
+    mcp_common,
+    mcp_server,
+    mcp_tools,
+    metrics,
+    migrate,
+    multidisk,
+    nodes,
+    pin,
+    placement,
+    ratelimit,
+    reasons,
+    replication,
+    settings,
+    verbs,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -170,17 +193,17 @@ class _CtxConn:
 def test_presented_secret_reads_the_bearer_header_on_http():
     """On the HTTP transports the per-request Authorization: Bearer header IS the token. Guards the gateway
     failing to read the header an agent sends over streamable-http (proven reachable in the SDK probe)."""
-    assert mcp_server._presented_secret(_ctx_with_header("Bearer abc123")) == "abc123"
-    assert mcp_server._presented_secret(_ctx_with_header(None)) is None   # no header → unauthenticated
+    assert mcp_common._presented_secret(_ctx_with_header("Bearer abc123")) == "abc123"
+    assert mcp_common._presented_secret(_ctx_with_header(None)) is None   # no header → unauthenticated
 
 
 def test_presented_secret_falls_back_to_env_on_stdio(monkeypatch):
     """On stdio (request is None) the secret is the server's BR0KR_API_TOKEN env — one principal per
     per-client process. Guards a stdio-launched gateway being unable to authenticate its caller."""
     monkeypatch.setenv("BR0KR_API_TOKEN", "env-secret")
-    assert mcp_server._presented_secret(_ctx_stdio()) == "env-secret"
+    assert mcp_common._presented_secret(_ctx_stdio()) == "env-secret"
     monkeypatch.delenv("BR0KR_API_TOKEN", raising=False)
-    assert mcp_server._presented_secret(_ctx_stdio()) is None   # neither header nor env → unauthenticated
+    assert mcp_common._presented_secret(_ctx_stdio()) is None   # neither header nor env → unauthenticated
 
 
 class _FakePool:
@@ -193,13 +216,13 @@ class _FakePool:
 
 def _patch_resolve(monkeypatch, principal):
     """Make _authorize's resolution return `principal` over a dummy auth connection from a fake pool."""
-    monkeypatch.setattr(mcp_server, "_pool", lambda autocommit=False: _FakePool())
+    monkeypatch.setattr(mcp_common, "_pool", lambda autocommit=False: _FakePool())
     monkeypatch.setattr(auth, "resolve", lambda _c, _s: principal)
 
 
 class _DenialRecorder:
     """Captures DenialLog.note calls so an _authorize denial (0025) can be asserted without a DB — swaps in
-    for mcp_server._denials, whose real note() would open a (fast-fail) ledger connection."""
+    for mcp_common._denials, whose real note() would open a (fast-fail) ledger connection."""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -212,11 +235,11 @@ def test_authorize_rejects_a_missing_token(monkeypatch):
     """No presented secret → {"error":"no_token"} and resolution is NEVER attempted — an unauthenticated
     call is cheap and never touches the ledger. The denial is recorded (0025, reason 'no_token', anonymous —
     no known identity). Guards anonymous access to any tool AND the denial going unlogged."""
-    monkeypatch.setattr(mcp_server, "_presented_secret", lambda _ctx: None)
+    monkeypatch.setattr(mcp_common, "_presented_secret", lambda _ctx: None)
     monkeypatch.setattr(auth, "resolve", lambda *_a: pytest.fail("resolve ran for a tokenless call"))
     rec = _DenialRecorder()
-    monkeypatch.setattr(mcp_server, "_denials", rec)
-    assert mcp_server._authorize(object(), "list_nodes") == {"error": "no_token"}
+    monkeypatch.setattr(mcp_common, "_denials", rec)
+    assert mcp_common._authorize(object(), "list_nodes") == {"error": "no_token"}
     assert rec.calls == [{"surface": "mcp", "action": "list_nodes", "reason": "no_token", "source_ip": None}]
 
 
@@ -224,11 +247,11 @@ def test_authorize_rejects_an_unresolvable_token(monkeypatch):
     """A presented secret that resolves to nothing (wrong/revoked/expired) → invalid_token, recorded as a
     denial (0025, reason 'invalid_token', anonymous — a bad token has no attributable id). Guards a bad
     credential being treated as authenticated AND the attempt going unlogged."""
-    monkeypatch.setattr(mcp_server, "_presented_secret", lambda _ctx: "nope")
+    monkeypatch.setattr(mcp_common, "_presented_secret", lambda _ctx: "nope")
     _patch_resolve(monkeypatch, None)
     rec = _DenialRecorder()
-    monkeypatch.setattr(mcp_server, "_denials", rec)
-    assert mcp_server._authorize(object(), "list_nodes") == {"error": "invalid_token"}
+    monkeypatch.setattr(mcp_common, "_denials", rec)
+    assert mcp_common._authorize(object(), "list_nodes") == {"error": "invalid_token"}
     assert rec.calls == [{"surface": "mcp", "action": "list_nodes", "reason": "invalid_token",
                           "source_ip": None}]
 
@@ -240,15 +263,15 @@ def test_authorize_enforces_the_tier(monkeypatch):
     verb records NOTHING. Guards the tier gate being skipped at the adapter, a forbidden attempt going
     unlogged, or a success being mis-logged as a denial. (A Principal vs an error dict are distinguished by
     isinstance, which is how the tool bodies branch.)"""
-    monkeypatch.setattr(mcp_server, "_presented_secret", lambda _ctx: "s")
+    monkeypatch.setattr(mcp_common, "_presented_secret", lambda _ctx: "s")
     _patch_resolve(monkeypatch, auth.Principal("team-a", "read", 1))
     rec = _DenialRecorder()
-    monkeypatch.setattr(mcp_server, "_denials", rec)
-    assert mcp_server._authorize(object(), "request_lease") == {"error": "forbidden_scope", "scope": "read"}
+    monkeypatch.setattr(mcp_common, "_denials", rec)
+    assert mcp_common._authorize(object(), "request_lease") == {"error": "forbidden_scope", "scope": "read"}
     assert rec.calls == [{"surface": "mcp", "action": "request_lease", "reason": "forbidden_scope",
                           "source_ip": None, "actor": "agent", "actor_token_id": 1,
                           "project_id": "team-a", "scope": "read"}]
-    principal = mcp_server._authorize(object(), "list_nodes")
+    principal = mcp_common._authorize(object(), "list_nodes")
     assert isinstance(principal, auth.Principal) and principal.project_id == "team-a"
     assert len(rec.calls) == 1   # the allowed read verb recorded NO denial
 
@@ -256,8 +279,8 @@ def test_authorize_enforces_the_tier(monkeypatch):
 def test_request_lease_binds_the_token_project_and_forwards_it(monkeypatch):
     """request_lease forces project_id to the TOKEN's project — a caller that omits it (or passes its own)
     binds there. Guards the unauthenticated-project_id gap: the lease must count against the token's tenant."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     captured: dict = {}
     monkeypatch.setattr(gateway, "request_lease", lambda c, **k: captured.update(k) or {"admitted": True})
     out = mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512,
@@ -269,7 +292,7 @@ def test_request_lease_binds_the_token_project_and_forwards_it(monkeypatch):
 def test_request_lease_refuses_a_cross_project_request_without_touching_gateway(monkeypatch):
     """A consume token that explicitly names a DIFFERENT project is refused project_forbidden, and the
     gateway verb (and the ledger) is never reached. Guards a token spending another tenant's quota."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
     called: list[int] = []
     monkeypatch.setattr(gateway, "request_lease", lambda *a, **k: called.append(1))
     out = mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512,
@@ -282,8 +305,8 @@ def test_request_lease_refuses_a_forbidden_template_without_touching_gateway(mon
     template_forbidden, and gateway.request_lease (and admission) is NEVER reached — the governance gate
     sits ABOVE admission (phase A3). Guards a token cloning an image it isn't allowed to, and the gate
     being bypassed straight into the capacity path."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "template_allowed", lambda _c, _t, _p: (False, "template_forbidden"))
     called: list[int] = []
     monkeypatch.setattr(gateway, "request_lease", lambda *a, **k: called.append(1))
@@ -296,8 +319,8 @@ def test_request_lease_allows_a_permitted_template_and_forwards_it(monkeypatch):
     """When the gate allows the chosen template (public or granted), request_lease proceeds and forwards
     template_id to the gateway verbatim. Guards the gate wrongly blocking a permitted image, and the
     template choice being dropped between the gate and admission."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "template_allowed", lambda _c, _t, _p: (True, None))
     captured: dict = {}
     monkeypatch.setattr(gateway, "request_lease", lambda c, **k: captured.update(k) or {"admitted": True})
@@ -310,8 +333,8 @@ def test_request_lease_coerces_json_data_disks_to_a_typed_tuple(monkeypatch):
     """The MCP tool takes data_disks as JSON (a list of {storage_id, req_disk_gb} objects) and coerces it to a
     typed DataDisk tuple before handing it to gateway.request_lease. Guards the JSON→typed seam (a wrong
     mapping would attach the wrong disk / pool) and that the tuple reaches the gateway verbatim."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "template_allowed", lambda _c, _t, _p: (True, None))
     captured: dict = {}
     monkeypatch.setattr(gateway, "request_lease", lambda c, **k: captured.update(k) or {"admitted": True})
@@ -328,11 +351,11 @@ def test_request_lease_refuses_malformed_data_disks_without_touching_gateway(mon
     RECORDED as a final refusal (symmetric with every other refusal on this verb, incl. the
     value-path data_disk_malformed one step later). Guards a malformed ask reaching admission as an opaque
     error, and pins that no lease work happens for a bad shape but the refusal is not audit-invisible."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
     called: list[int] = []
     refused: list[dict] = []
     monkeypatch.setattr(gateway, "request_lease", lambda *a, **k: called.append(1))
-    monkeypatch.setattr(mcp_server, "_audit_refused", lambda who, **kw: refused.append(kw))
+    monkeypatch.setattr(mcp_common, "_audit_refused", lambda who, **kw: refused.append(kw))
     out = mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512,
                                    template_id="deb12", data_disks=[{"storage_id": "bulk"}])
     assert out["reason"] == "data_disk_malformed" and out["admitted"] is False and called == []
@@ -342,8 +365,8 @@ def test_request_lease_refuses_malformed_data_disks_without_touching_gateway(mon
 def test_schedule_lease_coerces_json_data_disks_to_a_typed_tuple(monkeypatch):
     """schedule_lease mirrors request_lease: its JSON data_disks is coerced to a typed DataDisk tuple and
     forwarded to gateway.schedule_lease. Guards the placement surface dropping or mis-coercing the ask."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "template_allowed", lambda _c, _t, _p: (True, None))
     captured: dict = {}
     monkeypatch.setattr(gateway, "schedule_lease", lambda c, **k: captured.update(k) or {"admitted": True})
@@ -358,11 +381,11 @@ def test_request_lease_records_a_refused_row_only_on_a_final_refusal(monkeypatch
     throttled outcome='refused' recorder with the reason + template/node context; a QUEUED response
     (queued=true) does NOT (a queued-then-promoted ask must never be audited as refused — promotion happens
     later, in the daemon). Guards the refusal-visibility wiring AND the queued-not-refused boundary (§7f)."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "template_allowed", lambda _c, _t, _p: (True, None))
     refused: list = []
-    monkeypatch.setattr(mcp_server._refusals, "note_refusal", lambda _connect, **k: refused.append(k))
+    monkeypatch.setattr(mcp_common._refusals, "note_refusal", lambda _connect, **k: refused.append(k))
     monkeypatch.setattr(gateway, "request_lease",
                         lambda c, **k: {"admitted": False, "queued": False, "idempotent": False,
                                         "reason": "no_reachable_instance", "lease_id": None})
@@ -384,13 +407,13 @@ def test_request_lease_records_template_forbidden_as_refused_symmetric_with_dash
     the dashboard act-as path already records as outcome='refused' — so the MCP surface records it too, keeping
     the refused channel symmetric. Guards a per-surface blind spot for image-governance refusals
     in the operator's 'refused' view (and that the gateway is still never reached)."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "template_allowed", lambda _c, _t, _p: (False, "template_forbidden"))
     called: list = []
     monkeypatch.setattr(gateway, "request_lease", lambda *a, **k: called.append(1))
     refused: list = []
-    monkeypatch.setattr(mcp_server._refusals, "note_refusal", lambda _connect, **k: refused.append(k))
+    monkeypatch.setattr(mcp_common._refusals, "note_refusal", lambda _connect, **k: refused.append(k))
     out = mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512,
                                    template_id="priv")
     assert out == {"error": "template_forbidden"} and called == []   # gateway never reached
@@ -402,8 +425,8 @@ def test_schedule_lease_enforces_the_template_gate(monkeypatch):
     """schedule_lease carries the SAME governance gate as request_lease — a forbidden template is refused
     before the broker picks a node, a permitted one proceeds. Guards the scheduled path being a governance
     bypass (an agent dodging image governance just by not pinning a node)."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     called: list[int] = []
     monkeypatch.setattr(gateway, "schedule_lease", lambda *a, **k: called.append(1) or {"admitted": True})
 
@@ -422,10 +445,10 @@ def test_list_templates_scopes_to_the_tokens_project(monkeypatch):
     """The list_templates tool passes the token's bound project to inventory.list_templates, so an agent
     sees ONLY public + granted-to-it images (never another tenant's private template). Guards the agent
     catalog leaking every private image, which would also let an agent discover ids it can't use."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     captured: dict = {}
-    monkeypatch.setattr(mcp_server.inventory, "list_templates",
+    monkeypatch.setattr(inventory, "list_templates",
                         lambda c, project_id=None: captured.update(project_id=project_id) or [{"template_id": "pub"}])
     out = mcp_server.list_templates(object())
     assert out == {"templates": [{"template_id": "pub"}]}
@@ -437,19 +460,65 @@ def test_list_leases_scopes_to_the_tokens_project(monkeypatch):
     inventory.list_leases, so an agent sees ONLY its own active leases, while an operator token (project_id
     None) gets the cross-tenant view. Guards a token enumerating another tenant's leases — which would also
     expose their guest vmids/ips."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     captured: dict = {}
-    monkeypatch.setattr(mcp_server.inventory, "list_leases",
+    monkeypatch.setattr(inventory, "list_leases",
                         lambda c, limit=100, project_id=None:
                         captured.update(limit=limit, project_id=project_id) or [{"lease_id": 7}])
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
     out = mcp_server.list_leases(object(), limit=50)
     assert out == {"acting_as": "team-a", "leases": [{"lease_id": 7}]}   # echoes the bound project (Task 2)
     assert captured == {"limit": 50, "project_id": "team-a"}   # scoped to the token's tenant
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
     op_out = mcp_server.list_leases(object())
     assert captured["project_id"] is None   # operator → cross-tenant (every tenant's leases)
     assert op_out["acting_as"] is None       # operator token echoes acting_as=None (no bound project)
+
+
+@pytest.mark.parametrize(("tool", "reader", "args", "answer"), [
+    ("list_projects", "list_projects", {}, []),
+    ("queue_view", "queue_view", {"limit": 5}, {"depth": 0}),
+])
+def test_project_scoped_reads_pass_only_the_tokens_project(monkeypatch, tool, reader, args, answer):
+    """list_projects and queue_view pass the token's bound project to their inventory reader, so a tenant sees only
+    its own quota and its own queue, while an operator token (project None) gets the cross-tenant view. Guards the
+    leak a registry row makes easy, since the inventory readers take project_id=None to mean every tenant: dropping
+    either row's TENANT scope passed every test before this one."""
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    seen: dict = {}
+    monkeypatch.setattr(inventory, reader, lambda c, **kw: seen.update(kw) or answer)
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    getattr(mcp_server, tool)(object(), **args)
+    assert seen["project_id"] == "team-a"
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    getattr(mcp_server, tool)(object(), **args)
+    assert seen["project_id"] is None
+
+
+def test_cancel_and_the_bulk_writes_audit_each_change_and_nothing_else(monkeypatch):
+    """cancel_lease audits a cancel or a release but not an already-terminal no-op; cancel_leases and release_leases
+    write one audit row per id that changed something, attributed to the token, and none for a no-op or a refused
+    id. Guards these three tools' audit rules being dropped or loosened in their registry rows: until now only
+    release_lease's audit was pinned, though SECURITY.md's audit-trail control counts on all of them."""
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 7))
+    monkeypatch.setattr(auth, "lease_owned_by",
+                        lambda c, lid, pid: (True, None) if lid != 99 else (False, "lease_forbidden"))
+    rows: list = []
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append((k["action"], k["target"], k["actor_token_id"])))
+    outcome = {1: "cancelled", 2: "noop", 3: "released"}
+    monkeypatch.setattr(gateway, "cancel_lease",
+                        lambda c, lid: {"lease_id": lid, "cancelled": lid != 2, "outcome": outcome[lid]})
+    mcp_server.cancel_lease(object(), 1)
+    mcp_server.cancel_lease(object(), 2)
+    assert rows == [("cancel_lease", "1", 7)]
+    rows.clear()
+    mcp_server.cancel_leases(object(), [1, 2, 3, 99])
+    assert rows == [("cancel_leases", "1", 7), ("cancel_leases", "3", 7)]
+    rows.clear()
+    monkeypatch.setattr(gateway, "release_lease", lambda c, lid: {"lease_id": lid, "released": lid == 1})
+    mcp_server.release_leases(object(), [1, 2, 99])
+    assert rows == [("release_leases", "1", 7)]
 
 
 def test_whoami_reflects_the_bound_project_scope_and_token(monkeypatch):
@@ -457,16 +526,16 @@ def test_whoami_reflects_the_bound_project_scope_and_token(monkeypatch):
     confirm WHICH tenant the globally-selected connector is bound to (connectors are per host/app, not per
     workspace). An OPERATOR token (project_id None) reports project_id None + scope operator. Guards the
     identity echo drifting or ever returning the token SECRET (only the numeric id is exposed) — Task 2."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("Kontroll", "provision", 4))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("Kontroll", "provision", 4))
     assert mcp_server.whoami(object()) == {"project_id": "Kontroll", "scope": "provision", "token_id": 4}
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     assert mcp_server.whoami(object()) == {"project_id": None, "scope": "operator", "token_id": 9}
 
 
 def test_whoami_returns_the_authorize_error_unchanged(monkeypatch):
     """A tokenless/invalid whoami surfaces the _authorize error dict verbatim — no crash, no identity leaked to
     an unauthenticated caller. Guards whoami handing out an identity without a valid token."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "no_token"})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "no_token"})
     assert mcp_server.whoami(object()) == {"error": "no_token"}
 
 
@@ -474,17 +543,17 @@ def test_read_tools_echo_acting_as(monkeypatch):
     """list_nodes / cluster_capacity / project_capacity echo `acting_as` = the token's bound project, so the
     bound tenant is visible on the common reads without a separate whoami call (Task 2). Guards the echo being
     dropped or reporting the wrong project; a shared-infra read from an OPERATOR token echoes acting_as=None."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("Kontroll", "read", 4))
-    monkeypatch.setattr(mcp_server.inventory, "list_nodes", lambda c: [{"id": "n1"}])
-    monkeypatch.setattr(mcp_server.gateway, "cluster_capacity", lambda c, cid: {"cluster_id": cid, "exists": True})
-    monkeypatch.setattr(mcp_server.gateway, "project_capacity", lambda c, pid: {"project_id": pid, "exists": True})
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("Kontroll", "read", 4))
+    monkeypatch.setattr(inventory, "list_nodes", lambda c: [{"id": "n1"}])
+    monkeypatch.setattr(gateway, "cluster_capacity", lambda c, cid: {"cluster_id": cid, "exists": True})
+    monkeypatch.setattr(gateway, "project_capacity", lambda c, pid: {"project_id": pid, "exists": True})
     assert mcp_server.list_nodes(object()) == {"acting_as": "Kontroll", "nodes": [{"id": "n1"}]}
     assert mcp_server.cluster_capacity(object(), "cl1") == {"acting_as": "Kontroll", "cluster_id": "cl1",
                                                             "exists": True}
     assert mcp_server.project_capacity(object()) == {"acting_as": "Kontroll", "project_id": "Kontroll",
                                                      "exists": True}
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     assert mcp_server.list_nodes(object())["acting_as"] is None   # operator: no bound project
 
 
@@ -493,24 +562,24 @@ def test_write_verbs_record_an_audit_row_with_per_token_identity(monkeypatch):
     identity (token_id/project/scope) — the real attribution the shared-token dashboard can't give. A no-op
     (released:false) records NOTHING, and heartbeat renew is NEVER audited (flood). Guards the audit missing a
     real write, over-recording a no-op, or attributing to the wrong token (audit 0023)."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 7))
-    monkeypatch.setattr(mcp_server.auth, "lease_owned_by", lambda c, lid, pid: (True, None))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 7))
+    monkeypatch.setattr(auth, "lease_owned_by", lambda c, lid, pid: (True, None))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
 
-    monkeypatch.setattr(mcp_server.gateway, "release_lease", lambda c, lid: {"lease_id": lid, "released": True})
+    monkeypatch.setattr(gateway, "release_lease", lambda c, lid: {"lease_id": lid, "released": True})
     mcp_server.release_lease(object(), 42)
     assert len(rows) == 1 and rows[0]["surface"] == "mcp" and rows[0]["action"] == "release_lease"
     assert rows[0]["actor_token_id"] == 7 and rows[0]["project_id"] == "team-a" and rows[0]["scope"] == "consume"
     assert rows[0]["target"] == "42"
 
     rows.clear()   # a no-op release (already gone) records nothing
-    monkeypatch.setattr(mcp_server.gateway, "release_lease", lambda c, lid: {"lease_id": lid, "released": False})
+    monkeypatch.setattr(gateway, "release_lease", lambda c, lid: {"lease_id": lid, "released": False})
     mcp_server.release_lease(object(), 42)
     assert rows == []
 
-    monkeypatch.setattr(mcp_server.gateway, "renew_lease", lambda c, lid: {"lease_id": lid, "renewed": True})
+    monkeypatch.setattr(gateway, "renew_lease", lambda c, lid: {"lease_id": lid, "renewed": True})
     mcp_server.renew_lease(object(), 42)   # heartbeat renew is NEVER audited (flood)
     assert rows == []
 
@@ -519,12 +588,12 @@ def test_operator_verb_audits_with_a_null_project(monkeypatch):
     """A successful OPERATOR verb (node_cordon) records an audit row attributed to the operator token — scope
     'operator', project_id None (the operator is project-less, 0020) — proving the row's nullable project_id.
     Guards an operator infra action going unrecorded or mis-attributed to a tenant."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.admin, "set_node_cordon",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(admin, "set_node_cordon",
                         lambda c, nid, cordoned: {"node_id": nid, "updated": True})
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
     mcp_server.node_cordon(object(), "n1", True)
     assert len(rows) == 1 and rows[0]["action"] == "node_cordon" and rows[0]["target"] == "n1"
     assert rows[0]["actor_token_id"] == 9 and rows[0]["project_id"] is None and rows[0]["scope"] == "operator"
@@ -556,11 +625,11 @@ def test_node_cordon_commits_the_write_before_the_best_effort_audit(monkeypatch)
         def rollback(self) -> None:
             order.append("rollback")
 
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _OrderConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.admin, "set_node_cordon",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _OrderConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(admin, "set_node_cordon",
                         lambda c, nid, cordoned: order.append("cordon") or {"node_id": nid, "updated": True})
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: order.append("audit"))
+    monkeypatch.setattr(audit, "record", lambda c, **k: order.append("audit"))
     out = mcp_server.node_cordon(object(), "n1", True)
     assert out == {"node_id": "n1", "updated": True}
     assert order == ["cordon", "commit", "audit"]   # cordon DURABLE before the audit can fail + rollback
@@ -573,17 +642,17 @@ def test_verify_declarations_operator_gated_reconciles_and_audits(monkeypatch):
     forwarded (including the PR-E content_quarantined bucket) + its invocation trailed with the new audit param
     (the auth-tier gate itself is covered by the shared _authorize tests)."""
     audited: list = []
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.nodes, "from_ledger", lambda c, env=None: object())
-    monkeypatch.setattr(mcp_server.placement, "verify_declarations",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(nodes, "from_ledger", lambda c, env=None: object())
+    monkeypatch.setattr(placement, "verify_declarations",
                         lambda c, reg, cluster_id=None: {"ok": True, "checked_nodes": ["n1"],
                                                          "quarantined": [{"storage_id": "s", "node_id": "n1"}],
                                                          "content_quarantined": [{"storage_id": "s2",
                                                                                   "node_id": "n1",
                                                                                   "dropped": ["images"]}],
                                                          "absent": [], "inactive": [], "present": []})
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: audited.append(k))
+    monkeypatch.setattr(audit, "record", lambda c, **k: audited.append(k))
     out = mcp_server.verify_declarations(object(), cluster_id="lab1")
     assert out["ok"] and out["quarantined"] == [{"storage_id": "s", "node_id": "n1"}]
     assert out["content_quarantined"] == [{"storage_id": "s2", "node_id": "n1", "dropped": ["images"]}]  # forwarded
@@ -598,14 +667,14 @@ def test_discover_reachability_operator_gated_forwards_the_report_and_audits(mon
     cluster as target, the new-node + unknown-pool counts in params). It is OPERATOR-tier + read-only (writes
     nothing itself). Guards the widen-half reader being mis-wired or unaudited."""
     audited: list = []
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.nodes, "from_ledger", lambda c, env=None: object())
-    monkeypatch.setattr(mcp_server.placement, "discover_reachability",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(nodes, "from_ledger", lambda c, env=None: object())
+    monkeypatch.setattr(placement, "discover_reachability",
                         lambda c, reg, cluster_id=None: {"ok": True, "checked_nodes": ["n1"],
                                                          "known_pool_new_node": [{"storage_id": "omv"}],
                                                          "unknown_pool": []})
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: audited.append(k))
+    monkeypatch.setattr(audit, "record", lambda c, **k: audited.append(k))
     out = mcp_server.discover_reachability(object(), cluster_id="lab1")
     assert out["ok"] and out["known_pool_new_node"] == [{"storage_id": "omv"}]
     assert len(audited) == 1 and audited[0]["action"] == "discover_reachability"
@@ -652,10 +721,10 @@ def test_detect_template_bridge_reports_net0_bridge_and_current_identity(monkeyp
             return _Driver()
 
     audited: list = []
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _Conn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.nodes, "from_ledger", lambda c, env=None: _Reg())
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: audited.append(k))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _Conn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(nodes, "from_ledger", lambda c, env=None: _Reg())
+    monkeypatch.setattr(audit, "record", lambda c, **k: audited.append(k))
     out = mcp_server.detect_template_bridge(object(), "debian12")
     assert out == {"ok": True, "template_id": "debian12", "bridge": "vmbr402", "logical_network_id": "lan"}
     assert audited == []   # advisory read — nothing written, nothing audited
@@ -679,8 +748,8 @@ def test_detect_template_bridge_reports_no_placed_instance(monkeypatch):
         def fetchone(self) -> object:
             return (1,) if "FROM template WHERE id" in self._sql else None   # template exists; no instance
 
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _Conn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _Conn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     out = mcp_server.detect_template_bridge(object(), "debian12")
     assert out == {"ok": False, "reason": "no_placed_instance"}
 
@@ -691,11 +760,11 @@ def test_force_fail_build_audits_a_real_force_and_skips_a_noop(monkeypatch):
     terminal build (forced=False) records NONE. Guards an operator's force going unrecorded/mis-attributed, and
     a no-op (a wrong id, or an idempotent re-try of an already-forced build) flooding the trail as if it changed
     state (mirrors the request_lease idempotent-replay skip)."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.admin, "force_fail_build",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(admin, "force_fail_build",
                         lambda c, bid, reason: {"build_id": bid, "forced": True, "prior_state": "IMPORTING",
                                                 "vmid": 9500, "reason": None})
     out = mcp_server.force_fail_build(object(), 7, "wedged pve")
@@ -703,7 +772,7 @@ def test_force_fail_build_audits_a_real_force_and_skips_a_noop(monkeypatch):
     assert len(rows) == 1 and rows[0]["action"] == "force_fail_build" and rows[0]["target"] == "7"
     assert rows[0]["actor_token_id"] == 9 and rows[0]["project_id"] is None and rows[0]["scope"] == "operator"
     rows.clear()
-    monkeypatch.setattr(mcp_server.admin, "force_fail_build",
+    monkeypatch.setattr(admin, "force_fail_build",
                         lambda c, bid, reason: {"build_id": bid, "forced": False, "prior_state": "READY",
                                                 "vmid": None, "reason": "already_terminal"})
     mcp_server.force_fail_build(object(), 7, None)
@@ -736,13 +805,13 @@ def test_force_fail_build_commits_before_the_best_effort_audit(monkeypatch):
         def rollback(self) -> None:
             order.append("rollback")
 
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _OrderConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.admin, "force_fail_build",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _OrderConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(admin, "force_fail_build",
                         lambda c, bid, reason: order.append("force") or {
                             "build_id": bid, "forced": True, "prior_state": "IMPORTING", "vmid": 1,
                             "reason": None})
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: order.append("audit"))
+    monkeypatch.setattr(audit, "record", lambda c, **k: order.append("audit"))
     out = mcp_server.force_fail_build(object(), 7, None)
     assert out["forced"] is True
     assert order == ["force", "commit", "audit"]   # FAILED CAS DURABLE before the audit can fail + rollback
@@ -775,21 +844,21 @@ def test_force_fail_replication_settles_after_commit_unconditionally_and_audits_
         def rollback(self) -> None:
             order.append("rollback")
 
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _OrderConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.replication, "force_fail_replication",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _OrderConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(replication, "force_fail_replication",
                         lambda c, rid, reason: order.append("force") or {"replication_id": rid, "forced": True,
                                                                          "prior_state": "COPYING", "vmid": 9500,
                                                                          "reason": None})
-    monkeypatch.setattr(mcp_server.replication, "settle_forced_reservation",
+    monkeypatch.setattr(replication, "settle_forced_reservation",
                         lambda c, rid: order.append("settle"))
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: order.append("audit"))
+    monkeypatch.setattr(audit, "record", lambda c, **k: order.append("audit"))
     out = mcp_server.force_fail_replication(object(), 7, "wedged")
     assert out["forced"] is True and out["vmid"] == 9500
     assert order == ["force", "commit", "settle", "audit"]   # settle AFTER the durable CAS; audit last
     order.clear()
     # an already-terminal retry: NO audit, but the settle STILL fires (the crash-window repair path)
-    monkeypatch.setattr(mcp_server.replication, "force_fail_replication",
+    monkeypatch.setattr(replication, "force_fail_replication",
                         lambda c, rid, reason: order.append("force") or {"replication_id": rid, "forced": False,
                                                                          "prior_state": "FAILED", "vmid": None,
                                                                          "reason": "already_terminal"})
@@ -802,11 +871,11 @@ def test_cancel_migration_audits_a_real_cancel_and_skips_a_refusal(monkeypatch):
     scope 'operator', project_id None (0020), the migration_id as target; a refusal (copy_in_flight / terminal /
     unknown → cancelled=False) records NONE. Guards an operator's release going unrecorded/mis-attributed, and a
     refused cancel flooding the trail as if it changed state (mirrors migrate_lease's accepted-only audit)."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.gateway, "cancel_migration",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(gateway, "cancel_migration",
                         lambda c, mid: {"migration_id": mid, "cancelled": True, "state": "ABORTED",
                                         "reason": None})
     out = mcp_server.cancel_migration(object(), 7)
@@ -814,7 +883,7 @@ def test_cancel_migration_audits_a_real_cancel_and_skips_a_refusal(monkeypatch):
     assert len(rows) == 1 and rows[0]["action"] == "cancel_migration" and rows[0]["target"] == "7"
     assert rows[0]["actor_token_id"] == 9 and rows[0]["project_id"] is None and rows[0]["scope"] == "operator"
     rows.clear()
-    monkeypatch.setattr(mcp_server.gateway, "cancel_migration",
+    monkeypatch.setattr(gateway, "cancel_migration",
                         lambda c, mid: {"migration_id": mid, "cancelled": False, "state": "MIGRATING",
                                         "reason": "copy_in_flight"})
     mcp_server.cancel_migration(object(), 7)
@@ -827,12 +896,12 @@ def test_replicate_template_audits_a_real_request_with_the_operator_identity(mon
     audits ONLY a real REQUESTED job (requested=True) — a refusal (requested=False) records NONE. Guards a
     request going unrecorded/mis-attributed, a caller spoofing the requester, and a refusal flooding the trail
     (mirrors force_fail_build's real-change-only audit)."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
     captured: dict = {}
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.gateway, "request_replication",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(gateway, "request_replication",
                         lambda c, **k: captured.update(k) or {"replication_id": 3, "requested": True,
                                                               "reason": None})
     out = mcp_server.replicate_template(object(), "debian12", "clA", "FastStorage")
@@ -842,7 +911,7 @@ def test_replicate_template_audits_a_real_request_with_the_operator_identity(mon
     assert len(rows) == 1 and rows[0]["action"] == "replicate_template" and rows[0]["target"] == "debian12"
     assert rows[0]["scope"] == "operator" and rows[0]["project_id"] is None
     rows.clear()
-    monkeypatch.setattr(mcp_server.gateway, "request_replication",
+    monkeypatch.setattr(gateway, "request_replication",
                         lambda c, **k: {"replication_id": None, "requested": False,
                                         "reason": "no_replicable_source"})
     assert mcp_server.replicate_template(object(), "debian12", "clB", "OtherPool")["requested"] is False
@@ -854,11 +923,11 @@ def test_mark_template_source_dirty_operator_gated_commits_and_audits(monkeypatc
     UPDATE BEFORE the best-effort audit, and audits ONLY a real change (updated=True) — an unknown_template no-op
     records NONE. Guards the provenance attestation running unrecorded + the operator-tier registration."""
     assert auth.VERB_TIER["mark_template_source_dirty"] == "operator"
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.admin, "set_template_source_dirty",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(admin, "set_template_source_dirty",
                         lambda c, tid, dirty: {"template_id": tid, "updated": True, "source_dirty": dirty,
                                                "reason": None})
     out = mcp_server.mark_template_source_dirty(object(), "debian12", True)
@@ -866,7 +935,7 @@ def test_mark_template_source_dirty_operator_gated_commits_and_audits(monkeypatc
     assert len(rows) == 1 and rows[0]["action"] == "mark_template_source_dirty"
     assert rows[0]["target"] == "debian12" and rows[0]["scope"] == "operator"
     rows.clear()
-    monkeypatch.setattr(mcp_server.admin, "set_template_source_dirty",
+    monkeypatch.setattr(admin, "set_template_source_dirty",
                         lambda c, tid, dirty: {"template_id": tid, "updated": False, "reason": "unknown_template"})
     assert mcp_server.mark_template_source_dirty(object(), "ghost", True)["reason"] == "unknown_template"
     assert rows == []   # an unknown_template no-op is NOT audited
@@ -878,11 +947,11 @@ def test_dismiss_discovery_finding_operator_gated_commits_and_audits(monkeypatch
     dismissal (dismissed=True) — an idempotent/invalid no-op records NONE. Guards the suppression running
     unrecorded + the operator-tier registration; the write can never touch the gate (no gate reads the table)."""
     assert auth.VERB_TIER["dismiss_discovery_finding"] == "operator"
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.admin, "dismiss_discovery_finding",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(admin, "dismiss_discovery_finding",
                         lambda c, *, kind, node_id, subject, note, by: {
                             "kind": kind, "node_id": node_id, "subject": subject, "dismissed": True,
                             "reason": None, "by": by, "note": note})
@@ -891,7 +960,7 @@ def test_dismiss_discovery_finding_operator_gated_commits_and_audits(monkeypatch
     assert len(rows) == 1 and rows[0]["action"] == "dismiss_discovery_finding"
     assert rows[0]["target"] == "pve5" and rows[0]["scope"] == "operator"
     rows.clear()
-    monkeypatch.setattr(mcp_server.admin, "dismiss_discovery_finding",
+    monkeypatch.setattr(admin, "dismiss_discovery_finding",
                         lambda c, *, kind, node_id, subject, note, by: {
                             "kind": kind, "node_id": node_id, "subject": subject, "dismissed": False,
                             "reason": "invalid_kind"})
@@ -904,17 +973,17 @@ def test_clear_discovery_dismissal_operator_gated_commits_and_audits(monkeypatch
     the DELETE before the audit, and audits ONLY a real clear (cleared=True). Guards the un-suppress running
     unrecorded + the operator-tier registration."""
     assert auth.VERB_TIER["clear_discovery_dismissal"] == "operator"
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.admin, "clear_discovery_dismissal",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(admin, "clear_discovery_dismissal",
                         lambda c, *, kind, node_id, subject: {
                             "kind": kind, "node_id": node_id, "subject": subject, "cleared": True, "reason": None})
     out = mcp_server.clear_discovery_dismissal(object(), "unknown_pool", "pve5", "local")
     assert out["cleared"] is True and len(rows) == 1 and rows[0]["action"] == "clear_discovery_dismissal"
     rows.clear()
-    monkeypatch.setattr(mcp_server.admin, "clear_discovery_dismissal",
+    monkeypatch.setattr(admin, "clear_discovery_dismissal",
                         lambda c, *, kind, node_id, subject: {
                             "kind": kind, "node_id": node_id, "subject": subject, "cleared": False,
                             "reason": "unknown_dismissal"})
@@ -940,17 +1009,17 @@ def test_cancel_replication_commits_before_audit_and_skips_a_noop(monkeypatch):
         def commit(self) -> None:
             order.append("commit")
 
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _OrderConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.replication, "cancel_replication",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _OrderConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(replication, "cancel_replication",
                         lambda c, rid: order.append("cancel") or {"replication_id": rid, "cancelled": True,
                                                                   "prior_state": "REQUESTED", "reason": None})
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: order.append("audit"))
+    monkeypatch.setattr(audit, "record", lambda c, **k: order.append("audit"))
     out = mcp_server.cancel_replication(object(), 5)
     assert out["cancelled"] is True
     assert order == ["cancel", "commit", "audit"]   # CAS durable before an audit failure could rollback it
     order.clear()
-    monkeypatch.setattr(mcp_server.replication, "cancel_replication",
+    monkeypatch.setattr(replication, "cancel_replication",
                         lambda c, rid: order.append("cancel") or {"replication_id": rid, "cancelled": False,
                                                                   "prior_state": "COPYING",
                                                                   "reason": "not_cancellable"})
@@ -962,11 +1031,11 @@ def test_prune_replications_operator_gated_audits_the_count(monkeypatch):
     """prune_replications is operator-gated, commits the delete, and ALWAYS records ONE audit row carrying the
     pruned count + the horizon/cluster (a retention op is a deliberate, infrequent operator action worth
     trailing even at 0). Guards the retention verb running unrecorded or dropping the count from the trail."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
-    monkeypatch.setattr(mcp_server.replication, "prune_replications",
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(replication, "prune_replications",
                         lambda c, days, cluster_id=None: {"pruned": 4, "reason": None})
     out = mcp_server.prune_replications(object(), 90, "clA")
     assert out["pruned"] == 4
@@ -979,9 +1048,9 @@ def test_replication_status_is_read_tier_and_scopes_to_the_tokens_project(monkey
     its own job (an operator token → project None → sees any). Guards a tenant reading another project's
     replication job (a cross-tenant leak) and the verb being mis-tiered."""
     captured: dict = {}
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 7))
-    monkeypatch.setattr(mcp_server.replication, "replication_status",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 7))
+    monkeypatch.setattr(replication, "replication_status",
                         lambda c, rid, project_id=None: captured.update({"rid": rid, "pid": project_id})
                         or {"replication_id": rid, "found": True})
     out = mcp_server.replication_status(object(), 5)
@@ -993,9 +1062,9 @@ def test_list_template_instances_is_operator_gated_and_forwards(monkeypatch):
     """list_template_instances (operator-gated) forwards inventory.list_template_instances wrapped as
     {template_instances:[…]} — the operator view an agent consults before requesting a replication. Guards the
     read being wired to the wrong reader or losing its wrapper key."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.inventory, "list_template_instances",
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(inventory, "list_template_instances",
                         lambda c: [{"instance_id": 1, "template_id": "debian12"}])
     out = mcp_server.list_template_instances(object())
     assert out == {"template_instances": [{"instance_id": 1, "template_id": "debian12"}]}
@@ -1005,21 +1074,21 @@ def test_request_lease_skips_the_audit_on_an_idempotent_replay(monkeypatch):
     """A retry of request_lease with the same idem_key returns idempotent:true (the same lease) — it must NOT
     write a SECOND audit row, or an agent's automatic retries would flood the trail. A FRESH admit records one
     row; the replay records none. Guards the idempotent gate (mirrors the release no-op skip)."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 7))
-    monkeypatch.setattr(mcp_server.auth, "bind_project", lambda p, pid: ("team-a", None))
-    monkeypatch.setattr(mcp_server.auth, "template_allowed", lambda c, t, p: (True, None))
-    monkeypatch.setattr(mcp_server, "_queue_max", lambda c: 1000)
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 7))
+    monkeypatch.setattr(auth, "bind_project", lambda p, pid: ("team-a", None))
+    monkeypatch.setattr(auth, "template_allowed", lambda c, t, p: (True, None))
+    monkeypatch.setattr(mcp_common, "_queue_max", lambda c: 1000)
     rows: list = []
-    monkeypatch.setattr(mcp_server.audit, "record", lambda c, **k: rows.append(k))
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append(k))
 
-    monkeypatch.setattr(mcp_server.gateway, "request_lease",
+    monkeypatch.setattr(gateway, "request_lease",
                         lambda c, **k: {"lease_id": 1, "admitted": True, "queued": False, "idempotent": False})
     mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512)
     assert len(rows) == 1   # a FRESH admit is audited
 
     rows.clear()
-    monkeypatch.setattr(mcp_server.gateway, "request_lease",
+    monkeypatch.setattr(gateway, "request_lease",
                         lambda c, **k: {"lease_id": 1, "admitted": True, "queued": False, "idempotent": True})
     mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512)
     assert rows == []   # an idempotent replay records NOTHING (no flood)
@@ -1028,7 +1097,7 @@ def test_request_lease_skips_the_audit_on_an_idempotent_replay(monkeypatch):
 def test_a_tool_returns_the_authorize_error_verbatim(monkeypatch):
     """When _authorize denies (e.g. forbidden_scope, an error dict), the tool returns that dict and never
     calls the gateway. Guards a tool acting despite a failed authorization."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
     called: list[int] = []
     monkeypatch.setattr(gateway, "request_lease", lambda *a, **k: called.append(1))
     out = mcp_server.request_lease(object(), idem_key="k", node_id="n1", req_cpu=1.0, req_mem_mb=512)
@@ -1038,8 +1107,8 @@ def test_a_tool_returns_the_authorize_error_verbatim(monkeypatch):
 def test_renew_lease_enforces_lease_ownership(monkeypatch):
     """renew_lease refuses a lease the token's project does NOT own (lease_forbidden, gateway untouched) and
     proceeds for one it does. Guards a token renewing/holding another tenant's lease."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     called: list[int] = []
     monkeypatch.setattr(gateway, "renew_lease", lambda _c, lid: called.append(lid) or {"renewed": True})
 
@@ -1054,8 +1123,8 @@ def test_set_quota_applies_to_the_tokens_own_project(monkeypatch):
     """set_quota (the provision tier) always targets the TOKEN's own project — the caller can't name another
     project (there's no project_id arg), so gateway.set_quota is invoked with principal.project_id. Guards a
     provision token raising someone else's quota."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "provision", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "provision", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     captured: dict = {}
     monkeypatch.setattr(gateway, "set_quota",
                         lambda c, pid, **k: captured.update(project=pid, **k) or {"updated": True})
@@ -1068,7 +1137,7 @@ def test_set_quota_denied_for_a_non_provision_token(monkeypatch):
     """When _authorize denies (a read/consume token gets forbidden_scope for set_quota), the tool returns
     the error and never calls gateway.set_quota. Guards the provision-only gate being skipped at the
     adapter."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
     called: list[int] = []
     monkeypatch.setattr(gateway, "set_quota", lambda *a, **k: called.append(1))
     out = mcp_server.set_quota(object(), cpu_limit=16.0, mem_limit_mb=32768, max_leases=15)
@@ -1100,8 +1169,8 @@ def test_migration_status_returns_not_found_for_an_unknown_migration(monkeypatch
     """An unknown migration id → {exists: false}, and NEITHER the ownership check NOR gateway.migration_status
     runs (there is nothing to own or read). Guards a status leak / crash on a bad id, and an unnecessary
     ownership probe."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _MigConn(None))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _MigConn(None))
     monkeypatch.setattr(auth, "lease_owned_by", lambda *_a: pytest.fail("ownership checked for an unknown id"))
     called: list[int] = []
     monkeypatch.setattr(gateway, "migration_status", lambda *a, **k: called.append(1))
@@ -1113,8 +1182,8 @@ def test_migration_status_hides_another_tenants_migration(monkeypatch):
     """A migration whose lease is NOT owned by the token's project → the SAME {exists: false} an unknown id
     gives (uniform, non-enumerable), and gateway.migration_status is never reached. Guards a tenant probing
     another tenant's migrations or discovering lease/migration ids by response shape."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _MigConn((42,)))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _MigConn((42,)))
     monkeypatch.setattr(auth, "lease_owned_by", lambda _c, _lid, _pid: (False, "lease_forbidden"))
     called: list[int] = []
     monkeypatch.setattr(gateway, "migration_status", lambda *a, **k: called.append(1))
@@ -1126,8 +1195,8 @@ def test_migration_status_returns_status_for_an_owned_migration(monkeypatch):
     """When the migration's lease belongs to the token's project, the tool returns gateway.migration_status
     verbatim (so an agent can watch its OWN lease move). Guards the ownership gate wrongly hiding a caller's
     own migration."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _MigConn((42,)))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _MigConn((42,)))
     monkeypatch.setattr(auth, "lease_owned_by", lambda _c, _lid, _pid: (True, None))
     monkeypatch.setattr(gateway, "migration_status",
                         lambda _c, mid: {"migration_id": mid, "exists": True, "state": "DONE"})
@@ -1140,18 +1209,18 @@ def test_fleet_stats_is_read_tier_and_forwards(monkeypatch):
     """fleet_stats is read-tier shared-infra observability (like list_nodes): a read token is allowed and
     it forwards to inventory.fleet_stats verbatim. Guards the fleet-SLO surface being gated wrong or not
     wired to the reader."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server.inventory, "fleet_stats", lambda _c: {"queue_depth": 5})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(inventory, "fleet_stats", lambda _c: {"queue_depth": 5})
     assert mcp_server.fleet_stats(object()) == {"queue_depth": 5}
 
 
 def test_fleet_stats_denied_without_a_token(monkeypatch):
     """An unauthorized fleet_stats call returns the error dict and never reads the ledger. Guards anonymous
     access to the fleet observability surface."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "no_token"})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "no_token"})
     called: list[int] = []
-    monkeypatch.setattr(mcp_server.inventory, "fleet_stats", lambda _c: called.append(1))
+    monkeypatch.setattr(inventory, "fleet_stats", lambda _c: called.append(1))
     assert mcp_server.fleet_stats(object()) == {"error": "no_token"} and called == []
 
 
@@ -1160,10 +1229,10 @@ def test_node_cordon_is_operator_gated_and_forwards(monkeypatch):
     """node_cordon forwards to admin.set_node_cordon when authorized (operator tier) with NO project binding
     or lease ownership — it is a fleet-wide infra action. Guards the verb not wiring the cordon, or applying
     a tenant scope check it shouldn't."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     captured: dict = {}
-    monkeypatch.setattr(mcp_server.admin, "set_node_cordon",
+    monkeypatch.setattr(admin, "set_node_cordon",
                         lambda _c, nid, cordoned: captured.update(node=nid, cordoned=cordoned) or {"updated": True})
     out = mcp_server.node_cordon(object(), node_id="N", cordoned=True)
     assert out == {"updated": True} and captured == {"node": "N", "cordoned": True}
@@ -1172,9 +1241,9 @@ def test_node_cordon_is_operator_gated_and_forwards(monkeypatch):
 def test_node_cordon_denied_for_a_tenant_token(monkeypatch):
     """A tenant token (forbidden_scope from _authorize) can't cordon — the verb returns the error and never
     touches admin. Guards a tenant closing a shared node to every other tenant."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
     called: list[int] = []
-    monkeypatch.setattr(mcp_server.admin, "set_node_cordon", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(admin, "set_node_cordon", lambda *a, **k: called.append(1))
     assert mcp_server.node_cordon(object(), node_id="N", cordoned=True) == {"error": "forbidden_scope"}
     assert called == []
 
@@ -1183,8 +1252,8 @@ def test_migrate_lease_is_operator_gated_and_forwards_cross_tenant(monkeypatch):
     """migrate_lease forwards to gateway.migrate_lease when authorized (operator) with NO lease-ownership
     check — an operator migrates ANY lease. Guards the verb applying a tenant ownership gate (which would
     make it useless for a project-less operator) or not wiring the migration request."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "lease_owned_by",
                         lambda *_a: pytest.fail("operator migrate must NOT check lease ownership"))
     captured: dict = {}
@@ -1197,7 +1266,7 @@ def test_migrate_lease_is_operator_gated_and_forwards_cross_tenant(monkeypatch):
 def test_migrate_lease_denied_for_a_tenant_token(monkeypatch):
     """A tenant token can't migrate_lease (forbidden_scope) — the verb returns the error, gateway untouched.
     Guards a tenant relocating leases across clusters (an infra decision)."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
     called: list[int] = []
     monkeypatch.setattr(gateway, "migrate_lease", lambda *a, **k: called.append(1))
     assert mcp_server.migrate_lease(object(), idem_key="m1", lease_id=7, target_node_id="B") == {
@@ -1209,8 +1278,8 @@ def test_migration_status_is_cross_tenant_for_an_operator(monkeypatch):
     """An OPERATOR token (project_id None) may inspect ANY migration — the ownership gate is SKIPPED (it
     started the migration; it's cross-tenant), unlike a tenant token scoped to its own lease. Guards an
     operator being unable to poll a migration it just requested."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _MigConn((42,)))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _MigConn((42,)))
     monkeypatch.setattr(auth, "lease_owned_by",
                         lambda *_a: pytest.fail("operator migration_status must NOT gate on ownership"))
     monkeypatch.setattr(gateway, "migration_status",
@@ -1225,7 +1294,7 @@ def test_project_capacity_returns_forbidden_for_a_project_less_operator(monkeypa
     `assert pid is not None` would AssertionError) and NEVER reach another tenant's budget. Both the
     no-project call and a named-project call resolve to project_forbidden. Guards exactly the
     operator-nullable-project crash the adversarial review caught."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
     called: list[int] = []
     monkeypatch.setattr(gateway, "project_capacity", lambda *a, **k: called.append(1))
     assert mcp_server.project_capacity(object(), project_id=None) == {"error": "project_forbidden"}
@@ -1250,8 +1319,8 @@ def test_release_leases_applies_ownership_per_id_and_delegates(monkeypatch):
     doesn't own comes back {lease_id, error: lease_forbidden} in its slot WITHOUT aborting the others, and a
     repeated id runs once. Guards the bulk form skipping the per-lease ownership gate the single verb has, or
     one forbidden id failing the whole batch."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _TxnConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _TxnConn())
     monkeypatch.setattr(auth, "lease_owned_by",
                         lambda _c, lid, _pid: (True, None) if lid in (1, 3) else (False, "lease_forbidden"))
     monkeypatch.setattr(gateway, "release_lease", lambda _c, lid: {"lease_id": lid, "released": True})
@@ -1267,8 +1336,8 @@ def test_lease_statuses_is_read_tier_and_forwards_per_id(monkeypatch):
     """lease_statuses (read-tier bulk) delegates to gateway.lease_status per owned id, refusing an unowned id
     the same lease_forbidden. Guards the bulk status wrongly demanding consume, or leaking another tenant's
     lease facts."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _TxnConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "read", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _TxnConn())
     monkeypatch.setattr(auth, "lease_owned_by",
                         lambda _c, lid, _pid: (True, None) if lid == 5 else (False, "lease_forbidden"))
     monkeypatch.setattr(gateway, "lease_status",
@@ -1283,8 +1352,8 @@ def test_lease_statuses_is_read_tier_and_forwards_per_id(monkeypatch):
 def test_bulk_verb_returns_the_authorize_error_and_never_opens_a_connection(monkeypatch):
     """A denied bulk call (forbidden_scope — e.g. a read token on renew_leases) returns the error dict and
     NEVER opens a connection or touches the gateway. Guards the tier gate being skipped for the bulk forms."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
-    monkeypatch.setattr(mcp_server, "_conn", lambda: pytest.fail("no connection for a denied bulk call"))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(mcp_common, "_conn", lambda: pytest.fail("no connection for a denied bulk call"))
     called: list[int] = []
     monkeypatch.setattr(gateway, "renew_lease", lambda *a, **k: called.append(1))
     assert mcp_server.renew_leases(object(), lease_ids=[1, 2]) == {"error": "forbidden_scope"}
@@ -1297,14 +1366,14 @@ def test_authorize_answers_busy_without_a_ledger_connection_when_every_slot_is_t
     before it is known to be valid, so a flood of junk bearers through the tunnel opened one ledger connection
     each and could exhaust Postgres max_connections."""
     gate = ratelimit.LedgerGate("test", slots=1, wait_s=0.01)
-    monkeypatch.setattr(mcp_server, "_AUTH_GATE", gate)
+    monkeypatch.setattr(mcp_common, "_AUTH_GATE", gate)
 
     def no_ledger(*_a, **_k):
         raise AssertionError("the token lookup must not reach the ledger when no slot is free")
 
-    monkeypatch.setattr(mcp_server, "_pool", no_ledger)
+    monkeypatch.setattr(mcp_common, "_pool", no_ledger)
     with gate.slot():
-        assert mcp_server._authorize(_ctx_with_header("Bearer junk"), "lease_status") == {"error": "busy"}
+        assert mcp_common._authorize(_ctx_with_header("Bearer junk"), "lease_status") == {"error": "busy"}
 
 
 def test_healthz_probe_is_reused_within_its_window(monkeypatch):
@@ -1322,7 +1391,7 @@ def test_healthz_probe_is_reused_within_its_window(monkeypatch):
     clock[0] += mcp_server._HEALTH_TTL_S
     assert mcp_server._ledger_reachable_cached(now=lambda: clock[0]) is True
     assert len(probes) == 2
-    assert mcp_server._HEALTH_TTL_S == 2.0 and mcp_server._AUTH_GATE.slots == 8
+    assert mcp_server._HEALTH_TTL_S == 2.0 and mcp_common._AUTH_GATE.slots == 8
 
 
 def test_healthz_callers_never_queue_behind_a_slow_probe(monkeypatch):
@@ -1390,22 +1459,29 @@ def _full_surface() -> dict[str, str]:
     return {**tenant, **_descriptions(operator)}
 
 
-def test_operator_tools_are_exactly_the_operator_tier():
-    """The tools `_operator_tool` collects are exactly the verbs `auth.VERB_TIER` marks "operator", and every
-    served tool has a tier. Guards the split drifting from the authorization table: an operator-tier tool
-    registered with `@mcp.tool()` would reach every tenant agent only to be refused, and a read-tier tool
-    collected by mistake would vanish from the tenant gateway."""
-    collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
-    assert collected == {verb for verb, tier in auth.VERB_TIER.items() if tier == "operator"}
+def test_the_tenant_gateway_serves_no_operator_tool_and_every_other_one():
+    """A server built the way the tenant gateway is (`register_tenant_tools`, operator tools off) lists every
+    non-operator verb in registry order and no operator-tier one; the operator registration adds exactly the
+    operator tier; together they serve every verb. Guards the split drifting from the authorization table: an
+    operator-tier tool on the tenant gateway would reach every tenant agent only to be refused, and a read-tier tool
+    left out would vanish from it."""
+    tenant = FastMCP("tenant")
+    mcp_server.register_tenant_tools(tenant)
+    names = [t.name for t in tenant._tool_manager.list_tools()]
+    assert names == [v.name for v in verbs.VERBS if v.tier != "operator"]
+    operator = FastMCP("operator")
+    added = mcp_server.register_operator_tools(operator, enabled=True)
+    assert {t.name for t in operator._tool_manager.list_tools()} == {
+        v for v, tier in auth.VERB_TIER.items() if tier == "operator"} and added == len(mcp_server._OPERATOR_TOOLS)
+    assert mcp_server.register_operator_tools(FastMCP("off"), enabled=False) == 0
     assert set(_full_surface()) == set(auth.VERB_TIER)
 
 
 def test_every_operator_only_tool_is_collected_and_kept_short():
-    """Each tool whose description starts "OPERATOR only" is collected by `_operator_tool` (so the tenant
-    gateway can withhold it) and every collected tool says so and stays at or under 900 characters; the tools
-    registered directly never start that way. Guards a new operator tool registered with `@mcp.tool()`, which
-    would reach every tenant agent, and a description growing back into a design document an agent pays for
-    in context on every turn."""
+    """Each tool whose description starts "OPERATOR only" has an operator-tier row (so the tenant gateway
+    withholds it) and every operator-tier tool says so and stays at or under 900 characters; no other tool starts
+    that way. Guards a new operator tool given a tenant tier, which would reach every tenant agent, and a
+    description growing back into a design document an agent pays for in context on every turn."""
     collected = {fn.__name__ for fn in mcp_server._OPERATOR_TOOLS}
     registered = _full_surface()
     assert collected <= set(registered)
@@ -1413,7 +1489,7 @@ def test_every_operator_only_tool_is_collected_and_kept_short():
         if name in collected:
             assert text.startswith("OPERATOR only") and len(text) <= 900, (name, len(text))
         else:
-            assert not text.startswith("OPERATOR only"), f"{name} is operator-only but not @_operator_tool"
+            assert not text.startswith("OPERATOR only"), f"{name} is operator-only but its row is not operator-tier"
 
 
 def test_tenant_tool_descriptions_stay_within_a_context_budget():
@@ -1432,18 +1508,18 @@ def test_pin_lease_is_operator_gated_forwards_and_commits_before_auditing(monkey
     Guards a tenant pinning a lease (a permanent hold on shared capacity), and the verb not wiring the pin."""
     assert auth.VERB_TIER["pin_lease"] == "operator"
     assert mcp_server.pin_lease in mcp_server._OPERATOR_TOOLS
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
     monkeypatch.setattr(auth, "lease_owned_by", lambda *_a: pytest.fail("an operator pin checks no ownership"))
     captured: dict = {}
     audited: list[str] = []
-    monkeypatch.setattr(mcp_server.pin, "set_pinned",
+    monkeypatch.setattr(pin, "set_pinned",
                         lambda _c, lid, pinned: captured.update(lid=lid, pinned=pinned) or {"updated": True})
-    monkeypatch.setattr(mcp_server, "_audit_write", lambda _c, _p, action, **_k: audited.append(action))
+    monkeypatch.setattr(mcp_common, "_audit_write", lambda _c, _p, action, **_k: audited.append(action))
     assert mcp_server.pin_lease(object(), lease_id=7, pinned=True) == {"updated": True}
     assert captured == {"lid": 7, "pinned": True} and audited == ["pin_lease"]
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
-    monkeypatch.setattr(mcp_server.pin, "set_pinned", lambda *a, **k: pytest.fail("a tenant must not pin"))
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: {"error": "forbidden_scope"})
+    monkeypatch.setattr(pin, "set_pinned", lambda *a, **k: pytest.fail("a tenant must not pin"))
     assert mcp_server.pin_lease(object(), lease_id=7, pinned=True) == {"error": "forbidden_scope"}
 
 
@@ -1452,16 +1528,16 @@ def test_request_and_schedule_lease_forward_pinned_and_audit_it(monkeypatch):
     audit params of a fresh reserve. Guards the flag being dropped between the tool and the gateway (the agent
     would get an unpinned lease reaped for a missed heartbeat) and the trail not showing which leases were
     asked to be pinned."""
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("p", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_queue_max", lambda _c: 1000)
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("p", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_queue_max", lambda _c: 1000)
     monkeypatch.setattr(auth, "template_allowed", lambda *_a: (True, None))
     seen: list[bool] = []
     audited: list[dict] = []
     answer = {"lease_id": 3, "admitted": True, "queued": False, "idempotent": False, "reason": None, "pinned": True}
     monkeypatch.setattr(gateway, "request_lease", lambda _c, **k: seen.append(k["pinned"]) or answer)
     monkeypatch.setattr(gateway, "schedule_lease", lambda _c, **k: seen.append(k["pinned"]) or answer)
-    monkeypatch.setattr(mcp_server, "_audit_write", lambda _c, _p, _a, **k: audited.append(k["params"]))
+    monkeypatch.setattr(mcp_common, "_audit_write", lambda _c, _p, _a, **k: audited.append(k["params"]))
     mcp_server.request_lease(object(), idem_key="a", node_id="n1", req_cpu=1, req_mem_mb=512, pinned=True)
     mcp_server.schedule_lease(object(), idem_key="b", req_cpu=1, req_mem_mb=512, pinned=True)
     assert seen == [True, True] and [p["pinned"] for p in audited] == [True, True]
@@ -1473,12 +1549,12 @@ def _admits(tool: str, outcome: str) -> float:
 
 
 def _tenant(monkeypatch) -> None:
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal("p", "consume", 1))
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _CtxConn())
-    monkeypatch.setattr(mcp_server, "_queue_max", lambda _c: 1000)
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("p", "consume", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    monkeypatch.setattr(mcp_common, "_queue_max", lambda _c: 1000)
     monkeypatch.setattr(auth, "template_allowed", lambda *_a: (True, None))
-    monkeypatch.setattr(mcp_server, "_audit_write", lambda *_a, **_k: None)
-    monkeypatch.setattr(mcp_server, "_audit_refused", lambda *_a, **_k: None)
+    monkeypatch.setattr(mcp_common, "_audit_write", lambda *_a, **_k: None)
+    monkeypatch.setattr(mcp_common, "_audit_refused", lambda *_a, **_k: None)
 
 
 def test_the_tools_count_every_answer_the_agent_gets(monkeypatch):
@@ -1498,20 +1574,20 @@ def test_the_tools_count_every_answer_the_agent_gets(monkeypatch):
     before = {o: _admits("request_lease", o) for o in keys}
     assert mcp_server.request_lease(object(), **kw)["admitted"] is True
     assert mcp_server.request_lease(object(), **kw)["reason"] == "insufficient_node_cpu"
-    monkeypatch.setattr(mcp_server.auth, "bind_project", lambda _p, _pid: (None, "project_forbidden"))
+    monkeypatch.setattr(auth, "bind_project", lambda _p, _pid: (None, "project_forbidden"))
     assert mcp_server.request_lease(object(), project_id="other", **kw) == {"error": "project_forbidden"}
-    monkeypatch.setattr(mcp_server.auth, "bind_project", lambda p, _pid: (p.project_id, None))
+    monkeypatch.setattr(auth, "bind_project", lambda p, _pid: (p.project_id, None))
     monkeypatch.setattr(gateway, "request_lease", lambda _c, **_k: {"lease_id": 2, "admitted": True,
                                                                      "idempotent": False, "reason": None})
 
     def audit_fails(*_a, **_k):
         raise RuntimeError("audit insert failed")
-    monkeypatch.setattr(mcp_server, "_audit_write", audit_fails)
+    monkeypatch.setattr(mcp_common, "_audit_write", audit_fails)
     with pytest.raises(RuntimeError):
         mcp_server.request_lease(object(), **kw)
     assert {o: _admits("request_lease", o) - n for o, n in before.items()} == {
         "admitted": 1, "insufficient_node_cpu": 1, "project_forbidden": 1, "error": 1}
-    monkeypatch.setattr(mcp_server, "_audit_write", lambda *_a, **_k: None)
+    monkeypatch.setattr(mcp_common, "_audit_write", lambda *_a, **_k: None)
     monkeypatch.setattr(gateway, "schedule_lease", lambda _c, **_k: {"lease_id": None, "node_id": None,
                                                                       "admitted": False, "queued": False,
                                                                       "idempotent": False, "reason": "no_capacity"})
@@ -1539,16 +1615,15 @@ def test_a_value_the_ledger_refuses_counts_as_invalid_input_not_error(monkeypatc
 
 def test_the_counted_tools_keep_their_mcp_signature():
     """The registered request_lease / schedule_lease tools still take the agent's parameters (not *args/**kwargs)
-    and keep their description, because functools.wraps carries the signature, annotations and docstring that
-    FastMCP builds the tool from. Guards the wrapper silently changing the agent-facing schema (docs/api.md's
-    drift test would also go red)."""
+    and keep their description (their row in br0kr/verbs.py), because functools.wraps carries the signature and
+    annotations FastMCP builds the tool from. Guards the wrapper silently changing the agent-facing schema
+    (tests/unit/test_mcp_contract.py and docs/api.md's drift test would also go red)."""
     tools = {t.name: t for t in mcp_server.mcp._tool_manager.list_tools()}
     for name, must in (("request_lease", {"idem_key", "node_id", "req_cpu", "pinned"}),
                        ("schedule_lease", {"idem_key", "req_cpu", "cluster_id", "pinned"})):
         props = set(tools[name].parameters["properties"])
         assert must <= props and "args" not in props and "kwargs" not in props, name
-        assert tools[name].description and tools[name].description.startswith(
-            getattr(mcp_server, name).__doc__.strip()[:40])
+        assert tools[name].description == verbs.BY_NAME[name].doc, name
 
 
 # ── the gateway's metrics listener (review OPS-03) ─────────────────────────────────────────────────────
@@ -1581,12 +1656,12 @@ def test_a_metrics_port_that_cannot_be_bound_stops_the_gateway_with_a_message(mo
 
     def taken(*_a, **_k):
         raise OSError(98, "Address already in use")
-    monkeypatch.setattr(mcp_server, "_conn", lambda: __import__("contextlib").nullcontext(_Conn()))
-    monkeypatch.setattr(mcp_server.db, "assert_read_committed", lambda _c: None)
-    monkeypatch.setattr(mcp_server.migrate, "assert_schema", lambda _c, _s: None)
-    monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(mcp_common, "_conn", lambda: __import__("contextlib").nullcontext(_Conn()))
+    monkeypatch.setattr(db, "assert_read_committed", lambda _c: None)
+    monkeypatch.setattr(migrate, "assert_schema", lambda _c, _s: None)
+    monkeypatch.setattr(logging_setup, "apply_settings", lambda **_k: None)
     monkeypatch.setattr(mcp_server.mcp, "run", lambda transport: pytest.fail("must not serve without metrics"))
-    monkeypatch.setattr(mcp_server.metrics, "serve", taken)
+    monkeypatch.setattr(metrics, "serve", taken)
     monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "streamable-http")
     monkeypatch.delenv("BR0KR_GATEWAY_METRICS_PORT", raising=False)
     with pytest.raises(SystemExit, match="BR0KR_GATEWAY_METRICS_PORT"):
@@ -1611,12 +1686,12 @@ def test_main_starts_the_metrics_listener_only_for_an_http_transport(monkeypatch
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(mcp_server, "_conn", lambda: __import__("contextlib").nullcontext(_Conn()))
-    monkeypatch.setattr(mcp_server.db, "assert_read_committed", lambda _c: None)
-    monkeypatch.setattr(mcp_server.migrate, "assert_schema", lambda _c, _s: None)
-    monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(mcp_common, "_conn", lambda: __import__("contextlib").nullcontext(_Conn()))
+    monkeypatch.setattr(db, "assert_read_committed", lambda _c: None)
+    monkeypatch.setattr(migrate, "assert_schema", lambda _c, _s: None)
+    monkeypatch.setattr(logging_setup, "apply_settings", lambda **_k: None)
     monkeypatch.setattr(mcp_server.mcp, "run", lambda transport: None)
-    monkeypatch.setattr(mcp_server.metrics, "serve",
+    monkeypatch.setattr(metrics, "serve",
                         lambda host, port, _render, *, name: started.append((host, port)))
     monkeypatch.setenv("FASTMCP_HOST", "127.0.0.1")
     monkeypatch.delenv("BR0KR_GATEWAY_METRICS_PORT", raising=False)
@@ -1655,9 +1730,9 @@ def test_detect_template_bridge_reports_an_unroutable_node_or_no_net0_bridge(mon
     """detect_template_bridge answers `node_unroutable` when this gateway has no PVE driver for the instance's node
     (no token here), and `no_bridge_on_net0` when the guest's net0 names no bridge, fail-soft with nothing written.
     Guards both refusals reaching an operator with no test producing them (review CODE-01)."""
-    monkeypatch.setattr(mcp_server, "_conn", lambda: _BridgeConn())
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    monkeypatch.setattr(mcp_server.nodes, "from_ledger", lambda _c, env: registry)
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _BridgeConn())
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
+    monkeypatch.setattr(nodes, "from_ledger", lambda _c, env: registry)
     assert mcp_server.detect_template_bridge(object(), "debian12") == expected
 
 
@@ -1718,12 +1793,12 @@ def _run_wait(monkeypatch, statuses, *, token: int = 1, conns: list | None = Non
             raise item
         return item
 
-    monkeypatch.setattr(mcp_server, "_authorize", authorize)
-    monkeypatch.setattr(mcp_server, "_wait_conn", conn)
-    monkeypatch.setattr(mcp_server, "_owned_status", owned_status)
-    monkeypatch.setattr(mcp_server, "_clock", lambda: clock[0])
-    monkeypatch.setattr(mcp_server, "_sleep", sleep)
-    monkeypatch.setattr(mcp_server, "_wait_threads", {})   # a limiter belongs to one event loop
+    monkeypatch.setattr(mcp_common, "_authorize", authorize)
+    monkeypatch.setattr(mcp_tools, "_wait_conn", conn)
+    monkeypatch.setattr(mcp_tools, "_owned_status", owned_status)
+    monkeypatch.setattr(mcp_tools, "_clock", lambda: clock[0])
+    monkeypatch.setattr(mcp_tools, "_sleep", sleep)
+    monkeypatch.setattr(mcp_tools, "_wait_threads", {})   # a limiter belongs to one event loop
     # A bound on real time, so a wait that never ends (a broken once-only reconnect) fails instead of hanging.
     out = asyncio.run(asyncio.wait_for(mcp_server.wait_for_lease(SimpleNamespace(), 7, **kw), 10))
     return out, sleeps, opened
@@ -1737,9 +1812,9 @@ def test_wait_for_lease_returns_as_soon_as_the_lease_gets_there(monkeypatch):
     out, sleeps, conns = _run_wait(monkeypatch, [_status("PENDING"), _status("ADMITTED"),
                                                 _status("ACTIVE", ip="10.0.0.5")])
     assert (out["state"], out["ip_address"], out["reached"], out["waited_s"]) == ("ACTIVE", "10.0.0.5", True, 4.0)
-    assert "reason" not in out and sleeps == [mcp_server.WAIT_POLL_SECONDS] * 2
+    assert "reason" not in out and sleeps == [mcp_tools.WAIT_POLL_SECONDS] * 2
     assert [c.closed for c in conns] == [True]
-    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+    assert (mcp_tools._waiting, mcp_tools._waiting_by_token) == (0, {})
 
 
 def test_wait_for_lease_times_out_with_the_last_status(monkeypatch):
@@ -1756,7 +1831,7 @@ def test_wait_for_lease_never_waits_past_the_cap(monkeypatch):
     """A timeout_s over the cap waits 60 seconds and no longer, and a negative one reads once without waiting.
     Guards one call holding a worker and a ledger connection for as long as an agent asks (the review's 60 s cap,
     pinned as a number so a changed constant fails here)."""
-    assert mcp_server.WAIT_CAP_SECONDS == 60
+    assert mcp_tools.WAIT_CAP_SECONDS == 60
     out, sleeps, _conns = _run_wait(monkeypatch, [_status("PENDING")], timeout_s=600)
     assert out["waited_s"] == 60 == sum(sleeps)
     out, sleeps, _conns = _run_wait(monkeypatch, [_status("PENDING")], timeout_s=-3)
@@ -1784,15 +1859,15 @@ def test_wait_for_lease_refuses_another_tenants_lease_and_too_many_waits(monkeyp
     number of held connections, and one tenant locking every other tenant out of waiting."""
     out, sleeps, conns = _run_wait(monkeypatch, [{"error": "lease_forbidden"}])
     assert (out, sleeps, [c.closed for c in conns]) == ({"error": "lease_forbidden"}, [], [True])
-    monkeypatch.setattr(mcp_server, "_waiting", mcp_server.WAIT_SLOTS)
+    monkeypatch.setattr(mcp_tools, "_waiting", mcp_tools.WAIT_SLOTS)
     out, _sleeps, conns = _run_wait(monkeypatch, [_status("PENDING")])
     assert out == {"error": "busy"} and conns == []
-    monkeypatch.setattr(mcp_server, "_waiting", mcp_server.WAIT_SLOTS_PER_TOKEN)
-    monkeypatch.setattr(mcp_server, "_waiting_by_token", {1: mcp_server.WAIT_SLOTS_PER_TOKEN})
+    monkeypatch.setattr(mcp_tools, "_waiting", mcp_tools.WAIT_SLOTS_PER_TOKEN)
+    monkeypatch.setattr(mcp_tools, "_waiting_by_token", {1: mcp_tools.WAIT_SLOTS_PER_TOKEN})
     out, _sleeps, conns = _run_wait(monkeypatch, [_status("PENDING")], token=1)
     assert out == {"error": "busy"} and conns == []
     out, _sleeps, conns = _run_wait(monkeypatch, [_status("ACTIVE", ip="10.0.0.5")], token=2)
-    assert out["reached"] is True and mcp_server._waiting_by_token == {1: mcp_server.WAIT_SLOTS_PER_TOKEN}
+    assert out["reached"] is True and mcp_tools._waiting_by_token == {1: mcp_tools.WAIT_SLOTS_PER_TOKEN}
 
 
 def test_a_cancelled_wait_closes_its_connection_and_frees_its_slot(monkeypatch):
@@ -1812,14 +1887,14 @@ def test_a_cancelled_wait_closes_its_connection_and_frees_its_slot(monkeypatch):
     async def real_sleep(seconds: float) -> None:
         await anyio.sleep(30)
 
-    monkeypatch.setattr(mcp_server, "_authorize", lambda _ctx, _verb: auth.Principal("projA", "read", 1))
-    monkeypatch.setattr(mcp_server, "_wait_conn", lambda: conns.append(_WaitConn()) or conns[-1])
-    monkeypatch.setattr(mcp_server, "_owned_status", lambda _c, _lid, _p: _status("PENDING"))
-    monkeypatch.setattr(mcp_server, "_sleep", real_sleep)
-    monkeypatch.setattr(mcp_server, "_wait_threads", {})
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _verb: auth.Principal("projA", "read", 1))
+    monkeypatch.setattr(mcp_tools, "_wait_conn", lambda: conns.append(_WaitConn()) or conns[-1])
+    monkeypatch.setattr(mcp_tools, "_owned_status", lambda _c, _lid, _p: _status("PENDING"))
+    monkeypatch.setattr(mcp_tools, "_sleep", real_sleep)
+    monkeypatch.setattr(mcp_tools, "_wait_threads", {})
     asyncio.run(scenario())
     assert [c.closed for c in conns] == [True]
-    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+    assert (mcp_tools._waiting, mcp_tools._waiting_by_token) == (0, {})
 
 
 def test_a_wait_rides_one_lost_connection_and_frees_its_slot_on_errors(monkeypatch):
@@ -1838,16 +1913,16 @@ def test_a_wait_rides_one_lost_connection_and_frees_its_slot_on_errors(monkeypat
     with pytest.raises(psycopg.OperationalError):
         _run_wait(monkeypatch, [lost, lost], conns=conns)
     assert [c.closed for c in conns] == [True, True]
-    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+    assert (mcp_tools._waiting, mcp_tools._waiting_by_token) == (0, {})
 
     def no_ledger():
         raise psycopg.OperationalError("connection refused")
 
-    monkeypatch.setattr(mcp_server, "_wait_conn", no_ledger)
+    monkeypatch.setattr(mcp_tools, "_wait_conn", no_ledger)
     import asyncio
     with pytest.raises(psycopg.OperationalError):
         asyncio.run(mcp_server.wait_for_lease(SimpleNamespace(), 7))
-    assert (mcp_server._waiting, mcp_server._waiting_by_token) == (0, {})
+    assert (mcp_tools._waiting, mcp_tools._waiting_by_token) == (0, {})
 
 
 def test_wait_for_lease_does_its_ledger_work_off_the_event_loop(monkeypatch):
@@ -1862,7 +1937,7 @@ def test_wait_for_lease_does_its_ledger_work_off_the_event_loop(monkeypatch):
     loop_thread = threading.get_ident()   # asyncio.run drives the loop on this thread
     assert set(threads) == {"authorize", "conn", "owned_status"}
     assert all(loop_thread not in idents for idents in threads.values()), threads
-    assert set(mcp_server._wait_threads) == {"auth", "wait"}   # authorisation runs on its own limiter
+    assert set(mcp_tools._wait_threads) == {"auth", "wait"}   # authorisation runs on its own limiter
 
 
 def test_owned_status_gates_ownership_and_always_ends_the_read(monkeypatch):
@@ -1884,11 +1959,11 @@ def test_owned_status_gates_ownership_and_always_ends_the_read(monkeypatch):
 
     monkeypatch.setattr(gateway, "lease_status", lease_status)
     conn = _WaitConn()
-    assert mcp_server._owned_status(conn, 8, principal) == {"error": "lease_forbidden"} and calls == []
-    assert mcp_server._owned_status(conn, 7, principal)["state"] == "ACTIVE" and calls == [7]
+    assert mcp_tools._owned_status(conn, 8, principal) == {"error": "lease_forbidden"} and calls == []
+    assert mcp_tools._owned_status(conn, 7, principal)["state"] == "ACTIVE" and calls == [7]
     owned[9] = True
     with pytest.raises(RuntimeError):
-        mcp_server._owned_status(conn, 9, principal)
+        mcp_tools._owned_status(conn, 9, principal)
     assert conn.rollbacks == 3
 
 
@@ -1927,21 +2002,21 @@ def test_the_gateway_borrows_from_two_pools_each_opened_once(monkeypatch):
     refuses it), and pools left open at exit (the ledger sees each restart drop the gateway's sessions)."""
     made: list[dict] = []
     registered: list[object] = []
-    monkeypatch.setattr(mcp_server.atexit, "register", registered.append)
+    monkeypatch.setattr(mcp_common.atexit, "register", registered.append)
 
     def fake_pool(**kw):
         made.append(kw)
         return SimpleNamespace(connection=lambda: ("borrowed", kw["autocommit"]))
 
-    monkeypatch.setattr(mcp_server, "_pools", {})
-    monkeypatch.setattr(mcp_server.db, "pool", fake_pool)
-    assert mcp_server._pool() is mcp_server._pool()
-    assert mcp_server._pool(autocommit=True) is not mcp_server._pool()
-    assert mcp_server._conn() == ("borrowed", False)
+    monkeypatch.setattr(mcp_common, "_pools", {})
+    monkeypatch.setattr(db, "pool", fake_pool)
+    assert mcp_common._pool() is mcp_common._pool()
+    assert mcp_common._pool(autocommit=True) is not mcp_common._pool()
+    assert mcp_common._conn() == ("borrowed", False)
     assert [(m["autocommit"], m["application_name"], m["max_size"]) for m in made] == [
-        (False, "br0kr-gateway", mcp_server.GATEWAY_POOL_MAX), (True, "br0kr-gateway-auth", mcp_server.GATEWAY_POOL_MAX)]
-    assert mcp_server._wait_conn is mcp_server.db.connect_with_retry   # a minute-long wait never takes a pool slot
-    assert registered == [mcp_server._close_pools]
+        (False, "br0kr-gateway", mcp_common.GATEWAY_POOL_MAX), (True, "br0kr-gateway-auth", mcp_common.GATEWAY_POOL_MAX)]
+    assert mcp_tools._wait_conn is db.connect_with_retry   # a minute-long wait never takes a pool slot
+    assert registered == [mcp_common._close_pools]
 
 
 def test_a_boot_that_cannot_borrow_names_the_real_error_and_pools_close_at_exit(monkeypatch):
@@ -1958,9 +2033,9 @@ def test_a_boot_that_cannot_borrow_names_the_real_error_and_pools_close_at_exit(
     def direct(*_a, **_k):
         raise psycopg.OperationalError('password authentication failed for user "broker"')
 
-    monkeypatch.setattr(mcp_server, "_conn", no_pool)
-    monkeypatch.setattr(mcp_server.db, "connect", direct)
-    monkeypatch.setattr(mcp_server.logging_setup, "apply_settings", lambda **_k: None)
+    monkeypatch.setattr(mcp_common, "_conn", no_pool)
+    monkeypatch.setattr(db, "connect", direct)
+    monkeypatch.setattr(logging_setup, "apply_settings", lambda **_k: None)
     monkeypatch.setattr(mcp_server.mcp, "run", lambda transport: pytest.fail("must not serve"))
     monkeypatch.setenv("BR0KR_MCP_TRANSPORT", "stdio")
     with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
@@ -1969,6 +2044,6 @@ def test_a_boot_that_cannot_borrow_names_the_real_error_and_pools_close_at_exit(
     closed: list[str] = []
     pools = {False: SimpleNamespace(close=lambda: closed.append("verbs")),
              True: SimpleNamespace(close=lambda: closed.append("auth"))}
-    monkeypatch.setattr(mcp_server, "_pools", pools)
-    mcp_server._close_pools()
+    monkeypatch.setattr(mcp_common, "_pools", pools)
+    mcp_common._close_pools()
     assert sorted(closed) == ["auth", "verbs"] and pools == {}

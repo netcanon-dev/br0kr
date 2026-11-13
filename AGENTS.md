@@ -18,7 +18,7 @@ rollout.
   `br0kr/admission.py`: `admit()` and its sibling `promote_pinned()` share one locked core, and nothing else adds
   a debit. Capacity is freed only by the guarded-CAS lease transitions in `br0kr/lease.py`, which need no lock
   (each targets one existing row). Inputs reach their handlers through explicit tables (the dashboard's route
-  map and `_ACTIONS`, the tool registrations in `br0kr/mcp_server.py`, the daemon's `tick_steps.STEPS`), never
+  map and `_ACTIONS`, the MCP verb registry `br0kr/verbs.py`, the daemon's `tick_steps.STEPS`), never
   through per-case branching scattered across the codebase.
 - **Config-as-data, validated.** node/storage/quota limits (SQL rows) are data; they must pass
   validation before they run.

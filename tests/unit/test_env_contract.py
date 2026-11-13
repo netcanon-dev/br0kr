@@ -32,12 +32,16 @@ _LOGGING = {"LOG_LEVEL", "LOG_FORMAT", "BR0KR_LOG_FILE"}
 _BROKER_SERVICES = ("migrate", "gateway", "gateway-operator", "daemon", "dashboard")   # merge x-broker-env
 # The module whose main() each service runs, so the variables it reads must reach those services.
 _ENTRY = {"daemon.py": ("daemon",), "mcp_server.py": ("gateway", "gateway-operator"),
+          # the gateway's tool code, split out of mcp_server.py (review ARCH-03), runs in the same processes
+          "mcp_common.py": ("gateway", "gateway-operator"), "mcp_kinds.py": ("gateway", "gateway-operator"),
+          "mcp_tools.py": ("gateway", "gateway-operator"),
+          "mcp_operator_tools.py": ("gateway", "gateway-operator"),
           "dashboard.py": ("dashboard",), "oauth.py": ("oauth",)}
 # Variables an entry point reads that compose deliberately does NOT pass, each with its reason.
 _NOT_PASSED = {
     "BR0KR_VM_CLONE_STORAGE": "retired (0033): read only to log an error telling the operator to delete it",
 }
-# A literal read through os.environ / os.getenv / daemon._env. Reads through a name constant (mcp_server's
+# A literal read through os.environ / os.getenv / daemon._env. Reads through a name constant (mcp_common's
 # _API_TOKEN_ENV for the stdio gateway) or a computed name (nodes.from_ledger's per-cluster secret) are not
 # visible to this check; those are covered where they are defined.
 _READ = re.compile(r'(?:os\.environ(?:\.get)?\(|os\.environ\[|os\.getenv\(|\b_env\()\s*"([A-Z][A-Z0-9_]+)"')

@@ -20,95 +20,22 @@ envelope. docs/runbooks/connecting-an-agent.md ("Reading a result") is the agent
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
-from br0kr import reasons
+from br0kr import reasons, verbs
 
 log = logging.getLogger(__name__)
 
-Verdict = str | Callable[[Mapping[str, Any]], bool] | None
+Verdict = verbs.Verdict
 
-
-def _admitted_or_queued(answer: Mapping[str, Any]) -> bool:
-    return bool(answer.get("admitted") or answer.get("queued"))
-
-
-def _no_reason(answer: Mapping[str, Any]) -> bool:
-    return answer.get("reason") is None
-
-
-# How each tool's own answer says it worked: the key whose truth is the verdict, a function of the answer, or None
-# for a tool that worked whenever it was not refused. Every registered tool has an entry
-# (tests/unit/test_envelope.py pins that), so a new tool's author decides rather than inheriting a guess.
-RESULT_FLAG: dict[str, Verdict] = {
-    # tenant: requests and lease verbs
-    "request_lease": _admitted_or_queued,
-    "schedule_lease": _admitted_or_queued,
-    "renew_lease": "renewed",
-    "release_lease": "released",
-    "cancel_lease": "cancelled",
-    "lease_status": "exists",
-    "wait_for_lease": "reached",
-    "queue_status": "exists",
-    "renew_leases": None,
-    "release_leases": None,
-    "cancel_leases": None,
-    "lease_statuses": None,
-    "migration_status": "exists",
-    "replication_status": "exists",
-    "set_quota": "updated",
-    "request_template_download": "requested",
-    # tenant: capacity and inventory reads
-    "node_capacity": "exists",
-    "cluster_capacity": "exists",
-    "project_capacity": "exists",
-    "whoami": None,
-    "list_nodes": None,
-    "list_clusters": None,
-    "list_storage": None,
-    "list_projects": None,
-    "list_templates": None,
-    "list_leases": None,
-    "queue_view": None,
-    "fleet_stats": None,
-    # operator tools (verify_declarations, discover_reachability and detect_template_bridge state `ok` themselves)
-    "node_cordon": "updated",
-    "pin_lease": _no_reason,
-    "verify_declarations": None,
-    "discover_reachability": None,
-    "dismiss_discovery_finding": _no_reason,
-    "clear_discovery_dismissal": "cleared",
-    "detect_template_bridge": None,
-    "force_fail_build": "forced",
-    "migrate_lease": "accepted",
-    "cancel_migration": "cancelled",
-    "replicate_template": "requested",
-    "cancel_replication": "cancelled",
-    "prune_replications": None,
-    "force_fail_replication": "forced",
-    "mark_template_source_dirty": "updated",
-    "list_template_instances": None,
-}
-
-# The reason a lookup that found nothing gets, when its answer names none.
-NOT_FOUND: dict[str, str] = {
-    "lease_status": reasons.UNKNOWN_LEASE,
-    "wait_for_lease": reasons.UNKNOWN_LEASE,
-    "queue_status": reasons.UNKNOWN_LEASE,
-    "migration_status": reasons.UNKNOWN_MIGRATION,
-    "node_capacity": reasons.UNKNOWN_NODE,
-    "cluster_capacity": reasons.UNKNOWN_CLUSTER,
-    "project_capacity": reasons.UNKNOWN_PROJECT,
-}
-
-# The bulk tools: the key that says each item worked, and the reason an item that found no lease gets.
-BULK_ITEM_FLAG: dict[str, str] = {
-    "renew_leases": "renewed",
-    "release_leases": "released",
-    "cancel_leases": "cancelled",
-    "lease_statuses": "exists",
-}
+# Each tool's rules, from its row in the verb registry (br0kr/verbs.py, review ARCH-03): how its own answer says it
+# worked (the key whose truth is the verdict, a function of the answer, or None for a tool that worked whenever it was
+# not refused), the reason a lookup that found nothing gets, and for a bulk tool the key that says each item worked.
+# Every tool has a verdict, because every tool has a row: a new tool's author decides rather than inheriting a guess.
+RESULT_FLAG: dict[str, Verdict] = {v.name: v.verdict for v in verbs.VERBS}
+NOT_FOUND: dict[str, str] = {v.name: v.not_found for v in verbs.VERBS if v.not_found is not None}
+BULK_ITEM_FLAG: dict[str, str] = {v.name: v.bulk_item for v in verbs.VERBS if v.bulk_item is not None}
 
 # The keys a refusal carries: `_authorize`'s {"error": code} (plus `scope` for forbidden_scope), a tenancy refusal
 # ({"error": "project_forbidden"}) and a refused batch ({"error": "batch_too_large", "max", "given"}). An answer with

@@ -22,7 +22,7 @@ etcd.
 ## The shape
 
 ```text
-agents, CI ─── MCP, bearer token ──► gateway (mcp_server.py → gateway.py)
+agents, CI ─── MCP, bearer token ──► gateway (verbs.py rows → gateway.py)
 OAuth-only MCP hosts ─── oauth.py ─► gateway
 operators ─── HTTPS ───────────────► dashboard (dashboard.py → admin.py, gateway.py)
                                        │ every capacity grant: admission.py, under the scope locks
@@ -137,7 +137,11 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `lease.py` | The lease lifecycle: TTL, heartbeat, guarded-CAS transitions, reaper work-lists. | writes | — | `unit/test_lease.py`, `harness_lease.py` |
 | `ledgerhealth.py` | The ledger's replication posture (slots, standbys) for metrics and the dashboard. | reads | — | `unit/test_ledgerhealth.py`, `harness_ledger_replication.py` |
 | `logging_setup.py` | One logging configure point: JSON or text, correlation ids, secret redaction. | — | — | `unit/test_redaction.py`, `unit/test_logging_file_fallback.py` |
-| `mcp_server.py` | The MCP adapter: authorizes each tool call, then calls the gateway or admin verb. | via gateway, admin | reads | `unit/test_mcp_server.py` |
+| `mcp_common.py` | What every MCP tool shares: ledger pools, the caller's authorization, audit writes. | via audit, auth | — | `unit/test_mcp_server.py`, `harness_gateway.py` |
+| `mcp_kinds.py` | The shapes most MCP tools share (lookup, one own lease, many), built from verb rows. | via gateway, inventory, bulk, audit | — | `unit/test_mcp_server.py`, `unit/test_mcp_contract.py` |
+| `mcp_operator_tools.py` | The operator-only MCP tools: cordon, pin, reachability, migrations, replication. | reads; via admin, pin, placement, gateway, replication, audit | reads; via placement | `unit/test_mcp_server.py` |
+| `mcp_server.py` | The MCP adapter: builds the server, registers every verb row, serves it. | via the tools | — | `unit/test_mcp_server.py`, `unit/test_mcp_contract.py` |
+| `mcp_tools.py` | The tenant MCP tools no shape fits: lease requests, `wait_for_lease`, quota, downloads. | reads; via gateway, auth, audit, replication | — | `unit/test_mcp_server.py`, `unit/test_envelope.py` |
 | `metrics_snapshot.py` | The daemon's cached ledger read behind its `/metrics`, and the `/readyz` probe. | reads | — | `integration/test_daemon.py` |
 | `metrics.py` | Labelled Prometheus counters and summaries, and the `/metrics` listener. | — | — | `unit/test_metrics.py`, `integration/test_metrics_listener.py` |
 | `migrate.py` | Applies the numbered SQL migrations in order, each atomic with its record. | writes | — | `unit/test_migrate.py`, `harness_migrate.py` |
@@ -167,6 +171,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `tick_steps.py` | The tick as a table: each step's order, cadence and connection; `TickSummary`. | — | — | `unit/test_tick_steps.py`, `integration/test_daemon.py` |
 | `tick_upkeep.py` | Tick steps: reap, guest-IP discovery, orphan sweep, audit retention, discovery report. | via reaper, sweeper, reconciler, audit | via reaper, sweeper, reconciler; reads (discovery) | `unit/test_daemon.py`, `harness_discovery_cadence.py` |
 | `ui_assets.py` | Vendored UI-spec CSS and JS, served with the dashboard. | — | — | `unit/test_ui_assets.py`, `integration/test_dashboard.py` |
+| `verbs.py` | The MCP verb registry: one row per tool with its tier, verdict, shape and description. | — | — | `unit/test_mcp_contract.py`, `unit/test_envelope.py` |
 
 ## Scale envelope
 

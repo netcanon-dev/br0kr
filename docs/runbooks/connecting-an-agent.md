@@ -2,9 +2,9 @@
 
 **Status:** 🟢 **shipped & hermetically proven** (agent auth: migration `0008`, PR #41; the HTTP bind:
 `FASTMCP_HOST`/`FASTMCP_PORT`, PR ~#35). br0kr's users are AI agents, so the gateway
-(`br0kr/mcp_server.py`) exposes the broker as **MCP tools** an agent calls directly. This runbook is the
-copy-paste path from *nothing* to *first call*: **mint a token → pick a transport → paste the client config →
-call a tool.**
+(`br0kr/mcp_server.py`, each tool a row of `br0kr/verbs.py`) exposes the broker as **MCP tools** an agent calls
+directly. This runbook is the copy-paste path from *nothing* to *first call*: **mint a token → pick a
+transport → paste the client config → call a tool.**
 
 The whole integration contract is one sentence: **plain MCP over a transport, plus a per-project bearer
 token.** There is no br0kr client library and nothing client-specific — any MCP-capable host (Claude Code,

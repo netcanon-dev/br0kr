@@ -15,13 +15,12 @@ to do about it. These tests pin the table to the code:
 """
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
 import pytest
 
-from br0kr import reasons
+from br0kr import reasons, verbs
 
 pytestmark = pytest.mark.unit
 
@@ -109,11 +108,10 @@ def test_queueable_codes_point_at_queue_true_and_node_cordoned_does_not():
 
 
 def test_the_request_tools_point_agents_at_the_table():
-    """request_lease and schedule_lease, whose docstrings are what an agent reads, each name the table and the
+    """request_lease and schedule_lease, whose descriptions (br0kr/verbs.py) are what an agent reads, each name the table and the
     invalid_ttl and storage_not_capable refusals, and the agent guide links the table. Guards the table existing where
     no agent would find it, and the review's two most-missed codes dropping out of the agent's view."""
-    tree = ast.parse((_ROOT / "br0kr" / "mcp_server.py").read_text(encoding="utf-8"))
-    docs = {n.name: ast.get_docstring(n) or "" for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    docs = {v.name: v.doc for v in verbs.VERBS}   # each tool's description, as an agent reads it
     for tool in ("request_lease", "schedule_lease"):
         for needle in ("docs/reference/reason-codes.md", reasons.INVALID_TTL, reasons.STORAGE_NOT_CAPABLE):
             assert needle in docs[tool], (tool, needle)

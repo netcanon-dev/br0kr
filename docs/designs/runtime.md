@@ -44,9 +44,9 @@ See also: [../architecture.md](../architecture.md#module-map), [surfaces.md](sur
   both, with what an agent does about each code (`tests/unit/test_reason_codes_doc.py` keeps it in step).
 - **Result envelope (`br0kr/envelope.py`)** — every MCP tool answer carries `ok` and, when false, a `reason`
   from the vocabulary, on top of the tool's own keys, so an agent branches on one key whatever the tool. Each
-  tool's verdict rule is one entry in `envelope.RESULT_FLAG` (a queued request is ok although it has a `reason`; a
-  found replication job is ok although it has an `error`); `br0kr/mcp_server.py` applies it where tools are
-  registered. `tests/unit/test_envelope.py` requires a rule for every registered tool and checks a refused call on
+  tool's verdict rule is the `verdict` of its row in `br0kr/verbs.py`, which `envelope.RESULT_FLAG` reads (a queued
+  request is ok although it has a `reason`; a found replication job is ok although it has an `error`);
+  `br0kr/mcp_server.py` applies it where tools are registered. `tests/unit/test_envelope.py` requires a rule for every registered tool and checks a refused call on
   each one.
 - **Per-project allowance (`db/migrations/0005_projects.sql`, the `project:` scope in `br0kr/admission.py`)**
   — a tenant budget so one project can't drain a whole cluster. A `project` row carries cpu/mem/lease-count
