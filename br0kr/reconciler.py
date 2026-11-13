@@ -59,6 +59,7 @@ import psycopg
 import requests
 
 from br0kr import build, cloudinit, imgbuild, lease, nodes, placement, pve
+from br0kr.driver import Driver
 
 log = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ def _provision_http_reason(exc: requests.HTTPError, *, template_vmid: int | None
     return "provision_error"
 
 
-def _best_effort_destroy(driver: pve.Pve, vmid: int, lease_id: int,
+def _best_effort_destroy(driver: Driver, vmid: int, lease_id: int,
                          on_progress: Callable[[], None] | None = None) -> None:
     """Fenced-destroy a guest with a bounded retry, swallowing the final error. Used
     ONLY where the reaper can no longer own teardown (lease already terminal). If every
@@ -199,7 +200,7 @@ _READBACK_DELAY_S = 0.2     # sleep between retries
 
 
 def _read_landed_pool(
-    driver: pve.Pve, vmid: int, lease_id: int, target: placement.DataDiskTarget, device: str,
+    driver: Driver, vmid: int, lease_id: int, target: placement.DataDiskTarget, device: str,
 ) -> str | None:
     """Read a just-attached data disk's LANDED pool for the per-disk assertion, tolerating the file-based
     read-back lag. Returns the pool as soon as ``disk_storage`` reports it (block storage: the FIRST read, no
@@ -237,7 +238,7 @@ def _read_landed_pool(
 
 
 def _attach_data_disks(
-    driver: pve.Pve, vmid: int, lease_id: int, data_disk_plan: tuple[placement.DataDiskTarget, ...],
+    driver: Driver, vmid: int, lease_id: int, data_disk_plan: tuple[placement.DataDiskTarget, ...],
 ) -> tuple[str | None, tuple[tuple[int, str, str], ...]]:
     """Attach the tenant DATA disks onto the fenced, STOPPED clone (PR-4) — the eye of the multi-disk
     actuation. Returns ``(boot_device, attached)`` where ``boot_device`` is the boot disk's device key read off
@@ -290,10 +291,10 @@ def _attach_data_disks(
 
 
 def _build_via_clone(
-    driver: pve.Pve, template_vmid: int, vmid: int, name: str, lease_id: int,
+    driver: Driver, template_vmid: int, vmid: int, name: str, lease_id: int,
     cores: int, memory: int, cloud_init: dict[str, Any] | None,
     full_clone: bool, clone_storage: str | None, req_disk_gb: int = 0,
-    *, clone_driver: pve.Pve | None = None, clone_target: str | None = None,
+    *, clone_driver: Driver | None = None, clone_target: str | None = None,
     target_bridge: str | None = None,
     data_disk_plan: tuple[placement.DataDiskTarget, ...] = (),
     on_progress: Callable[[], None] | None = None,
@@ -435,7 +436,7 @@ class BuildOutcome:
     detail: str | None
 
 
-def _destroy_build(driver: pve.Pve, vmid: int, build_id: int) -> None:
+def _destroy_build(driver: Driver, vmid: int, build_id: int) -> None:
     """Best-effort fenced teardown of a failed build's transient guest, with retry. Mirrors
     `_release_to_reaper`'s discipline, but there is no reaper for builds. IMPORTANT: every caller is a
     TERMINAL build-failure path (import_error/import_failed/size_*/catalog_insert_failed) that marks the
@@ -463,7 +464,7 @@ def _destroy_build(driver: pve.Pve, vmid: int, build_id: int) -> None:
               vmid, extra={"build_id": build_id, "vmid": vmid})
 
 
-def _free_import_source(driver: pve.Pve, storage: str, filename: str, *, subject: str, extra: dict[str, Any],
+def _free_import_source(driver: Driver, storage: str, filename: str, *, subject: str, extra: dict[str, Any],
                         expect_present: bool, on_progress: Callable[[], None] | None) -> None:
     """Best-effort reap CORE shared by the build (`free_build_import`) and rebuild_source (`free_rebuild_import`)
     reapers, so BOTH job kinds free their transient downloaded import image the SAME way — identical
@@ -499,7 +500,7 @@ def _free_import_source(driver: pve.Pve, storage: str, filename: str, *, subject
                     extra=extra)
 
 
-def free_build_import(driver: pve.Pve, storage: str, filename: str, build_id: int, *,
+def free_build_import(driver: Driver, storage: str, filename: str, build_id: int, *,
                        expect_present: bool, on_progress: Callable[[], None] | None = None) -> None:
     """Best-effort reap of the build's transient SOURCE image (``<storage>:import/<filename>``) once its bytes
     are copied into the template's disk — pure hygiene that NEVER affects the build outcome (a build is already
@@ -520,7 +521,7 @@ def free_build_import(driver: pve.Pve, storage: str, filename: str, build_id: in
                         expect_present=expect_present, on_progress=on_progress)
 
 
-def free_rebuild_import(driver: pve.Pve, storage: str, filename: str, replication_id: int, *,
+def free_rebuild_import(driver: Driver, storage: str, filename: str, replication_id: int, *,
                         expect_present: bool = False, on_progress: Callable[[], None] | None = None) -> None:
     """Best-effort reap of a `rebuild_source` replication job's transient downloaded SOURCE image
     (``<storage>:import/<filename>``, ``br0kr-repl-<id>-<template>.<ext>``) — the rebuild twin of
@@ -541,7 +542,7 @@ def free_rebuild_import(driver: pve.Pve, storage: str, filename: str, replicatio
 
 
 def build_template(
-    conn: psycopg.Connection[Any], driver: pve.Pve, job: build.BuildJob, *, node_id: str | None,
+    conn: psycopg.Connection[Any], driver: Driver, job: build.BuildJob, *, node_id: str | None,
     cores: int = 1, memory: int = 512, on_progress: Callable[[], None] | None = None,
 ) -> BuildOutcome:
     """Actuate one CLAIMED template build (already CAS'd REQUESTED→DOWNLOADING) to a finished catalog
@@ -764,7 +765,7 @@ def build_template(
 
 def provision_lease(
     conn: psycopg.Connection[Any],
-    driver: pve.Pve,
+    driver: Driver,
     lease_id: int,
     *,
     name: str,
@@ -778,7 +779,7 @@ def provision_lease(
     clone_storage: str | None = None,
     req_disk_gb: int = 0,
     placement_assert: bool = True,
-    clone_driver: pve.Pve | None = None,
+    clone_driver: Driver | None = None,
     clone_target: str | None = None,
     target_bridge: str | None = None,
     data_disk_plan: tuple[placement.DataDiskTarget, ...] = (),
@@ -988,7 +989,7 @@ def provision_lease(
 
 
 def discover_and_stamp_ip(
-    conn: psycopg.Connection[Any], driver: pve.Pve, lease_id: int, vmid: int,
+    conn: psycopg.Connection[Any], driver: Driver, lease_id: int, vmid: int,
     *, prefer_prefix: str | None = None,
 ) -> str | None:
     """Best-effort: read the guest agent's interfaces, pick the reachable IPv4, and stamp it onto the
@@ -1009,7 +1010,7 @@ def discover_and_stamp_ip(
     return ip if lease.set_ip_address(conn, lease_id, ip) else None
 
 
-def make_destroyer(driver: pve.Pve,
+def make_destroyer(driver: Driver,
                    on_progress: Callable[[], None] | None = None) -> Callable[[lease.ClaimedLease], None]:
     """The reaper's `destroy` callback bound to a fenced driver: it fenced-destroys
     `claimed.vmid` under `claimed.id`, so a reused vmid is refused (`fence_mismatch`)

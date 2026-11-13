@@ -36,6 +36,7 @@ from typing import Any
 import psycopg
 
 from br0kr import pve
+from br0kr.driver import Driver
 
 log = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class _Snapshot:
     old pair or the new pair in full — never a torn mix of new drivers with a stale cluster
     grouping. The dicts are never mutated after construction; a reload builds fresh ones."""
 
-    drivers: dict[str, pve.Pve]
+    drivers: dict[str, Driver]
     node_clusters: dict[str, str]
 
 
@@ -149,11 +150,11 @@ class NodeRegistry:
     with no re-wiring, never a restart. The reads load the snapshot reference once, so they are
     consistent against a concurrent swap."""
 
-    def __init__(self, drivers: Mapping[str, pve.Pve],
+    def __init__(self, drivers: Mapping[str, Driver],
                  node_clusters: Mapping[str, str] | None = None) -> None:
         self._snap = _Snapshot(dict(drivers), dict(node_clusters or {}))
 
-    def get(self, node_id: str) -> pve.Pve | None:
+    def get(self, node_id: str) -> Driver | None:
         """The driver for a node, or None if this daemon doesn't serve it (unassigned /
         unknown) — the caller skips/defers rather than provisioning on a wrong node."""
         return self._snap.drivers.get(node_id)
@@ -161,7 +162,7 @@ class NodeRegistry:
     def node_ids(self) -> list[str]:
         return sorted(self._snap.drivers)
 
-    def items(self) -> list[tuple[str, pve.Pve]]:
+    def items(self) -> list[tuple[str, Driver]]:
         """(node_id, driver) pairs — what the daemon iterates to sweep every served node."""
         return sorted(self._snap.drivers.items())
 
@@ -208,7 +209,7 @@ def from_ledger(conn: psycopg.Connection[Any], *, env: Mapping[str, str] | None 
         "SELECT id FROM node WHERE cluster_id IS NULL ORDER BY id").fetchall()]
     conn.commit()
 
-    drivers: dict[str, pve.Pve] = {}
+    drivers: dict[str, Driver] = {}
     node_clusters: dict[str, str] = {}
     misconfigured: list[str] = []   # nodes whose cluster is broken — a likely operator mistake
     bad_clusters: set[str] = set()  # log each broken cluster ONCE, not once per node it owns

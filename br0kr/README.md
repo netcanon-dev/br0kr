@@ -14,7 +14,8 @@ ledger or acts on Proxmox, and what proves it.
   `lease.py`.
 - **The leader daemon is the only writer to Proxmox.** `daemon.py`, elected by `leader.py`, runs the tick: the step
   table in `tick_steps.py`, whose steps live in the `tick_*.py` modules and drive `reconciler.py`, `reaper.py`,
-  `sweeper.py` and the job modules, all through `pve.py`'s fenced driver.
+  `sweeper.py` and the job modules, all through `pve.py`'s fenced driver, which the engine is typed against
+  as the `driver.Driver` contract (mypy holds every call to it).
 - **Inputs reach handlers through tables:** the MCP verb registry in `verbs.py`, the dashboard's route map in
   `dashboard.py` and its action table `_ACTIONS` in `dashboard_actions.py`, and the daemon's `tick_steps.STEPS`.
 - **One ledger seam:** every connection is opened by `db.py`, which pins READ COMMITTED and adds keepalives and

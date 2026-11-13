@@ -36,7 +36,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import audit, multidisk, pve, reasons
+from br0kr import audit, multidisk, nodes, pve, reasons
 
 log = logging.getLogger(__name__)
 
@@ -783,7 +783,7 @@ class _AclAbort(Exception):
 
 
 def _gather_node_views(
-    registry: Any, cluster_id: str | None, *, abort_on_acl: bool,
+    registry: nodes.NodeRegistry, cluster_id: str | None, *, abort_on_acl: bool,
     on_progress: Callable[[], None] | None = None,
 ) -> tuple[dict[str, dict[str, dict[str, Any]]], list[str], list[str]]:
     """Read every SERVED node's live PVE storage listing ONCE — the shared PASS-1 gather both
@@ -831,7 +831,7 @@ def _gather_node_views(
 
 
 def _gather_node_bridges(
-    registry: Any, cluster_id: str | None, *, on_progress: Callable[[], None] | None = None,
+    registry: nodes.NodeRegistry, cluster_id: str | None, *, on_progress: Callable[[], None] | None = None,
 ) -> tuple[dict[str, dict[str, dict[str, Any]]], list[str], list[str]]:
     """Read every SERVED node's live PVE BRIDGE listing ONCE (`list_node_bridge_details`) — the network-side gather
     for `discover_reachability` (0041, PR-C), the twin of `_gather_node_views` over /nodes/{node}/network. Returns
@@ -887,11 +887,11 @@ _NETWORK_DECLARED = """
 
 
 def verify_declarations(
-    conn: psycopg.Connection[Any], registry: Any, *, cluster_id: str | None = None,
+    conn: psycopg.Connection[Any], registry: nodes.NodeRegistry, *, cluster_id: str | None = None,
 ) -> dict[str, Any]:
     """Read-only-against-PVE reconciliation of the DECLARED `storage_node` reachability rows vs what PVE
-    actually reports per served node (§4.7, migration 0033/PR-3). `registry` is a nodes.NodeRegistry
-    (duck-typed: `.items()` + `.nodes_in()`); optionally scoped to `cluster_id`. For each served node, GET its
+    actually reports per served node (§4.7, migration 0033/PR-3). `registry` is a nodes.NodeRegistry (typed, so
+    mypy holds its drivers to driver.Driver); optionally scoped to `cluster_id`. For each served node, GET its
     storage list (`pve.list_node_storage`); if the token is denied the listing ENTIRELY (ACL_FORBIDDEN — the
     `Datastore.Audit` ACL isn't granted) it returns `{ok:False, reason:'acl_insufficient', required:…}` and
     quarantines NOTHING (fail-closed graceful degradation). Otherwise, for each declared, non-quarantined,
@@ -1246,7 +1246,7 @@ def _bridge_suggestions(
     return bridge_suggestions
 
 
-def _unserved_nodes(conn: psycopg.Connection[Any], registry: Any, cluster_id: str | None) -> list[str]:
+def _unserved_nodes(conn: psycopg.Connection[Any], registry: nodes.NodeRegistry, cluster_id: str | None) -> list[str]:
     """The in-scope ledger nodes this daemon does not serve, so a second daemon's blind spot is reported rather
     than read as 'nothing to report'."""
     served = set(registry.nodes_in(cluster_id) if cluster_id is not None else registry.node_ids())
@@ -1311,7 +1311,7 @@ def _apply_dismissals(
 
 
 def discover_reachability(
-    conn: psycopg.Connection[Any], registry: Any, *, cluster_id: str | None = None,
+    conn: psycopg.Connection[Any], registry: nodes.NodeRegistry, *, cluster_id: str | None = None,
     on_progress: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Read-only, computed-on-read reachability DISCOVERY — the WIDEN-half twin of `verify_declarations` (which
@@ -1412,7 +1412,7 @@ def discover_reachability(
                                         invisibly. READ-ONLY — discovery only SELECTs `discovery_dismissal`; no
                                         gate path reads it, so a dismissal is pure reporting suppression, never a
                                         gate change.
-    `registry` is a nodes.NodeRegistry (duck-typed: `.items()`/`.nodes_in()`/`.node_ids()`). ``on_progress``
+    `registry` is a nodes.NodeRegistry (typed, so its drivers are held to driver.Driver). ``on_progress``
     (optional) is threaded into both per-node gathers so the daemon's cadence tick can heartbeat between the
     blocking PVE GETs (the MCP verb passes None). Pure reads — never commits, never raises out of the verb."""
     views, unreachable, acl_denied = _gather_node_views(registry, cluster_id, abort_on_acl=False,

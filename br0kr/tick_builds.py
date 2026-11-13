@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from br0kr import build, imgbuild, pve, reconciler
+from br0kr import build, imgbuild, reconciler
+from br0kr.driver import Driver
 
 if TYPE_CHECKING:
     from br0kr.daemon import Daemon
@@ -32,7 +33,7 @@ log = logging.getLogger(__name__)
 _DOWNLOAD_REATTACH_POLL_SECS = 5
 
 
-def node_and_driver_for_cluster(d: Daemon, cluster_id: str) -> tuple[str | None, pve.Pve | None]:
+def node_and_driver_for_cluster(d: Daemon, cluster_id: str) -> tuple[str | None, Driver | None]:
     """The br0kr node this daemon builds `cluster_id` on (the first served node — a template build actuates
     on one node of its cluster, and the resulting template is cluster-wide) and its driver. Both None if
     this daemon serves no node there. The node_id is stamped onto the build (build.set_build_vmid) so the
@@ -42,7 +43,7 @@ def node_and_driver_for_cluster(d: Daemon, cluster_id: str) -> tuple[str | None,
     return node_id, (d.registry.get(node_id) if node_id is not None else None)
 
 
-def driver_for_cluster(d: Daemon, cluster_id: str) -> pve.Pve | None:
+def driver_for_cluster(d: Daemon, cluster_id: str) -> Driver | None:
     """A driver for ANY served node in `cluster_id`. None if this daemon serves no node there. The
     stale-build reclaim's fallback for a build with NO stamped node (a legacy/pre-0029 row)."""
     return node_and_driver_for_cluster(d, cluster_id)[1]
@@ -50,7 +51,7 @@ def driver_for_cluster(d: Daemon, cluster_id: str) -> pve.Pve | None:
 
 def build_node_and_driver(
     d: Daemon, conn: psycopg.Connection[Any], job: build.BuildJob,
-) -> tuple[str | None, pve.Pve | None, str | None]:
+) -> tuple[str | None, Driver | None, str | None]:
     """Pick the served node THIS daemon builds `job` on — REACH-BASED (the build twin of
     replication.plan_rebuild_source), replacing `node_and_driver_for_cluster`'s reach-BLIND first-served pick
     that could actuate a build on a node unable to reach its own target pool (design §3, the confirmed latent

@@ -35,6 +35,7 @@ import psycopg
 import requests
 
 from br0kr import admission, imgbuild, lease, placement, pve, reasons, reconciler, statemachine
+from br0kr.driver import Driver
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -887,7 +888,7 @@ def _claim(conn: psycopg.Connection[Any], job: ReplicationJob) -> int | None:
     return int(row[0]) if row is not None else None
 
 
-def _mint_vmid(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve) -> int | None:
+def _mint_vmid(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver) -> int | None:
     """Mint a fresh target-cluster vmid + stamp it on BOTH the job and its twin instance (under the
     `replication_cluster_vmid` + `template_instance_cluster_vmid` fences), retrying on a raced `UniqueViolation`
     with a new `nextid`. Returns the vmid, or None if the job is no longer stampable (terminal, or already has
@@ -1137,7 +1138,7 @@ def force_fail_replication(conn: psycopg.Connection[Any], replication_id: int, r
 
 
 # ── the orchestration: advance one job as far as it safely can (REQUESTED→COPYING→CONVERTING→READY) ────
-def _teardown_transient(job: ReplicationJob, driver: pve.Pve,
+def _teardown_transient(job: ReplicationJob, driver: Driver,
                         on_progress: Callable[[], None] | None = None) -> str:
     """Tear down the job's transient copy guest, ADOPTING an unfenced-but-ours landed clone FIRST so a guest we
     minted is never orphaned (the unfenced-clone window). The repl fence is stamped only AFTER the
@@ -1171,7 +1172,7 @@ def _teardown_transient(job: ReplicationJob, driver: pve.Pve,
     return "settled"
 
 
-def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve, reason: str,
+def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver, reason: str,
                       on_progress: Callable[[], None] | None = None) -> bool:
     """DESTROY-first then FAIL: tear down the transient copy guest (ADOPTING an unfenced landed clone, via
     `_teardown_transient`), then mark the job (and twin) FAILED + settle the reservation. Returns True if the job
@@ -1218,7 +1219,7 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
 
 
 def run_replication_step(
-    conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve, *, reservation_ttl: int,
+    conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver, *, reservation_ttl: int,
     on_progress: Callable[[], None] | None = None,
 ) -> ReplicationJob | None:
     """Advance one replication job as far as it safely can in a single call
@@ -1256,7 +1257,7 @@ def run_replication_step(
     return cur
 
 
-def _begin_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve, reservation_ttl: int
+def _begin_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver, reservation_ttl: int
                 ) -> ReplicationJob | None:
     """REQUESTED → COPYING: reserve the target bytes (the storage floor), claim the job + insert the twin, mint
     the vmid. A no-headroom target (`target_storage_insufficient`) or an already-present copy fails the job."""
@@ -1292,7 +1293,7 @@ def _begin_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.
     return _refresh(conn, job.id)
 
 
-def _do_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve,
+def _do_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver,
              on_progress: Callable[[], None] | None) -> ReplicationJob | None:
     """COPYING: heartbeat the reservation, gate the source, resume-safe clone (POST once, persist the UPID,
     re-attach via wait — or ADOPT a landed clone whose upid was lost), stamp the fence, run the post-copy
@@ -1406,7 +1407,7 @@ def _rebuild_import_filename(job: ReplicationJob, source_url: str) -> str:
     return imgbuild.download_filename(f"repl-{job.id}-{job.template_id}", source_url)
 
 
-def _reap_rebuild_source(driver: pve.Pve, job: ReplicationJob, facts: _RebuildFacts,
+def _reap_rebuild_source(driver: Driver, job: ReplicationJob, facts: _RebuildFacts,
                          on_progress: Callable[[], None] | None) -> None:
     """Best-effort reap of the rebuild's transient downloaded SOURCE image (§5.2) once it is provably DEAD WEIGHT.
     The `rebuild_source` twin of `build_template`'s post-import `free_build_import`; NEVER affects the job outcome
@@ -1432,7 +1433,7 @@ def _reap_rebuild_source(driver: pve.Pve, job: ReplicationJob, facts: _RebuildFa
     reconciler.free_rebuild_import(driver, facts.target_pve_name, filename, job.id, on_progress=on_progress)
 
 
-def _do_copy_rebuild(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve,
+def _do_copy_rebuild(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver,
                      on_progress: Callable[[], None] | None) -> ReplicationJob | None:
     """COPYING for `rebuild_source` (§5.2) — the cross-cluster twin of `_do_copy`. Instead of full-cloning an
     existing instance, it REPLAYS the template's recorded build on the (reach-chosen) target node in two RESUMABLE
@@ -1591,7 +1592,7 @@ def _do_copy_rebuild(conn: psycopg.Connection[Any], job: ReplicationJob, driver:
     return _refresh(conn, job.id)
 
 
-def _finalize(conn: psycopg.Connection[Any], job: ReplicationJob, driver: pve.Pve,
+def _finalize(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver,
               on_progress: Callable[[], None] | None) -> ReplicationJob | None:
     """CONVERTING → READY: heartbeat, make_template (re-checking the fence just before the POST), then the
     single-debit handoff — mark READY (instance READY commits FIRST), settle the reservation strictly AFTER, then
@@ -1639,7 +1640,7 @@ def list_advanceable(conn: psycopg.Connection[Any], limit: int = 20) -> list[Rep
 
 
 def run_pending_replications(
-    conn: psycopg.Connection[Any], driver_for: Callable[[str], pve.Pve | None], *, limit: int = 20,
+    conn: psycopg.Connection[Any], driver_for: Callable[[str], Driver | None], *, limit: int = 20,
     stale_seconds: int = STALE_SECONDS_DEFAULT, on_progress: Callable[[], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> list[ReplicationJob]:
@@ -1675,7 +1676,7 @@ def run_pending_replications(
 
 
 def reclaim_stale_replications(
-    conn: psycopg.Connection[Any], driver_for: Callable[[str], pve.Pve | None], *,
+    conn: psycopg.Connection[Any], driver_for: Callable[[str], Driver | None], *,
     stale_seconds: int = STALE_SECONDS_DEFAULT, on_progress: Callable[[], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> int:

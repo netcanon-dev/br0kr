@@ -45,6 +45,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The Proxmox driver contract is named: `br0kr/driver.py`, a Protocol the engine is typed against.** mypy now
+  fails on an engine call outside it or a `pve.Pve` that stops satisfying it; no behaviour change (ARCH-05).
 - **The job state machines are declared once, in `br0kr/statemachine.py`, and the jobs' guarded UPDATEs are checked.**
   `test_statemachine.py` fails on a build, replication or migration edge its machine lacks; no SQL changed (ARCH-04).
 - **The dashboard's script is a file, `br0kr/static/dashboard.js`, and its CSP is `script-src 'self'` alone.**

@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from br0kr import audit, cloudinit, lease, placement, pve, reasons, reconciler
+from br0kr import audit, cloudinit, lease, placement, reasons, reconciler
+from br0kr.driver import Driver
 
 if TYPE_CHECKING:
     from br0kr.daemon import Daemon
@@ -363,7 +364,7 @@ def provision_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummar
         # configure/start/assert use `driver` (the placement node). resolve_clone_target already HELD the
         # lease if this daemon can't route the source node, so the None-guard below is defensive (a mid-
         # tick registry change) and HOLDS rather than silently skipping.
-        clone_driver: pve.Pve | None = None
+        clone_driver: Driver | None = None
         clone_target: str | None = None
         if source_node_id is not None and source_node_id != al.node_id:
             clone_driver = d.registry.get(source_node_id)

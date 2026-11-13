@@ -63,7 +63,8 @@ from typing import Any
 
 import psycopg
 
-from br0kr import lease, pve, replication
+from br0kr import lease, replication
+from br0kr.driver import Driver
 from br0kr.logging_setup import generate_correlation_id, push_context
 
 log = logging.getLogger(__name__)
@@ -128,7 +129,7 @@ def _log_summary(summary: SweepSummary) -> None:
 
 def orphan_sweep(
     conn: psycopg.Connection[Any],
-    driver: pve.Pve,
+    driver: Driver,
     *,
     node_id: str | None = None,
     dry_run: bool = False,
@@ -356,7 +357,7 @@ def orphan_sweep(
 
 def orphan_sweep_all(
     conn: psycopg.Connection[Any],
-    drivers: list[tuple[str, pve.Pve]],
+    drivers: list[tuple[str, Driver]],
     *,
     dry_run: bool = False,
     allow_mass_absent: bool = False,
