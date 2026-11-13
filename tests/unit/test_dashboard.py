@@ -552,31 +552,6 @@ def test_force_fail_build_is_wired_end_to_end():
         assert needle in _UI, needle
 
 
-def test_template_source_dirty_route_is_allowlisted():
-    """The PR-6 source-dirty attestation route is allowlisted so the dashboard drives mark_template_source_dirty
-    (an operator hand-modification attestation rebuild_source reads). Guards the route being unrecognized (a
-    404); the write behaviour is proven in test_admin.set_template_source_dirty."""
-    assert "/api/template/source-dirty" in dashboard._ACTIONS
-
-
-def test_storage_node_confirm_routes_are_allowlisted():
-    """The 0041/PR-B single-pair reachability confirm routes are allowlisted so the dashboard drives the operator's
-    one-click action on a discover_reachability finding: /api/storage/node/add (the known_pool_new_node widen) and
-    /api/storage/node/remove (the un-declare, which refuses a quarantined pair without force). Guards either route
-    being unrecognized (a 404); the write behaviour is proven in test_admin.add_storage_node/remove_storage_node."""
-    assert "/api/storage/node/add" in dashboard._ACTIONS
-    assert "/api/storage/node/remove" in dashboard._ACTIONS
-
-
-def test_discovery_dismissal_routes_are_allowlisted():
-    """The 0044/PR-H dismissal routes are allowlisted so the dashboard drives the operator's suppress action on a
-    discover_reachability finding: /api/discovery/dismiss (silence a known-benign finding) and
-    /api/discovery/dismissal/clear (un-suppress). Guards either route being unrecognized (a 404); the write
-    behaviour is proven in test_admin.dismiss_discovery_finding / clear_discovery_dismissal."""
-    assert "/api/discovery/dismiss" in dashboard._ACTIONS
-    assert "/api/discovery/dismissal/clear" in dashboard._ACTIONS
-
-
 def test_template_instance_panel_is_wired():
     """The Images-tab template-instance panel (0032 physical copies) is wired end-to-end in the PAGE: the
     instances section, the render off DATA.template_instances, and per-row operator actions bind/retire/delete

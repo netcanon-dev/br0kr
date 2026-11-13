@@ -47,6 +47,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **Which capability is on which surface is a table: `tests/unit/test_surface_parity.py`.** Each MCP tool and
+  dashboard action has a row, and a side it lacks says why; a new one fails until it has a row (CODE-05).
 - **Agent polish: `whoami` lists the tools the token may call (`can`); `set_quota` takes any of its three
   limits** (an omitted one keeps its value; none is `nothing_to_set`); clearer leads for the queue and scheduling
   tools (UX-07).

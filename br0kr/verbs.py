@@ -18,7 +18,7 @@ Adding a read-only tool that fits a shape: write the function it calls (gateway.
 here; a LOOKUP row states whose rows it returns, `scope=TENANT` for anything a project owns, `SHARED` for
 infrastructure. A tool that fits no shape is a HANDLER: its function in mcp_tools.py or mcp_operator_tools.py, and
 its row here. Either way, rerun scripts/gen_api_reference.py and scripts/gen_mcp_contract.py, whose output is what
-changed for agents.
+changed for agents, and add its row to tests/unit/test_surface_parity.py (its dashboard path, or why it has none).
 
 Tiers. A tenant token's tier is a rank (read ⊂ consume ⊂ provision): it may call any verb at or below it. 'read' is
 inventory, capacity and status; 'consume' the lease lifecycle, always against the token's own project; 'provision'

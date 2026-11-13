@@ -41,6 +41,8 @@ ledger or acts on Proxmox, and what proves it.
    (operator tier, served only by the operator gateway), calling `mcp_common._authorize` first, and its row.
 3. Rerun `scripts/gen_api_reference.py` and `scripts/gen_mcp_contract.py`: the fixture's diff is what changed
    for agents, and `tests/unit/test_mcp_contract.py` fails until it is committed.
+4. Add its row to `SURFACES` in `tests/unit/test_surface_parity.py`: its dashboard path, or why it has none. The
+   test fails on a tool with no row.
 
 ## Adding a dashboard action
 
@@ -53,6 +55,8 @@ ledger or acts on Proxmox, and what proves it.
 3. Rerun `scripts/gen_api_reference.py` (`tests/unit/test_api_reference.py` fails until you do), and give each new
    reason code a hint in the page (`static/dashboard.js`); `tests/unit/test_dashboard.py` fails on a `_Reject` code
    or an `admin.py` validator code that has none.
+4. Add its row to `SURFACES` in `tests/unit/test_surface_parity.py`: its MCP tool, or why it has none. The test
+   fails on an action with no row.
 
 ## Adding a job state or transition
 

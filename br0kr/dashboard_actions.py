@@ -7,7 +7,8 @@ looked up at call time, so a test that patches one in its home module is seen he
 in br0kr/dashboard.py, do_POST authorizes the caller before reading the body, and its `_action` runs the verb,
 commits and writes the audit row (the commit is load-bearing for the admin verbs and a no-op for cancel, whose
 lease helpers commit themselves).
-Write correctness and race safety live in the verbs; this module only marshals.
+Write correctness and race safety live in the verbs; this module only marshals. Each action also has a row in
+tests/unit/test_surface_parity.py saying which MCP tool does the same, or why none does (review CODE-05).
 
 `_RESULT_AUDIT` and `_RESULT_REFUSED` are the outcome-aware tables `_action` consults for the few actions whose
 audit row depends on the result: whether it is worth recording, and whether it is a final refusal.
