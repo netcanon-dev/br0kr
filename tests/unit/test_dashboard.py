@@ -1616,3 +1616,27 @@ def test_the_token_table_flags_a_token_that_never_expires():
     assert 'id="tf-never" type="checkbox" data-change="syncNever()"' in page and "d.disabled = b.checked" in page
     render = page.partition("function renderTokens(")[2].partition("\nfunction ")[0]
     assert ": (t.active ? '<span style=\"color:var(--warn)\">never expires</span>' : '—')" in render
+
+
+def test_disk_sizes_read_gib_and_memory_mib_on_the_dashboard():
+    """The dashboard labels every disk figure GiB and memory MiB, never GB or MB: br0kr's disk sizes are binary
+    (Proxmox's `G`, pve.parse_disk_size_gb's 1024 factors), and memory is what Proxmox counts in MiB. Guards a "GB"
+    label coming back on a figure that is GiB, the review's UI-09 mismatch (memory said GiB, disk said GB)."""
+    script, page = _SCRIPT, dashboard_page.PAGE
+    for text in (script, page):
+        assert not re.search(r"\bGB\b|\(MB\)|\bMB (limit|ceiling|total)\b", text), re.findall(r".{30}\bGB\b.{10}", text)
+    assert "Disk (GiB)" in script and "Memory (MiB)" in script
+
+
+def test_the_page_fits_a_phone_width_screen():
+    """The page carries the narrow-screen rules (review UI-09): a .tbl scroll box with a visible focus ring, and a
+    640px media query that wraps the header, stacks the cards and puts form fields at full width; and the client
+    wraps every table in that box both where panels are drawn (paint) and in dialogs. Guards a refactor dropping
+    one of them, which a desktop-width check never notices: a wide table then scrolls a phone's whole page."""
+    page, script = dashboard_page.PAGE, _SCRIPT
+    assert ".tbl{overflow-x:auto;max-width:100%;position:relative}" in page and ".tbl:focus-visible{" in page
+    media = page.split("@media (max-width:640px){", 1)[1].split("\n  }\n", 1)[0]
+    for rule in ("header{flex-wrap:wrap", ".cards{grid-template-columns:1fr}", ".ff input,.ff select{width:100%"):
+        assert rule in media, rule
+    assert "el.innerHTML = wrapTables(html, id);" in script
+    assert "slot.innerHTML = wrapTables(html, 'dialog');" in script

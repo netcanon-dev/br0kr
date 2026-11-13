@@ -39,19 +39,30 @@ function find(el, m){
   if(h) h.tabIndex = -1;
   return h;
 }
+// Every table sits in a box that scrolls on its own (review UI-09), so a wide one never pushes the page sideways
+// on a phone. A table with nothing focusable in it gets a focusable, named box, so a keyboard can scroll it too;
+// a second such box in the same panel is numbered, so no two regions share a name.
+const wrapTables = (html, name) => { let n = 0; return String(html).replace(/<table\b[\s\S]*?<\/table>/g, t =>
+  /<(button|input|select|a)\b/.test(t) ? `<div class="tbl">${t}</div>`
+    : `<div class="tbl" tabindex="0" role="region" aria-label="${esc(name)} table${++n > 1 ? ' ' + n : ''}">${t}</div>`); };
+// the scroll boxes inside `el`, by plain tag (the client harness's fake DOM matches tags, not classes)
+const tblBoxes = el => [...el.querySelectorAll('div')].filter(d => d.className === 'tbl');
 function paint(id, html){
   const el = $(id);
   if(!el || PAINTED.get(el) === html) return;
   const inside = x => x && x !== el && el.contains(x);
   const a = document.activeElement;
   const fa = inside(a) ? mark(el, a) : null, fo = inside(OPENER) ? mark(el, OPENER) : null;
-  el.innerHTML = html;
+  const sx = tblBoxes(el).map(d => d.scrollLeft);   // a redraw must not snap a scrolled table back to its left
+  el.innerHTML = wrapTables(html, id);
+  if(sx.some(x => x)) tblBoxes(el).forEach((d, i) => { if(sx[i]) d.scrollLeft = sx[i]; });
   PAINTED.set(el, html);
   if(fo) OPENER = find(el, fo) || OPENER;
   const to = fa && find(el, fa);
   if(to) to.focus({preventScroll: true});
 }
 const gib = mb => (mb/1024).toFixed(mb < 1024*10 ? 1 : 0);
+const NUM = new Intl.NumberFormat();   // the viewer's locale
 const cls = p => p < 70 ? 'var(--ok)' : (p < 90 ? 'var(--warn)' : 'var(--bad)');
 // Format a duration in seconds for the fleet SLO tiles: null (no samples / empty queue) → an em-dash, NOT 0.
 // Round to WHOLE seconds up front, THEN split into h/m/s so a rounded remainder carries (never "1m 60s").
@@ -437,14 +448,14 @@ async function submitMaxPinned(i){
   else $('form-err').textContent = why(r);
 }
 function setTemplateDisk(i){
-  // phase A4.2: open a modal to set/clear a project's template-disk ceiling (GB). Blank = disable downloads.
+  // phase A4.2: open a modal to set/clear a project's template-disk ceiling (GiB). Blank = disable downloads.
   if(paused) return; paused = true;                        // one form at a time (suppresses the poll re-render)
   const p = DATA.projects[i];
   const cur = p.max_template_disk_gb!=null ? String(p.max_template_disk_gb) : '';
   openDialog(`<div class="form"><h3>Template-disk quota · ${esc(p.project_id)}</h3>
-    <label class="ff"><span>Quota (GB)</span><input id="td-gb" type="number" step="1" min="1"
+    <label class="ff"><span>Quota (GiB)</span><input id="td-gb" type="number" step="1" min="1"
       value="${esc(cur)}" placeholder="blank = disable downloads"></label>
-    <p class="pill">Blank disables template downloads for this tenant; otherwise a positive whole number of GB.</p>
+    <p class="pill">Blank disables template downloads for this tenant; otherwise a positive whole number of GiB.</p>
     <div class="erow"><button class="act" data-act="submitTemplateDisk(${i})">save</button>
     <button class="act ghost" data-act="closeForm()">cancel</button>
     <span id="form-err" class="ferr"></span></div></div>`);
@@ -454,7 +465,7 @@ async function submitTemplateDisk(i){
   if(t!==''){                                             // blank → omit → server clears it (downloads disabled)
     const num = Number(t);
     if(!Number.isInteger(num) || num<=0){                 // a typo (NaN→null) must NOT silently clear the quota
-      $('form-err').textContent = 'Enter a positive whole number of GB, or leave blank to disable downloads.';
+      $('form-err').textContent = 'Enter a positive whole number of GiB, or leave blank to disable downloads.';
       return;
     }
     body.max_template_disk_gb = num;
@@ -474,14 +485,14 @@ const ARR = {project:'projects', node:'nodes', cluster:'clusters', storage:'stor
 const ENT = {
   project: {key:'project_id', label:'project', create:'/api/project/create', edit:'/api/project/edit',
     del:'/api/project/delete', fields:[['project_id','Project id','text'],['cpu_limit','CPU limit','number'],
-    ['mem_limit_mb','Mem MB limit','number','mem_mb_limit'],['max_leases','Max leases','number'],
+    ['mem_limit_mb','Mem MiB limit','number','mem_mb_limit'],['max_leases','Max leases','number'],
     ['max_queued','Max queued (blank=global)','number'],
     ['cpu_limit_max','CPU ceiling (blank=no self-service)','number'],
-    ['mem_limit_mb_max','Mem MB ceiling','number','mem_mb_limit_max'],
+    ['mem_limit_mb_max','Mem MiB ceiling','number','mem_mb_limit_max'],
     ['max_leases_max','Max-leases ceiling','number']]},
   node: {key:'node_id', label:'node', create:'/api/node/create', edit:'/api/node/edit', del:'/api/node/delete',
     fields:[['node_id','Node id','text'],['cpu_total','CPU total','number'],
-    ['mem_total_mb','Mem MB total','number','mem_mb_total'],['cluster_id','Cluster (blank=unassigned)','text'],
+    ['mem_total_mb','Mem MiB total','number','mem_mb_total'],['cluster_id','Cluster (blank=unassigned)','text'],
     ['pve_node','PVE node name (in-cluster; blank=capacity-only)','text','pve_node']]},
   cluster: {key:'cluster_id', label:'cluster', create:'/api/cluster/create', edit:'/api/cluster/edit',
     del:'/api/cluster/delete', fields:[['cluster_id','Cluster id','text'],['pve_host','PVE host','text'],
@@ -491,7 +502,7 @@ const ENT = {
     ['pdm_token_secret_env','PDM token secret env var (name, not the secret)','text']]},
   storage: {key:'storage_id', label:'storage pool', create:'/api/storage/create', edit:'/api/storage/edit',
     del:'/api/storage/delete', fields:[['storage_id','Storage id','text'],
-    ['total_gb','Total GB','number','disk_gb_total']]},
+    ['total_gb','Total GiB','number','disk_gb_total']]},
   template: {key:'template_id', label:'template', create:'/api/template/create', edit:'/api/template/edit',
     del:'/api/template/delete', fields:[['template_id','Template id','text'],['cluster_id','Cluster id','text'],
     ['vmid','Template vmid','number'],['name','Name (optional)','text'],
@@ -539,7 +550,7 @@ const focusables = el => [...el.querySelectorAll('button, input, select, textare
 function openDialog(html){
   const slot = $('form-slot');
   if(slot.innerHTML === '') OPENER = document.activeElement;
-  slot.innerHTML = html;
+  slot.innerHTML = wrapTables(html, 'dialog');
   slot.hidden = false;
   const h = slot.querySelector('h3'); if(h) h.id = 'dlg-title';
   // the line a dialog marks id="dlg-desc" (a confirmation's question, a one-time secret's warning) is read with its
@@ -976,7 +987,7 @@ function renderDismissals(){
     <td class="pill">${tdate(x.dismissed_at)}${x.dismissed_by ? ' · ' + esc(x.dismissed_by) : ''}</td>
     <td><button class="act ghost" data-act="clearDismissal(${i})">clear</button></td></tr>`).join('');
   paint('discovery', add + `<table><thead><tr><th>Kind</th><th>Node</th><th>Subject</th><th>Note</th>
-    <th>Dismissed</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
+    <th>Dismissed (local)</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 // ── Usage by project (review FEAT-06): lease-hours, cpu-hours and memory GiB-hours per project over a window, from
 //    /api/usage (operator-gated: who used what is tenant accounting). It loads with the Tenancy tab's other operator
@@ -1004,7 +1015,10 @@ async function loadUsage(go){
 function renderUsage(){
   const u = USAGE || {}, ps = u.projects || [], t = u.totals || {};
   const hrs = x => Number(x || 0).toFixed(1);
-  const head = `<p class="pill">${tdate(u.since)} to ${tdate(u.until)} UTC. A lease counts from admission to release,
+  // the window is whole UTC days on the server (inventory.usage_window), so its bounds stay in UTC: in a local clock
+  // they would read as an odd hour of the day before
+  const utc = s => s ? esc(String(s).slice(0,16).replace('T',' ')) : '';
+  const head = `<p class="pill">${utc(u.since)} to ${utc(u.until)} UTC. A lease counts from admission to release,
     only the part inside the window: its hours, times the cpu or memory it asked for.</p>`;
   if(!ps.length){ paint('usage', head + '<div class="empty">no projects</div>'); return; }
   const unmeasured = t.unmeasured_leases ? `<p class="pill">${plural(Number(t.unmeasured_leases), 'lease', 'leases')}
@@ -1066,7 +1080,17 @@ async function loadTokens(go){
   if(r.ok) renderTokens(r.data.tokens || []);
   else paint('tokens', loadErr('agent tokens', r));   // never 'no tokens issued' on a failed read
 }
-const tdate = s => s ? esc(String(s).slice(0,16).replace('T',' ')) : '';
+// A server timestamp (ISO 8601 with its offset) in the viewer's own clock, like the header's "updated" time (review
+// UI-09); the value as sent is on hover. Fractions past milliseconds are dropped first: a Date parses ISO only to
+// the millisecond in every browser. Text that is not a timestamp is shown as sent.
+const tdate = s => {
+  if(!s) return '';
+  const raw = String(s), ms = stamp(raw.trim().replace(/^(\d{4}-\d\d-\d\d) /, '$1T'));
+  if(isNaN(ms)) return esc(raw.slice(0,16).replace('T',' '));
+  const d = new Date(ms), p = n => String(n).padStart(2,'0');
+  return `<time datetime="${d.toISOString()}" title="${esc(raw)}">${d.getFullYear()}-${p(d.getMonth()+1)}`
+    + `-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}</time>`;
+};
 function renderTokens(toks){
   const add = `<div class="toolbar"><button class="act" data-act="openTokenForm()">+ create token</button></div>`;
   if(!toks.length){ paint('tokens', add + '<div class="empty">no tokens issued</div>'); return; }
@@ -1080,7 +1104,7 @@ function renderTokens(toks){
       +'<button class="act danger" data-act="revokeToken('+(+t.token_id)+')">revoke</button>':''}</td>
   </tr>`).join('');
   paint('tokens', add + `<table><thead><tr><th>#</th><th>Project</th><th>Scope</th><th>Label</th>
-    <th>Last used</th><th>Expires</th><th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
+    <th>Last used (local)</th><th>Expires (local)</th><th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 function openTokenForm(){
   if(paused) return; paused = true;   // one form at a time (suppresses the poll re-render)
@@ -1192,7 +1216,7 @@ function renderOperators(ops){
     <td>${o.active?'<span class="ok">active</span>':'<span class="pill">revoked / expired</span>'}</td>
     <td>${o.active?'<button class="act danger" data-act="revokeOperator('+(+o.operator_id)+')">revoke</button>':''}</td>
   </tr>`).join('');
-  paint('operators', add + `<table><thead><tr><th>#</th><th>Name</th><th>Last used</th><th>Expires</th>
+  paint('operators', add + `<table><thead><tr><th>#</th><th>Name</th><th>Last used (local)</th><th>Expires (local)</th>
     <th>State</th>${TH_ACTS}</tr></thead><tbody>${rows}</tbody></table>`);
 }
 function openOperatorForm(){
@@ -1360,7 +1384,12 @@ function auditFilterQS(){   // build the shared query string from the filter bar
   const p = new URLSearchParams();
   const add = (k,id) => { const v=$(id).value.trim(); if(v) p.set(k,v); };
   add('surface','af-surface'); add('outcome','af-outcome'); add('action','af-action'); add('target','af-target');
-  add('project_id','af-project'); add('actor_token_id','af-token'); add('since','af-since'); add('until','af-until');
+  add('project_id','af-project'); add('actor_token_id','af-token');
+  // the date inputs mean the viewer's own days, as the "When (local)" column shows them (review UI-09): each is sent
+  // as the instant that day starts or ends, with its offset, not a bare date the server reads as a UTC day
+  const day = (k, id, end) => { const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec($(id).value.trim()); if(!m) return;
+    p.set(k, new Date(+m[1], +m[2]-1, +m[3], end?23:0, end?59:0, end?59:0, end?999:0).toISOString()); };
+  day('since', 'af-since', false); day('until', 'af-until', true);
   return p;
 }
 function syncAudit(){   // called each poll: manage visibility; do the INITIAL load once (don't clobber state)
@@ -1456,7 +1485,7 @@ function renderAudit(rows, hasMore){
     <td class="pill">${a.scope?esc(a.scope):'—'}</td><td class="pill">${a.target?esc(a.target):'—'}</td>
     <td class="pill" title="${p.full}">${p.cut}</td>
     <td class="pill">${a.source_ip?esc(a.source_ip):'—'}</td></tr>`; }).join('');
-  paint('audit', `<table><thead><tr><th>When</th><th>Surface</th><th>Outcome</th><th>Action</th>
+  paint('audit', `<table><thead><tr><th>When (local)</th><th>Surface</th><th>Outcome</th><th>Action</th>
     <th>Actor</th><th>Scope</th><th>Target</th><th>Params (redacted)</th><th>Source IP</th></tr></thead><tbody>`
     + body + `</tbody></table>`);
 }
@@ -1519,7 +1548,7 @@ function renderInstances(){
                   : glyph('?', 'not bound to a node yet', 'style="color:var(--warn)"')}</td>
     ${canEdit?'<td>'+iActs(i)+'</td>':''}</tr>`).join('');
   paint('instances', `<table><thead><tr><th class="num">#</th><th>Template</th><th>Cluster</th>
-    <th>Node</th><th>Storage</th><th class="num">vmid</th><th class="num">Size (GB)</th><th>State</th>
+    <th>Node</th><th>Storage</th><th class="num">vmid</th><th class="num">Size (GiB)</th><th>State</th>
     <th>Origin</th><th>Bound</th>${canEdit?TH_ACTS:''}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
 function openBindForm(i){
@@ -1541,7 +1570,7 @@ function openBindForm(i){
       REACH the storage (declare that on the Capacity tab first) or the bind is refused.</p>
     <label class="ff"><span>Node</span><select id="ib-node">${nodeOpts}</select></label>
     <label class="ff"><span>Storage pool</span><select id="ib-storage">${stOpts}</select></label>
-    <label class="ff"><span>Size (GB)</span><input id="ib-size" type="number" step="1" min="1"
+    <label class="ff"><span>Size (GiB)</span><input id="ib-size" type="number" step="1" min="1"
       value="${inst.size_gb!=null?esc(inst.size_gb):''}" placeholder="the template copy's disk footprint"></label>
     <div class="erow"><button class="act" data-act="submitBind(${+inst.instance_id})">bind</button>
     <button class="act ghost" data-act="closeForm()">cancel</button>
@@ -1554,7 +1583,7 @@ async function submitBind(id){
   const inst = ((DATA && DATA.template_instances) || []).find(x => x.instance_id === id);
   if(!inst){ closeForm(); return; }
   const num = Number($('ib-size').value);
-  if(!Number.isInteger(num) || num<=0){ $('form-err').textContent = 'Enter a positive whole number of GB.'; return; }
+  if(!Number.isInteger(num) || num<=0){ $('form-err').textContent = 'Enter a positive whole number of GiB.'; return; }
   const body = {instance_id:inst.instance_id, node_id:$('ib-node').value,
                 storage_id:$('ib-storage').value, size_gb:num};
   if(!body.node_id || !body.storage_id){ $('form-err').textContent = 'Pick a node and a storage pool.'; return; }
@@ -1620,7 +1649,7 @@ function renderReplications(){
     <button class="act ghost" data-act="openReplicatePrune()">prune history</button></div>` : '';
   paint('replications', toolbar +
     `<table><thead><tr><th class="num">#</th><th>Template</th><th>Target cluster</th><th>Target storage</th>
-     <th>Mechanism</th><th class="num">Size (GB)</th><th>State</th><th>Project</th><th>Error</th>
+     <th>Mechanism</th><th class="num">Size (GiB)</th><th>State</th><th>Project</th><th>Error</th>
      ${canEdit?TH_ACTS:''}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
 // storage options scoped to the SELECTED target cluster (a pool must be physically IN that cluster; the server
@@ -1897,7 +1926,7 @@ async function submitDownload(){
 function tdProjectOptions(){
   const ps = ((DATA && DATA.projects) || []).filter(p => p.max_template_disk_gb != null);
   return ps.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)} — `
-    + `${p.template_disk_used||0}/${p.max_template_disk_gb} GB used</option>`).join('');
+    + `${p.template_disk_used||0}/${p.max_template_disk_gb} GiB used</option>`).join('');
 }
 function openTenantDownload(){
   if(paused) return;
@@ -1920,7 +1949,7 @@ function openTenantDownload(){
     <label class="ff"><span>SHA-256</span><input id="tdf-sha" type="text" placeholder="64 hex chars"></label>
     <label class="ff"><span>Proxmox storage</span><input id="tdf-storage" type="text"
       placeholder="local-zfs"></label>
-    <label class="ff"><span>Disk budget (GB)</span><input id="tdf-size" type="number" step="1" min="1"
+    <label class="ff"><span>Disk budget (GiB)</span><input id="tdf-size" type="number" step="1" min="1"
       placeholder="reserved against the project's quota"></label>
     <label class="ff"><span>Name (optional)</span><input id="tdf-name" type="text"></label>
     <p class="pill">The broker downloads + checksum-verifies the image and registers it PRIVATE to the project.
@@ -1931,8 +1960,8 @@ function openTenantDownload(){
 }
 async function submitTenantDownload(){
   const t = $('tdf-size').value.trim(), num = Number(t);
-  if(t==='' || !Number.isInteger(num) || num<=0){         // a typo must NOT become a phantom 1GB reserve
-    $('form-err').textContent = 'Enter a positive whole number of GB for the disk budget.';
+  if(t==='' || !Number.isInteger(num) || num<=0){         // a typo must NOT become a phantom 1 GiB reserve
+    $('form-err').textContent = 'Enter a positive whole number of GiB for the disk budget.';
     return;
   }
   const body = {project_id:$('tdf-project').value, cluster_id:$('tdf-cluster').value,
@@ -1979,7 +2008,7 @@ function renderMigrations(){
     <td>${(canEdit && !mterminal(m.state))
       ? `<button class="act ghost" data-act="cancelMigration(${i})">cancel</button>` : '—'}</td></tr>`).join('');
   paint('migrations', banner + btn + `<table><thead><tr><th class="num">#</th><th>Lease</th><th>State</th>
-    <th>Source → Target</th><th>Reason</th><th>Updated</th>${TH_ACTS}</tr></thead><tbody>`+ rows +`</tbody></table>`);
+    <th>Source → Target</th><th>Reason</th><th>Updated (local)</th>${TH_ACTS}</tr></thead><tbody>`+ rows +`</tbody></table>`);
 }
 function cancelMigration(i){
   const migs = (DATA && DATA.migrations) || [];
@@ -2150,8 +2179,9 @@ function renderFleet(f){
   const el = $('fleet'); if(!el) return;
   if(!f){ el.innerHTML = '<div class="empty">no fleet data</div>'; return; }
   const qd = f.queue_depth||0, win = f.window_minutes||60;
-  const tile = (title, big, muted, rows) =>
-    `<div class="card"><h3>${esc(title)}</h3><div class="qdepth${muted?' zero':''}">${esc(big)}</div>`
+  const tile = (title, big, muted, rows) =>   // a count in the viewer's digit grouping (review UI-09)
+    `<div class="card"><h3>${esc(title)}</h3><div class="qdepth${muted?' zero':''}">${esc(
+      typeof big === 'number' ? NUM.format(big) : big)}</div>`
     + rows.map(r => `<div class="lbl"><span>${esc(r[0])}</span><span><b>${esc(r[1])}</b></span></div>`).join('')
     + `</div>`;
   el.innerHTML =
@@ -2428,7 +2458,7 @@ function render(d){
       + (s.cluster_id ? `<button class="act ghost" data-act="openStorageNodeAdd(${i})">+ node</button>` : '')
       + '</div>' : '';
     return resourceCard(s.storage_id, `${s.lease_count} active lease(s)`, [
-      bar(s.disk_gb_used, s.disk_gb_total, s.disk_pct, 'Disk (GB)'),
+      bar(s.disk_gb_used, s.disk_gb_total, s.disk_pct, 'Disk (GiB)'),
       `<div class="lbl"><span>Cluster · PVE pool</span><span>${bind}</span></div>`,
       `<div class="lbl"><span>Content</span><span>${content}</span></div>`,
       `<div class="lbl"><span>Reachable nodes</span><span>${reach}</span></div>`,
@@ -2549,11 +2579,11 @@ function openCreateVM(){
     + `<select id="cv-template">${cvTemplateOptions(firstPid)}</select></label>`;
   h += `<label class="ff"><span>CPU (cores)</span>`
     + `<input id="cv-cpu" type="number" step="any" min="0" value="1"></label>`;
-  h += `<label class="ff"><span>Memory (MB)</span>`
+  h += `<label class="ff"><span>Memory (MiB)</span>`
     + `<input id="cv-mem" type="number" step="1" min="1" value="2048"></label>`;
   h += `<label class="ff"><span>Storage pool</span>`
     + `<select id="cv-storage">${cvStorageOptions()}</select></label>`;
-  h += `<label class="ff"><span>Disk (GB)</span>`
+  h += `<label class="ff"><span>Disk (GiB)</span>`
     + `<input id="cv-disk" type="number" step="1" min="1" placeholder="blank = template boot disk"></label>`;
   h += `<p class="pill">Pick a storage pool AND a disk size together (the disk grows the`
     + ` template's boot disk), or leave both blank.</p>`;

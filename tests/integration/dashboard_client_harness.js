@@ -633,6 +633,26 @@ const SCENARIOS = {
     await boot({ token: 't', tab: 'images', routes: { '/api/template/sources': fail(401, 'unauthorized') } });
     return { downloads: $('downloads').innerHTML };
   },
+  // review UI-09: times in the viewer's clock, every table in its own scroll box
+  async units_tables_clock() {
+    const at = '2026-11-13T19:11:20.123456+00:00';
+    await boot({ token: 't', tab: 'security', routes: {
+      '/api/audit': ok({ audit: [{ id: 1, at, surface: 'dashboard', actor: 'ops', action: 'node/edit', target: 'n1',
+        outcome: null, scope: null, params: { cpu_total: 8 }, source_ip: null }], next_before_id: null }),
+      '/api/tokens': ok({ tokens: [{ token_id: 1, project_id: 'p1', scope: 'tenant', label: 'ci', created_at: at,
+        expires_at: null, last_used_at: at, revoked_at: null, active: true }] }) } });
+    run("$('af-since').value = '2026-11-13'; $('af-until').value = '2026-11-13';");
+    return {
+      local: run("tdate('2026-11-13T19:11:20.123456+00:00')"),
+      spaced: run("tdate('2026-11-13 19:11:20+00:00')"),
+      junk: run("tdate('not a date')"),
+      none: run('tdate(null)'),
+      audit: $('audit').innerHTML,
+      tokens: $('tokens').innerHTML,
+      auditQuery: run('auditFilterQS().toString()'),
+      twoReadOnly: run("wrapTables('<table><tr><td>a</td></tr></table><table><tr><td>b</td></tr></table>', 'x')"),
+    };
+  },
   async sources_empty() {
     await boot({ token: 't', tab: 'images' });
     return { downloads: $('downloads').innerHTML };

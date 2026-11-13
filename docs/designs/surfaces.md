@@ -140,6 +140,14 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   store only the secret-env NAME, never a secret value. Proven on real Postgres (`scripts/harness_admin.py`
   GO 18/18: the lowered-quota and lowered-node-capacity edits are seen by the next admit; in-use deletes
   refused; cluster/project deletes demote).
+- **Units, clocks and narrow screens on the dashboard (review UI-09).** Every disk figure is GiB (2^30 bytes),
+  which is what Proxmox means by `G` and what the code computes; memory is entered in MiB, as Proxmox counts it,
+  and shown in GiB. The API's
+  `_gb` and `_mb` field names keep their spelling. Timestamps arrive as ISO 8601 with an offset and are shown in
+  the viewer's own clock (the column headers say "(local)"), with the value as sent on hover; the usage window
+  stays in UTC, the whole UTC days the server counts in, and the audit filter's dates are the viewer's own days. Every table scrolls
+  inside its own box, and under 640px the header wraps, cards stack and form fields go full width, so a
+  390px-wide screen never scrolls the page sideways and the create-VM dialog fits.
 
 ## 4. Operator settings
 

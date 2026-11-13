@@ -70,6 +70,10 @@ _SHELL = """<!doctype html>
   .bar>span{display:block;height:100%} .lbl{display:flex;justify-content:space-between;font-size:12px;color:var(--mut)}
   .lbl b{color:var(--ink);font-weight:600}
   table{width:100%;border-collapse:collapse;font-size:13px}
+  /* every table sits in a box that scrolls on its own (dashboard.js wrapTables, review UI-09); positioned, so it also
+     clips the absolutely positioned screen-reader labels (.sr) in its cells, which would otherwise widen the page */
+  .tbl{overflow-x:auto;max-width:100%;position:relative}
+  .tbl:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
   th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
   td.num{text-align:right;font-variant-numeric:tabular-nums} .pill{font-size:11px;color:var(--mut)}
@@ -139,6 +143,15 @@ _SHELL = """<!doctype html>
   nav#tabnav .badge:not(:empty){margin-left:6px;font-size:11px;border-radius:999px;padding:0 6px;
     background:var(--btn-bad);color:var(--on-btn-bad)}
   nav#tabnav #badge-tenancy:not(:empty){background:var(--btn);color:var(--on-btn)}
+  /* a phone-width screen (review UI-09): the header and tool rows wrap, cards stack in one column, and a form row
+     puts its field under the label at full width, so a dialog (the create-VM one is the widest) fits 390px */
+  @media (max-width:640px){
+    header{flex-wrap:wrap;gap:6px 12px;padding:12px 16px} #actions{margin-left:0;flex-wrap:wrap}
+    nav#tabnav{padding:6px 16px} main{padding:14px 16px} .cards{grid-template-columns:1fr}
+    th,td{padding:6px 7px} .qf{flex-wrap:wrap}
+    .ff{flex-wrap:wrap} .ff input,.ff select{width:100%;max-width:100%} .ff input[type=checkbox]{width:auto}
+    #form-slot:not(:empty){padding:16px 8px}
+  }
 </style>
 <link rel="stylesheet" href="/assets/v0.2.1/netcanon-ui.css">
 <link rel="stylesheet" href="/assets/v0.2.1/br0kr.css">

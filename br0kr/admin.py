@@ -127,7 +127,7 @@ def validate_ceilings(
 
 
 def validate_template_disk_quota(max_template_disk_gb: int | None) -> str | None:
-    """Reject a malformed per-project template-disk ceiling (phase A4.2 — the GB of downloaded template images
+    """Reject a malformed per-project template-disk ceiling (phase A4.2 — the GiB of downloaded template images
     a tenant's provision tokens may own). None = CLEAR it (disable the tenant's self-service downloads); a
     present value must be a positive integer within the bigint column. `bool` is excluded (True/False are ints
     in Python but a nonsense disk size). Pure, so it is unit-testable without a database."""
@@ -145,7 +145,7 @@ def validate_template_disk_quota(max_template_disk_gb: int | None) -> str | None
 def set_project_template_disk_quota(
     conn: psycopg.Connection[Any], project_id: str, max_template_disk_gb: int | None
 ) -> dict[str, Any]:
-    """Set (or clear, with None) a project's template-disk ceiling — the GB of downloaded template images the
+    """Set (or clear, with None) a project's template-disk ceiling — the GiB of downloaded template images the
     tenant's provision tokens may own (phase A4.2; NULL disables self-service downloads for the tenant, the
     opt-in default for every new project). The caller MUST have run `validate_template_disk_quota`. A DEDICATED
     setter (NOT folded into set_project_quota's cpu/mem/lease write) so the operator can enable downloads for a

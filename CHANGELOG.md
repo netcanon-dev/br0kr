@@ -47,6 +47,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The dashboard fits a phone, shows disk sizes in GiB and times in your own clock.** Tables scroll in their own
+  box; disks were labelled GB but are GiB (Proxmox's `G`), memory is MiB; headers say "(local)" (UI-09).
 - **A gateway tool call's JSON log lines carry `run_id`, `op`, `project` and its `lease_id`, like a daemon tick's.**
   `request_lease`/`schedule_lease` log their outcome with the lease made; a tool that raises is logged (OPS-06).
 - **A PR runs pytest once, on Python 3.13 (the image's); 3.11 and 3.12 run after a merge and weekly.** `validate.sh`

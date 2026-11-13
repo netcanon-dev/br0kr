@@ -13,6 +13,7 @@ ubuntu runners ship node.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,9 +37,10 @@ def served_script() -> Path:
     return path
 
 
-def _run(served_script: Path, scenario: str) -> Any:
+def _run(served_script: Path, scenario: str, tz: str | None = None) -> Any:
+    env = None if tz is None else {**os.environ, "TZ": tz}   # the viewer's clock, for the local-time scenario
     out = subprocess.run(["node", str(_HARNESS), str(served_script), scenario], capture_output=True,
-                         text=True, encoding="utf-8", timeout=60, check=False)
+                         text=True, encoding="utf-8", timeout=60, check=False, env=env)
     assert out.returncode == 0, f"scenario {scenario} crashed:\n{out.stderr}"
     return json.loads(out.stdout)
 
@@ -926,3 +928,25 @@ def test_the_data_act_dispatcher_runs_only_listed_actions_with_literal_arguments
         assert got["refused"][spec]["error"] == f"bad page action: {spec}", spec
     assert got["keepsGoing"] == {"error": "loadAudit broke", "seen": [["loadAudit"], ["setTab", "y"]]}
     assert got["change"] == {"error": None, "seen": [["syncNever"]]}
+
+
+def test_times_read_in_the_viewers_clock_and_tables_scroll_in_their_own_box(served_script: Path) -> None:
+    """A server timestamp (ISO 8601, offset, microseconds) renders in the viewer's clock as YYYY-MM-DD HH:MM in a
+    <time> element carrying the value as sent; a space-separated one parses too; text that is not a timestamp is
+    shown as sent; nothing renders as nothing. The audit table, which has no control in it, sits in a focusable,
+    named scroll box under a "When (local)" header; the tokens table, whose rows have buttons, in a plain one; two
+    read-only tables in one panel get distinct names; and the audit filter's date inputs go to the server as the
+    viewer's own days, with offsets. Guards the review's UI-09 failures: server UTC shown with its offset cut off
+    next to a header in local time, a wide table scrolling a phone's whole page sideways, and a "to 13 Nov" filter
+    dropping rows the local column labels 13 Nov."""
+    got = _run(served_script, "units_tables_clock", tz="America/Los_Angeles")
+    assert got["local"] == ('<time datetime="2026-11-13T19:11:20.123Z" '
+                            'title="2026-11-13T19:11:20.123456+00:00">2026-11-13 11:11</time>')
+    assert got["spaced"].endswith(">2026-11-13 11:11</time>")
+    assert got["junk"] == "not a date" and got["none"] == ""
+    assert '<div class="tbl" tabindex="0" role="region" aria-label="audit table"><table>' in got["audit"]
+    assert "When (local)" in got["audit"]
+    assert '<div class="tbl"><table>' in got["tokens"] and "Last used (local)" in got["tokens"]
+    # the audit filter's dates are the viewer's days: 13 Nov in Los Angeles is 08:00Z on the 13th to 07:59:59.999Z
+    assert got["auditQuery"] == "since=2026-11-13T08%3A00%3A00.000Z&until=2026-11-14T07%3A59%3A59.999Z"
+    assert 'aria-label="x table"' in got["twoReadOnly"] and 'aria-label="x table 2"' in got["twoReadOnly"]

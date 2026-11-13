@@ -475,7 +475,7 @@ recorded in the audit log.
 | `/api/project/delete` | Delete a tenant. |
 | `/api/project/edit` | Set an EXISTING project's tenant budget (cpu/mem/lease limits + optional per-project queue cap) AND its self-service ceilings (the `*_max` envelope a provision token may climb within; None = that dimension not self-raisable). |
 | `/api/project/max-pinned` | Set how many live leases of a project may be pinned (0 = pinning off, the default; br0kr/pin.py). |
-| `/api/project/template-disk` | Set (or clear, with None) a project's template-disk ceiling — the GB of downloaded template images the tenant's provision tokens may own (phase A4.2; NULL disables self-service downloads for the tenant, the opt-in default for every new project). |
+| `/api/project/template-disk` | Set (or clear, with None) a project's template-disk ceiling — the GiB of downloaded template images the tenant's provision tokens may own (phase A4.2; NULL disables self-service downloads for the tenant, the opt-in default for every new project). |
 | `/api/quota` | Set ONLY a project's base quota (cpu/mem/lease limits + the optional queue cap), PRESERVING its self-service ceilings — the /api/quota base-quota editor. |
 | `/api/reload` | Ask the daemon to reload its fleet config on its next tick, by setting the flag it reads and clears. |
 | `/api/replication/cancel` | Cancel a REQUESTED replication job — CAS `REQUESTED → FAILED`, no teardown (a REQUESTED job never created a guest), stamping `guest_settled_at = now()` so the row is immediately prune-eligible. |
