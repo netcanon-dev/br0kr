@@ -30,12 +30,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from br0kr import reasons
+from br0kr import db, reasons
 
-# int8 (bigint) ceiling — lease_data_disk.req_disk_gb is a bigint column (0046), exactly like
-# lease.req_disk_gb; mirrors admission._BIGINT_MAX so an over-range size is a CLEAN reason here, never an
-# uncaught NumericValueOutOfRange escaping the child-row INSERT.
-_BIGINT_MAX = 9_223_372_036_854_775_807
+# lease_data_disk.req_disk_gb is a bigint column (0046), like lease.req_disk_gb: checked against db.INT8_MAX so an
+# over-range size is a CLEAN reason here, never an uncaught NumericValueOutOfRange escaping the child-row INSERT.
 # The default ceiling on data disks per lease — bounds the advisory-lock set + the PVE device slots (design
 # §11 open-decision #2: a hard default for the MVP, promotable to an operator_setting knob later).
 MAX_DATA_DISKS = 8
@@ -81,7 +79,7 @@ def validate_data_disks(
             return reasons.DATA_DISK_MALFORMED
         if isinstance(d.req_disk_gb, bool) or not isinstance(d.req_disk_gb, int):
             return reasons.DATA_DISK_MALFORMED
-        if d.req_disk_gb <= 0 or d.req_disk_gb > _BIGINT_MAX:
+        if d.req_disk_gb <= 0 or d.req_disk_gb > db.INT8_MAX:
             return reasons.DATA_DISK_MALFORMED
     return None
 

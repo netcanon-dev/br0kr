@@ -83,7 +83,7 @@ class _EnqCur:
         return (0,)                                       # depth counts
 
     def fetchall(self) -> list:
-        # the _LEASE_DATA_DISKS layout read on the ON-CONFLICT re-read path — the winner's stored layout
+        # the LEASE_DATA_DISKS layout read on the ON-CONFLICT re-read path — the winner's stored layout
         return list(self._disks)
 
 
@@ -626,8 +626,8 @@ def test_child_row_sql_wiring():
     assert "INSERT INTO lease_data_disk" in admission._INSERT_DATA_DISK
     for col in ("lease_id", "disk_index", "storage_id", "req_disk_gb"):
         assert col in admission._INSERT_DATA_DISK
-    assert "FROM lease_data_disk" in admission._LEASE_DATA_DISKS
-    assert "ORDER BY disk_index" in admission._LEASE_DATA_DISKS
+    assert "FROM lease_data_disk" in admission.LEASE_DATA_DISKS
+    assert "ORDER BY disk_index" in admission.LEASE_DATA_DISKS
     assert admission._FK_REASON["lease_data_disk_storage_id_fkey"] == "unknown_storage"
 
 

@@ -75,6 +75,9 @@ log = logging.getLogger(__name__)
 ACTIVE_STATES: tuple[str, ...] = statemachine.MIGRATION.live
 TERMINAL_STATES: tuple[str, ...] = statemachine.MIGRATION.terminal   # DONE, ABORTED: the saga is settled
 _PENDING_SQL = statemachine.MIGRATION.sql_in(ACTIVE_STATES)
+_TERMINAL_SQL = statemachine.MIGRATION.sql_in(TERMINAL_STATES)
+# REQUESTED, RESERVED: a migration that can still be cancelled, because its PDM migrate is not issued yet
+_CANCELLABLE_SQL = statemachine.MIGRATION.sql_in(tuple(s for s in ACTIVE_STATES if s != "MIGRATING"))
 _LIVE_LEASE_SQL = "(" + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")"
 
 # A reservation must outlive a slow cross-cluster copy; the daemon re-heartbeats it each step while
@@ -264,7 +267,7 @@ def _set_state(conn: psycopg.Connection[Any], mig_id: int, state: str, reason: s
     terminal transition is a no-op that simply re-reads the row."""
     conn.execute(
         "UPDATE migration SET state = %s, reason = %s, updated_at = now() "
-        "WHERE id = %s AND state NOT IN ('DONE','ABORTED')",
+        f"WHERE id = %s AND state NOT IN {_TERMINAL_SQL}",
         (state, reason, mig_id),
     )
     conn.commit()
@@ -350,7 +353,7 @@ def _set_migrate_upid(conn: psycopg.Connection[Any], mig_id: int, upid: str) -> 
     strictly inside it is the accepted residual (as for S02/S04)."""
     conn.execute(
         "UPDATE migration SET migrate_upid = %s, updated_at = now() "
-        "WHERE id = %s AND state NOT IN ('DONE','ABORTED') AND migrate_upid IS NULL",
+        f"WHERE id = %s AND state NOT IN {_TERMINAL_SQL} AND migrate_upid IS NULL",
         (upid, mig_id),
     )
     conn.commit()
@@ -483,7 +486,7 @@ def request_migration(
             raise   # a unique violation we don't model — never mask it
         active = conn.execute(
             "SELECT id, target_node, state FROM migration "
-            "WHERE lease_id = %s AND state IN ('REQUESTED','RESERVED','MIGRATING')",
+            f"WHERE lease_id = %s AND state IN {_PENDING_SQL}",
             (lease_id,)).fetchone()
         conn.commit()
         if active is None:
@@ -586,7 +589,7 @@ def cancel_migration(conn: psycopg.Connection[Any], migration_id: int) -> dict[s
     # `_actuate` commits `_set_state(MIGRATING)`, so ANY MIGRATING row may have a live copy and is refused.
     row = conn.execute(
         "UPDATE migration SET state = 'ABORTED', reason = 'operator_cancelled', updated_at = now() "
-        "WHERE id = %s AND state IN ('REQUESTED','RESERVED') RETURNING id",
+        f"WHERE id = %s AND state IN {_CANCELLABLE_SQL} RETURNING id",
         (migration_id,)).fetchone()
     conn.commit()
     if row is not None:

@@ -129,8 +129,8 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `dashboard.py` | Stdlib HTTP server: the read endpoints, and the auth, commit and audit around each operator action. | reads; via dashboard_actions, audit, auth | — | `unit/test_dashboard.py`, `integration/test_dashboard.py` |
 | `dashboard_actions.py` | The dashboard's POST actions: a body parser and a verb per path, and the outcome-aware audit tables. | via admin, gateway, actas, pin, replication, settings | — | `unit/test_dashboard.py`, `unit/test_api_reference.py` |
 | `dashboard_page.py` | The dashboard's HTML page and CSS, and the hashed path of its client script, `static/dashboard.js`. | — | — | `unit/test_dashboard.py`, `integration/test_dashboard_client.py` |
-| `db.py` | The one connection seam: READ COMMITTED pin, keepalives, retry, pools. | — | — | `unit/test_db.py`, `harness_ledger_ha.py` |
-| `driver.py` | The driver contract: every call the engine makes on a node driver, as a Protocol `pve.Pve` satisfies. | — | — | `unit/test_driver.py` |
+| `db.py` | The one connection seam: READ COMMITTED pin, keepalives, retry, pools; the integer column ceilings. | — | — | `unit/test_db.py`, `harness_ledger_ha.py` |
+| `driver.py` | The driver contract: every call the engine makes on a node driver, as a Protocol `pve.Pve` satisfies, and the destroy verdicts. | — | — | `unit/test_driver.py` |
 | `envelope.py` | Adds `ok` and a `reason` to every MCP tool answer. | — | — | `unit/test_envelope.py` |
 | `gateway.py` | Transport-agnostic agent verbs: request, schedule, renew, release, status, jobs. | writes self-quota; via admission, lease, jobs | — | `unit/test_gateway.py`, `harness_gateway.py` |
 | `imgbuild.py` | Pure template-download checks: source allowlist, SHA-256 format, names. | — | — | `unit/test_imgbuild.py` |

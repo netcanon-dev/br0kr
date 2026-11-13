@@ -1519,3 +1519,18 @@ def test_data_disk_reasons_all_map_to_a_hold_at_recheck():
     for reason in ("unknown_storage", placement.STORAGE_UNBOUND, placement.STORAGE_UNREACHABLE,
                    placement.STORAGE_NOT_CAPABLE):
         assert reason in placement._HOLD_FOR_REFUSAL
+
+
+def test_live_instance_states_are_the_states_the_live_uniq_index_counts():
+    """placement.LIVE_INSTANCE_STATES, the template-instance states admin and replication treat as a live copy, are
+    exactly the states migration 0032's template_instance_live_uniq index covers. Guards the Python list and the
+    index disagreeing, which would let a delete or a new copy miss (or wrongly count) a live one (review CODE-06)."""
+    import re
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parents[2] / "db" / "migrations" / "0032_template_instances.sql").read_text(
+        encoding="utf-8")
+    index = sql[sql.index("template_instance_live_uniq"):]
+    m = re.search(r"WHERE instance_state IN \(([^)]*)\)", index)
+    assert m, "the live_uniq index predicate moved"
+    assert {s.strip(" '") for s in m.group(1).split(",")} == set(placement.LIVE_INSTANCE_STATES)
+    assert placement.LIVE_INSTANCE_IN == "('READY','REPLICATING')"

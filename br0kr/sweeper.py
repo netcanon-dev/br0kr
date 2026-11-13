@@ -64,7 +64,7 @@ from typing import Any
 import psycopg
 
 from br0kr import lease, replication
-from br0kr.driver import Driver
+from br0kr.driver import DESTROYED, FENCE_MISMATCH, GONE, Driver
 from br0kr.logging_setup import generate_correlation_id, push_context
 
 log = logging.getLogger(__name__)
@@ -260,9 +260,9 @@ def orphan_sweep(
                 log.exception("clone-orphan reclaim failed for vmid %s — will retry next sweep", vmid,
                               extra={"vmid": vmid})
                 continue
-            if rc == "destroyed":
+            if rc == DESTROYED:
                 summary.clone_reclaimed += 1
-            elif rc != "gone":
+            elif rc != GONE:
                 summary.clone_refused += 1   # fence_appeared / repl_fence_appeared / not_clone / is_template — spared
 
         # ── Phase 2b: reclaim LEAKED replication copies (§6.6) — a guest carrying a `br0kr-repl-<id>` fence that
@@ -300,7 +300,7 @@ def orphan_sweep(
                 log.exception("repl-orphan reclaim failed for vmid %s (job %s) — will retry next sweep", vmid,
                               rid, extra={"vmid": vmid, "replication_id": rid})
                 continue
-            if rc == "fence_mismatch":
+            if rc == FENCE_MISMATCH:
                 summary.repl_refused += 1   # the vmid was reused under us since the scan — left alone
             else:
                 replication.stamp_repl_guest_settled(conn, rid)   # 'destroyed'/'gone' → the guest is gone → prunable
@@ -347,7 +347,7 @@ def orphan_sweep(
                 log.exception("orphan destroy failed for vmid %s (lease %s) — will retry next sweep",
                               vmid, lease_id, extra={"lease_id": lease_id, "vmid": vmid})
                 continue
-            if rc == "fence_mismatch":
+            if rc == FENCE_MISMATCH:
                 summary.refused += 1   # vmid reused under a new lease since the scan; leave it
             else:
                 summary.destroyed += 1  # "destroyed" or "gone" — the orphan is no longer running

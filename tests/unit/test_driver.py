@@ -72,3 +72,21 @@ def test_no_engine_module_types_a_driver_as_the_concrete_class():
         bad += [f"{path.name}:{n.lineno} imports Pve" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
                 and n.module == "br0kr.pve" and any(a.name == "Pve" for a in n.names)]
     assert not bad, f"annotations that name pve.Pve instead of driver.Driver: {bad}"
+
+
+def test_the_engine_names_the_destroy_verdicts_instead_of_spelling_them():
+    """The destroy verdicts are named once, in br0kr/driver.py, with their wire values pinned, and pve.py and the
+    engine modules that branch on them (replication, sweeper, reconciler) use the names: no verdict string is
+    returned or compared in their code. Guards a verdict spelled out again, where a renamed or retyped value would
+    silently stop matching and a teardown could treat a refusal as success (review CODE-06)."""
+    vocab = {"DESTROYED": "destroyed", "GONE": "gone", "FENCE_MISMATCH": "fence_mismatch", "DESTROY": "destroy",
+             "FENCE_APPEARED": "fence_appeared", "REPL_FENCE_APPEARED": "repl_fence_appeared",
+             "NOT_CLONE": "not_clone", "IS_TEMPLATE": "is_template"}
+    assert {name: getattr(driver, name) for name in vocab} == vocab
+    for module in ("pve", "replication", "sweeper", "reconciler"):
+        tree = ast.parse((Path(pve.__file__).resolve().parent / f"{module}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Return, ast.Compare, ast.IfExp)):
+                for lit in ast.walk(node):
+                    assert not (isinstance(lit, ast.Constant) and lit.value in vocab.values()), (
+                        f"br0kr/{module}.py line {lit.lineno} spells the verdict {lit.value!r}")

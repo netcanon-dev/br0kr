@@ -728,7 +728,7 @@ def request_template_download(
         conn.commit()
         return {"build_id": None, "requested": False, "reason": reasons.TEMPLATE_EXISTS}
     if conn.execute(
-        "SELECT 1 FROM template_build WHERE target_template_id = %s AND state NOT IN ('READY','FAILED') "
+        f"SELECT 1 FROM template_build WHERE target_template_id = %s AND state NOT IN {imgbuild.TERMINAL_IN} "
         "LIMIT 1", (target_template_id,)).fetchone() is not None:
         conn.commit()
         return {"build_id": None, "requested": False, "reason": reasons.BUILD_IN_PROGRESS}

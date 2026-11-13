@@ -15,7 +15,7 @@ through the MODULE, so the proof covers the shipped code path.
   sequential_last_slot    a data disk debits ACROSS leases: after one takes 40 of 60, a second 30-ask is refused.
   concurrent_one_winner   TWO simultaneous multi-disk admits each needing 40 of a 60 GB DATA pool → EXACTLY one
                           admits (the storage:{pool} lock in the widened SET serializes them; without it both fit).
-  release_frees_the_pool  releasing a multi-disk lease returns its data bytes to the pool (the _ACTIVE_SQL filter).
+  release_frees_the_pool  releasing a multi-disk lease returns its data bytes to the pool (the CAPACITY_SQL filter).
   idempotency_layout      admit: same key + same layout → idempotent replay (one lease); same key + a DIFFERENT
                           data layout → idem_key_conflict (the layout is part of the ask, finding #4).
   concurrent_same_key     N simultaneous admits of the SAME key + SAME layout collapse to ONE lease with ONE
@@ -200,7 +200,7 @@ def main() -> int:
     check("concurrent_one_winner exactly 1 of 20 admits", admitted == 1 and db == 1, f"admitted={admitted} db={db}")
     check("concurrent_one_winner exactly 1 child row (no orphan debit)", disks == 1, f"disks={disks}")
 
-    # ── releasing a multi-disk lease frees its data bytes (the _ACTIVE_SQL filter) ──
+    # ── releasing a multi-disk lease frees its data bytes (the CAPACITY_SQL filter) ──
     reset_leases(); set_pool("poolA", 60)
     with connect() as c:
         r = admission.admit(c, req("rel", storage_id="poolBIG", disk=100, data=(DataDisk("poolA", 40),)))

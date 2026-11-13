@@ -156,14 +156,6 @@ def is_due(state: str, expires_at: datetime, now: datetime, *, pinned: bool = Fa
     return not pinned and state in LIVE_STATES and expires_at <= now
 
 
-def is_queue_expired(state: str, expires_at: datetime, now: datetime) -> bool:
-    """True if the reaper should expire a QUEUED lease: it is still PENDING AND its (renewable
-    heartbeat / queue_deadline-capped) deadline has passed. A PENDING lease holds no capacity and has no
-    guest, so expiry is a pure state change to REJECTED (queue_timeout), never a teardown. A spot the
-    agent has heartbeated has expires_at in the future and is not expired (heartbeat-to-hold)."""
-    return state == "PENDING" and expires_at <= now
-
-
 def next_expiry(now: datetime, ttl_seconds: int) -> datetime:
     """The deadline a heartbeat/admission sets: now + ttl. Pure mirror of the SQL
     `now() + make_interval(secs => ttl_seconds)` so the math is unit-testable."""

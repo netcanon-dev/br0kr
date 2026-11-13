@@ -59,7 +59,7 @@ import psycopg
 import requests
 
 from br0kr import build, cloudinit, imgbuild, lease, nodes, placement, pve
-from br0kr.driver import Driver
+from br0kr.driver import GONE, Driver
 
 log = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ def _best_effort_destroy(driver: Driver, vmid: int, lease_id: int,
             break
         except Exception:
             log.warning("fenced_destroy retry for vmid %s (lease %s)", vmid, lease_id,
-                        extra={"lease_id": lease_id, "vmid": vmid})
+                        extra={"lease_id": lease_id, "vmid": vmid}, exc_info=True)
     log.error("ORPHAN RISK: could not destroy guest vmid %s for terminal lease %s — orphan sweep must reclaim",
               vmid, lease_id, extra={"lease_id": lease_id, "vmid": vmid})
 
@@ -224,7 +224,7 @@ def _read_landed_pool(
             # stalling read-back. Never a false mismatch, never a teardown of a healthy guest.
             log.warning("data disk %s for lease %s vmid %s on %s: read-back failed (transient) — landed-pool "
                         "assertion SKIPPED, proceeding", target.disk_index, lease_id, vmid, device,
-                        extra={"lease_id": lease_id, "vmid": vmid})
+                        extra={"lease_id": lease_id, "vmid": vmid}, exc_info=True)
             return None
         if landed is not None:
             return landed
@@ -384,7 +384,7 @@ def _build_via_clone(
         except Exception:
             log.warning("net0 assertion SKIPPED for lease %s vmid %s — node network read failed (transient); "
                         "proceeding (pair stays unverified)", lease_id, vmid,
-                        extra={"lease_id": lease_id, "vmid": vmid})
+                        extra={"lease_id": lease_id, "vmid": vmid}, exc_info=True)
             bridges = None
         if bridges is pve.ACL_FORBIDDEN:
             log.warning("net0 assertion SKIPPED for lease %s vmid %s — node network list ACL-denied; proceeding",
@@ -458,7 +458,7 @@ def _destroy_build(driver: Driver, vmid: int, build_id: int) -> None:
             break
         except Exception:
             log.warning("destroy_build_vm retry for build %s vmid %s", build_id, vmid,
-                        extra={"build_id": build_id, "vmid": vmid})
+                        extra={"build_id": build_id, "vmid": vmid}, exc_info=True)
     log.error("ORPHAN RISK: could not destroy build %s vmid %s — build will be marked terminal; operator "
               "cleanup required (the stale-build reclaim does not revisit terminal builds)", build_id,
               vmid, extra={"build_id": build_id, "vmid": vmid})
@@ -479,11 +479,11 @@ def _free_import_source(driver: Driver, storage: str, filename: str, *, subject:
         rc = driver.free_import_volume(storage, filename, on_progress=on_progress)
         if rc == "freed":
             log.info("%s reaped import source %s:import/%s", subject, storage, filename, extra=extra)
-        elif rc == "gone" and expect_present:
+        elif rc == GONE and expect_present:
             log.warning("%s import source %s:import/%s was already GONE right after import — a wrong volid "
                         "or endpoint drift may be silently disabling the reap", subject, storage, filename,
                         extra=extra)
-        elif rc == "gone":
+        elif rc == GONE:
             log.info("%s import source %s:import/%s already gone", subject, storage, filename, extra=extra)
     except requests.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else "?"
@@ -757,7 +757,7 @@ def build_template(
         driver.finalize_template(vmid)
     except Exception:
         log.warning("build %s: stripping the build fence on vmid %s failed — harmless (template=1, build "
-                    "terminal); leaving it", bid, vmid, extra={"build_id": bid, "vmid": vmid})
+                    "terminal); leaving it", bid, vmid, extra={"build_id": bid, "vmid": vmid}, exc_info=True)
     log.info("template build %s complete -> catalog %s (vmid %s)", bid, job.target_template_id, vmid,
              extra={"build_id": bid, "vmid": vmid, "template": job.target_template_id})
     return BuildOutcome(bid, vmid, "ready", None)
@@ -943,7 +943,8 @@ def provision_lease(
                 landed = driver.boot_disk_storage(vmid)
         except Exception:
             log.warning("post-clone assertion SKIPPED for lease %s vmid %s — config re-read failed (transient); "
-                        "pair stays unverified", lease_id, vmid, extra={"lease_id": lease_id, "vmid": vmid})
+                        "pair stays unverified", lease_id, vmid, extra={"lease_id": lease_id, "vmid": vmid},
+                        exc_info=True)
             landed = None
         if landed is not None and landed != clone_storage:
             log.error("CROSS-PROVISION DETECTED: lease %s vmid %s boot disk landed on %r, expected %r — "

@@ -47,6 +47,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **Cleanups: one home each for the integer column ceilings (`db`) and the capacity states (`admission.CAPACITY_SQL`).**
+  Job SQL names its state lists; the destroy verdicts are named in `driver.py`; one dead helper is gone (CODE-06).
 - **Which capability is on which surface is a table: `tests/unit/test_surface_parity.py`.** Each MCP tool and
   dashboard action has a row, and a side it lacks says why; a new one fails until it has a row (CODE-05).
 - **Agent polish: `whoami` lists the tools the token may call (`can`); `set_quota` takes any of its three
@@ -106,6 +108,8 @@ resolve in this repository.
   more release, then goes (review UX-03).
 
 ### Fixed
+- **The OAuth shim drops a client that hung up mid-reply quietly.** A BrokenPipe while writing an error reply
+  logged an ERROR stack (a CI flake); it is now one INFO line naming only the path (CODE-06).
 - **A standby whose replication slot is lost or gone re-clones itself on its next start** (REL-06), only when the
   primary provably holds all its data; otherwise it refuses and keeps them. `BR0KR_STANDBY_AUTO_RECLONE` (bundled 1).
 - **A leader that loses its ledger session stops mid-tick, not after it** (REL-05). The heartbeat re-checks leadership

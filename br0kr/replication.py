@@ -35,7 +35,7 @@ import psycopg
 import requests
 
 from br0kr import admission, imgbuild, lease, placement, pve, reasons, reconciler, statemachine
-from br0kr.driver import Driver
+from br0kr.driver import FENCE_MISMATCH, GONE, Driver
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ def plan_replication(
     # up-front reason is better than a UniqueViolation surprise) — covers the source-pool == target-pool no-op.
     if conn.execute(
         "SELECT 1 FROM template_instance WHERE template_id = %s AND cluster_id = %s AND storage_id = %s "
-        "AND instance_state IN ('READY','REPLICATING')",
+        f"AND instance_state IN {placement.LIVE_INSTANCE_IN}",
         (template_id, target_cluster_id, target_storage_id)).fetchone() is not None:
         return {"ok": False, "reason": "already_present"}
     # The clone SOURCE. Candidates are USABLE copies — READY + node-hosted + their OWN (storage, node) reaches
@@ -236,7 +236,7 @@ def plan_rebuild_source(
         return {"ok": False, "reason": "storage_wrong_cluster"}
     if conn.execute(
         "SELECT 1 FROM template_instance WHERE template_id = %s AND cluster_id = %s AND storage_id = %s "
-        "AND instance_state IN ('READY','REPLICATING')",
+        f"AND instance_state IN {placement.LIVE_INSTANCE_IN}",
         (template_id, target_cluster_id, target_storage_id)).fetchone() is not None:
         return {"ok": False, "reason": "already_present"}
     # Content-capability gate (0041, PR-A) — a TARGET-POOL property, checked BEFORE searching for a rebuild node (a
@@ -479,8 +479,8 @@ def prune_replications(
     # free-fan-out hole). The instance must be retired/deleted first (delete_template_instance), after which the job
     # becomes prunable — the decommission ordering delete_storage/delete_cluster already enforce.
     live_instance = ("AND NOT EXISTS (SELECT 1 FROM template_instance ti WHERE ti.replication_id = "
-                     "template_replication.id AND ti.instance_state IN ('READY','REPLICATING'))")
-    eligible = (f"SELECT id FROM template_replication WHERE job_state IN ('READY','FAILED') "
+                     f"template_replication.id AND ti.instance_state IN {placement.LIVE_INSTANCE_IN})")
+    eligible = (f"SELECT id FROM template_replication WHERE job_state IN {TERMINAL_IN} "
                 f"AND guest_settled_at IS NOT NULL "
                 f"AND updated_at < now() - make_interval(days => %s){cpred} {live_instance}")
     # 0. FAST-FAIL any PENDING waiter still parked behind a now-FAILED job BEFORE severing its link — else the
@@ -495,7 +495,7 @@ def prune_replications(
                  (older_than_days, *cparam))
     # 2. Delete the settled terminal old jobs.
     cur = conn.execute(
-        f"DELETE FROM template_replication WHERE job_state IN ('READY','FAILED') "
+        f"DELETE FROM template_replication WHERE job_state IN {TERMINAL_IN} "
         f"AND guest_settled_at IS NOT NULL AND updated_at < now() - make_interval(days => %s){cpred} {live_instance}",
         (older_than_days, *cparam))
     n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
@@ -524,6 +524,10 @@ _ADVANCE_STATES: tuple[str, ...] = tuple(s for s in statemachine.REPLICATION.liv
 _RECLAIM_STATES: tuple[str, ...] = tuple(s for s in statemachine.REPLICATION.live if s != "REQUESTED")
 _ADVANCE_IN = "(" + ",".join(f"'{s}'" for s in _ADVANCE_STATES) + ")"
 _RECLAIM_IN = "(" + ",".join(f"'{s}'" for s in _RECLAIM_STATES) + ")"
+# The settled job states, and the two in which the data plane is copying or converting (it holds the target vmid).
+TERMINAL_IN = statemachine.REPLICATION.sql_in(statemachine.REPLICATION.terminal)
+_COPY_STATES: tuple[str, ...] = tuple(s for s in _ADVANCE_STATES if s != "REQUESTED")   # COPYING, CONVERTING
+_COPY_IN = statemachine.REPLICATION.sql_in(_COPY_STATES)
 
 # Data-plane tunables (the daemon seeds these from env; the reservation TTL derives from the stale cutoff so it
 # always EXCEEDS it — a daemon-down gap shorter than the TTL can never reap the reservation out from under a
@@ -860,7 +864,7 @@ def _touch(conn: psycopg.Connection[Any], job_id: int) -> None:
     COPYING/CONVERTING so it never resurrects a terminal/RECLAIMING row's timestamp. The wall-clock cap
     (`copy_started_at`) remains the backstop for a polling-but-never-progressing wedge. Commits."""
     conn.execute("UPDATE template_replication SET updated_at = now() "
-                 "WHERE id = %s AND job_state IN ('COPYING','CONVERTING')", (job_id,))
+                 f"WHERE id = %s AND job_state IN {_COPY_IN}", (job_id,))
     conn.commit()
 
 
@@ -899,7 +903,7 @@ def _mint_vmid(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Drive
         try:
             jrow = conn.execute(
                 "UPDATE template_replication SET vmid = %s, updated_at = now() "
-                "WHERE id = %s AND vmid IS NULL AND job_state IN ('COPYING','CONVERTING') RETURNING id",
+                f"WHERE id = %s AND vmid IS NULL AND job_state IN {_COPY_IN} RETURNING id",
                 (vmid, job.id)).fetchone()
             if jrow is None:
                 conn.commit()
@@ -992,7 +996,7 @@ def _mark_failed(conn: psycopg.Connection[Any], job_id: int, error: str, *, sett
     row = conn.execute(
         "UPDATE template_replication SET job_state = 'FAILED', error = %s, "
         "  guest_settled_at = CASE WHEN %s THEN now() ELSE guest_settled_at END, updated_at = now() "
-        "WHERE id = %s AND job_state NOT IN ('READY','FAILED') RETURNING id",
+        f"WHERE id = %s AND job_state NOT IN {TERMINAL_IN} RETURNING id",
         (redact_text(error)[:500], settled, job_id)).fetchone()
     if row is not None:
         conn.execute("UPDATE template_instance SET instance_state = 'FAILED' "
@@ -1120,7 +1124,7 @@ def force_fail_replication(conn: psycopg.Connection[Any], replication_id: int, r
         "WITH prev AS (SELECT id, job_state AS prior_state, vmid FROM template_replication WHERE id = %s), "
         "     upd AS (UPDATE template_replication SET job_state = 'FAILED', error = %s, updated_at = now(), "
         "             guest_settled_at = CASE WHEN vmid IS NULL THEN now() ELSE guest_settled_at END "
-        "             WHERE id = (SELECT id FROM prev) AND job_state NOT IN ('READY','FAILED') RETURNING id) "
+        f"             WHERE id = (SELECT id FROM prev) AND job_state NOT IN {TERMINAL_IN} RETURNING id) "
         "SELECT prev.prior_state, prev.vmid, (upd.id IS NOT NULL) FROM prev LEFT JOIN upd ON prev.id = upd.id",
         (replication_id, err)).fetchone()
     if row is None:
@@ -1166,7 +1170,7 @@ def _teardown_transient(job: ReplicationJob, driver: Driver,
     #    fenced_destroy on an adopted-then-refused guest would still read fence_mismatch, but the explicit skip
     #    also avoids the wasted stop+DELETE attempt on a foreign guest.
     if (driver.exists(job.vmid)
-            and driver.stamp_repl_fence(job.vmid, job.id, expected_name=_replica_name(job)) == "fence_mismatch"):
+            and driver.stamp_repl_fence(job.vmid, job.id, expected_name=_replica_name(job)) == FENCE_MISMATCH):
         return "settled"   # provably not ours (foreign guest / stripped template) — leave it untouched
     driver.fenced_destroy_replica(job.vmid, job.id, on_progress=on_progress)   # 'destroyed'/'gone'/'fence_mismatch'
     return "settled"
@@ -1187,7 +1191,7 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
     advance-path reclaim keeps the daemon's liveness heartbeat fresh (S04/F3)."""
     claim = conn.execute(
         "UPDATE template_replication SET job_state = 'RECLAIMING', updated_at = now() "
-        "WHERE id = %s AND job_state IN ('COPYING','CONVERTING') RETURNING vmid", (job.id,)).fetchone()
+        f"WHERE id = %s AND job_state IN {_COPY_IN} RETURNING vmid", (job.id,)).fetchone()
     conn.commit()
     if claim is None:
         # Lost the claim: the job is already terminal — a READY overlap winner (its guest is the finished catalog
@@ -1201,7 +1205,7 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
             result = _teardown_transient(fresh, driver, on_progress=on_progress)
         except Exception:
             log.warning("replication %s reclaim destroy raised — leaving RECLAIMING for the stale reclaim",
-                        job.id, extra={"replication_id": job.id, "vmid": vmid})
+                        job.id, extra={"replication_id": job.id, "vmid": vmid}, exc_info=True)
             return False
         if result == "unresolved":
             log.warning("replication %s reclaim: clone still materializing — leaving RECLAIMING for the next "
@@ -1358,11 +1362,11 @@ def _do_copy(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver,
     # recycled/collided vmid (upid lost → we didn't clone it) is refused rather than adopted. fence_mismatch =
     # the vmid is another guest's / not our clone → settle, do NOT destroy (it isn't ours).
     stamp = driver.stamp_repl_fence(vmid, job.id, expected_name=_replica_name(job))
-    if stamp == "fence_mismatch":
+    if stamp == FENCE_MISMATCH:
         _mark_failed(conn, job.id, "fence_mismatch_after_clone", settled=True)
         _settle_by_key(conn, job.id)
         return _refresh(conn, job.id)
-    if stamp == "gone":
+    if stamp == GONE:
         _mark_failed(conn, job.id, "clone_vanished", settled=True)   # nothing to destroy
         _settle_by_key(conn, job.id)
         return _refresh(conn, job.id)
@@ -1549,14 +1553,14 @@ def _do_copy_rebuild(conn: psycopg.Connection[Any], job: ReplicationJob, driver:
     # stamped it in the create) → idempotent re-stamp (adds the marker); an ADOPTED guest is identity-gated on
     # _replica_name (never a foreign guest).
     stamp = driver.stamp_repl_fence(vmid, job.id, expected_name=_replica_name(job))
-    if stamp == "fence_mismatch":
+    if stamp == FENCE_MISMATCH:
         # NO reap: fence_mismatch means the guest is FOREIGN (a vmid collision), so on the adopt path (the
         # download was NOT re-waited this pass) our download could STILL be running — a blind free would race
         # PVE's post-verify volid rename (404 → the file lands after). Left as a named residual, not reaped.
         _mark_failed(conn, job.id, "fence_mismatch_after_rebuild", settled=True)
         _settle_by_key(conn, job.id)
         return _refresh(conn, job.id)
-    if stamp == "gone":
+    if stamp == GONE:
         # NO reap: same soundness gap as fence_mismatch — a guest that vanished on the adopt path cannot prove
         # OUR download settled, so freeing here could race a still-running download. A named residual.
         _mark_failed(conn, job.id, "rebuild_vanished", settled=True)   # nothing to destroy
@@ -1602,7 +1606,7 @@ def _finalize(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver
         return _refresh(conn, job.id)
     assert job.vmid is not None
     rc = driver.make_replica_template(job.vmid, job.id, on_progress=on_progress)
-    if rc == "fence_mismatch":
+    if rc == FENCE_MISMATCH:
         _mark_failed(conn, job.id, "fence_mismatch_at_convert", settled=True)   # vmid changed hands → don't destroy
         _settle_by_key(conn, job.id)
         return _refresh(conn, job.id)
@@ -1621,7 +1625,7 @@ def _finalize(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver
         _stamp_settled(conn, job.id)
     except Exception:
         log.warning("replication %s: post-READY fence strip failed — the finalize-retry step re-drives it",
-                    job.id, extra={"replication_id": job.id, "vmid": job.vmid})
+                    job.id, extra={"replication_id": job.id, "vmid": job.vmid}, exc_info=True)
     log.info("replication %s COMPLETE: template %s copied to cluster %s pool %s (vmid %s)", job.id,
              job.template_id, job.target_cluster_id, job.target_storage_id, job.vmid,
              extra={"replication_id": job.id, "vmid": job.vmid})
@@ -1629,9 +1633,9 @@ def _finalize(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver
 
 
 def list_advanceable(conn: psycopg.Connection[Any], limit: int = 20) -> list[ReplicationJob]:
-    """The non-terminal jobs the leader's replicate step (`tick_copies.run_replications`) should advance
-    (REQUESTED/COPYING/CONVERTING), oldest first. RECLAIMING jobs are NOT here — they are the stale-reclaim
-    step's. A plain read; commits."""
+    """The non-terminal jobs `run_pending_replications` advances for the leader's replicate step
+    (`tick_copies.run_replications`): REQUESTED/COPYING/CONVERTING, oldest first. RECLAIMING jobs are NOT here —
+    they are the stale-reclaim step's. A plain read; commits."""
     rows = conn.execute(
         f"SELECT {_JOB_COLS} FROM template_replication WHERE job_state IN {_ADVANCE_IN} "
         f"ORDER BY created_at, id LIMIT %s", (max(1, int(limit)),)).fetchall()
@@ -1725,6 +1729,7 @@ def reclaim_stale_replications(
             driver.finalize_template(vmid)
             _stamp_settled(conn, rid)
         except Exception:
+            # no traceback: a stuck row repeats this every sweep, and the first strip failure already logged one
             log.warning("replication %s finalize-retry: fence strip still failing (vmid %s)", rid, vmid,
                         extra={"replication_id": rid, "vmid": vmid})
     # 1b. LEAKED-guest reclaim: a FAILED job that still carries a stamped vmid with guest_settled_at
@@ -1760,7 +1765,7 @@ def reclaim_stale_replications(
             result = _teardown_transient(fresh, driver, on_progress=on_progress)
         except Exception:
             log.warning("replication %s leaked-guest reclaim raised (vmid %s) — leaving unsettled for the next "
-                        "cutoff", rid, fresh.vmid, extra={"replication_id": rid, "vmid": fresh.vmid})
+                        "cutoff", rid, fresh.vmid, extra={"replication_id": rid, "vmid": fresh.vmid}, exc_info=True)
             continue
         if result == "unresolved":
             log.warning("replication %s leaked-guest reclaim: clone still materializing (vmid %s) — next cutoff",
@@ -1797,7 +1802,7 @@ def reclaim_stale_replications(
                 result = _teardown_transient(fresh, driver, on_progress=on_progress)
             except Exception:
                 log.warning("replication %s reclaim destroy raised (vmid %s) — leaving RECLAIMING for the next "
-                            "cutoff", job.id, claim.vmid, extra={"replication_id": job.id})
+                            "cutoff", job.id, claim.vmid, extra={"replication_id": job.id}, exc_info=True)
                 continue   # non-terminal — retry next cutoff
             if result == "unresolved":
                 log.warning("replication %s reclaim: clone still materializing (vmid %s) — leaving RECLAIMING "

@@ -36,7 +36,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import cloudinit, multidisk, placement, reasons, settings
+from br0kr import cloudinit, db, multidisk, placement, reasons, settings
 from br0kr.lease import LIVE_STATES, data_disks_for, promote_to_admitted
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,9 @@ log = logging.getLogger(__name__)
 # Public so the scheduler (br0kr/scheduler.py) reads candidate headroom with the SAME
 # definition the admission transaction debits by — one source of truth, no drift.
 CAPACITY_STATES: tuple[str, ...] = ("ADMITTED", "PROVISIONING", "ACTIVE", "RELEASING")
-_ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
+# CAPACITY_STATES as a SQL IN-list, the one home for it (review CODE-06): inventory and the scheduler debit-read
+# by the same states admission debits by.
+CAPACITY_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
 
 # A key can be idempotently REPLAYED while its lease is still usable: a live grant (LIVE_STATES) OR a
 # PENDING queued spot. A RELEASING or terminal (RELEASED/REJECTED/RELEASE_FAILED) lease is gone, so its
@@ -71,10 +73,10 @@ _LOOKUP = ("SELECT id, state, node_id, req_cpu, req_mem_mb, storage_id, req_disk
 # and admit() never scans the whole (never-pruned) lease history under its advisory locks (review
 # PERF-01). The FILTERs stay, so the sums are provably unchanged; harness_admission checks the plans.
 _NODE_AVAIL = f"""
-  SELECT n.cpu_total    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
-         n.mem_total_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
+  SELECT n.cpu_total    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {CAPACITY_SQL}), 0),
+         n.mem_total_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0),
          n.cordoned, n.cluster_id
-  FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL}
+  FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {CAPACITY_SQL}
   WHERE n.id = %s GROUP BY n.id
 """
 # Per-project image governance (phase A3), re-checked at PROMOTE time only: is the chosen template usable by
@@ -99,18 +101,18 @@ _TEMPLATE_GOVERNED = (
 # an undercount is the unsafe direction). Read by _locked_fit, the core admit() and promote_pinned() share;
 # inventory mirrors it.
 # The THIRD subtraction (0046, the multi-disk arc) floors every ACTIVE lease's DATA disks (lease_data_disk)
-# landing on the pool — the SAME _ACTIVE_SQL filter as the boot-lease term, so a data byte is counted
+# landing on the pool — the SAME CAPACITY_SQL filter as the boot-lease term, so a data byte is counted
 # identically (never the undercount). INERT today: the arc's admit writer that inserts lease_data_disk rows
 # lands in a later PR, so this sums an EMPTY table and is byte-identical — shipped now, BEFORE any writer, so
 # the derived pool headroom is correct against any future data-disk row (fail-safe ordering). Inventory mirrors it.
 _STORAGE_AVAIL = f"""
   SELECT s.total_gb
-         - COALESCE(SUM(l.req_disk_gb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0)
+         - COALESCE(SUM(l.req_disk_gb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0)
          - COALESCE((SELECT sum(ti.size_gb) FROM template_instance ti
                      WHERE ti.storage_id = s.id AND ti.instance_state = 'READY'), 0)
          - COALESCE((SELECT sum(d.req_disk_gb) FROM lease_data_disk d JOIN lease l2 ON l2.id = d.lease_id
-                     WHERE d.storage_id = s.id AND l2.state IN {_ACTIVE_SQL}), 0)
-  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id AND l.state IN {_ACTIVE_SQL}
+                     WHERE d.storage_id = s.id AND l2.state IN {CAPACITY_SQL}), 0)
+  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id AND l.state IN {CAPACITY_SQL}
   WHERE s.id = %s GROUP BY s.id
 """
 # Cluster headroom = Σ(node limits in the cluster) − Σ(active leases on those nodes). The two
@@ -120,10 +122,10 @@ _CLUSTER_AVAIL = f"""
   SELECT
     (SELECT COALESCE(SUM(cpu_total), 0)    FROM node WHERE cluster_id = %(cid)s)
     - (SELECT COALESCE(SUM(l.req_cpu), 0)    FROM lease l JOIN node n ON l.node_id = n.id
-       WHERE n.cluster_id = %(cid)s AND l.state IN {_ACTIVE_SQL}),
+       WHERE n.cluster_id = %(cid)s AND l.state IN {CAPACITY_SQL}),
     (SELECT COALESCE(SUM(mem_total_mb), 0) FROM node WHERE cluster_id = %(cid)s)
     - (SELECT COALESCE(SUM(l.req_mem_mb), 0) FROM lease l JOIN node n ON l.node_id = n.id
-       WHERE n.cluster_id = %(cid)s AND l.state IN {_ACTIVE_SQL})
+       WHERE n.cluster_id = %(cid)s AND l.state IN {CAPACITY_SQL})
 """
 # Per-tenant availability: project limit − Σ active leases for that project, ACROSS ALL nodes
 # (the quota is global, not per-node). Three derived figures in one read — cpu, mem, and the
@@ -131,11 +133,11 @@ _CLUSTER_AVAIL = f"""
 # capacity-counting rows; the LEFT JOIN's null-state row for a project with no leases fails the
 # filter, so an idle project reads its full limit. None if the project id is unknown.
 _PROJECT_AVAIL = f"""
-  SELECT p.cpu_limit    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
-         p.mem_limit_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
-         p.max_leases   - COALESCE(COUNT(*)          FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0),
+  SELECT p.cpu_limit    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {CAPACITY_SQL}), 0),
+         p.mem_limit_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0),
+         p.max_leases   - COALESCE(COUNT(*)          FILTER (WHERE l.state IN {CAPACITY_SQL}), 0),
          p.cpu_limit_max, p.mem_limit_mb_max, p.max_leases_max
-  FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {_ACTIVE_SQL}
+  FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {CAPACITY_SQL}
   WHERE p.id = %s GROUP BY p.id
 """
 _INSERT = """
@@ -182,7 +184,7 @@ _INSERT_DATA_DISK = (
 # A lease's data-disk ask, ORDERED by disk_index so the stored layout compares POSITIONALLY against the
 # submitted ask tuple. Read by the idempotency comparator's CALLER (finding #4 — keep _same_ask pure) and by
 # promote_pinned (to reconstruct the ask for the multi-pool lock set + aggregated re-debit).
-_LEASE_DATA_DISKS = (
+LEASE_DATA_DISKS = (
     "SELECT storage_id, req_disk_gb FROM lease_data_disk WHERE lease_id = %s ORDER BY disk_index")
 
 
@@ -305,10 +307,9 @@ def scope_keys(node_id: str, storage_id: str | None, project_id: str | None = No
     return sorted(set(keys))
 
 
-# Ledger column ceilings — an agent-supplied amount ABOVE these would escape the lease INSERT as an uncaught
-# NumericValueOutOfRange instead of a clean reason. Same convention as admin.py's _BIGINT_MAX/_INT_MAX.
-_BIGINT_MAX = 9_223_372_036_854_775_807   # int8: lease.req_mem_mb / lease.req_disk_gb
-_INT_MAX = 2_147_483_647                   # int4: lease.ttl_seconds (+ the expires_at trigger's make_interval)
+# Ledger column ceilings (db.INT8_MAX: lease.req_mem_mb / req_disk_gb; db.INT4_MAX: lease.ttl_seconds and the
+# expires_at trigger's make_interval): an agent-supplied amount above them would escape the lease INSERT as an
+# uncaught NumericValueOutOfRange instead of a clean reason.
 
 
 def validate(req: AdmissionRequest) -> str | None:
@@ -321,7 +322,7 @@ def validate(req: AdmissionRequest) -> str | None:
     if not req.idem_key:
         return reasons.MISSING_IDEM_KEY
     # Reject a BOOLEAN integer amount BEFORE any numeric check: bool is an int subclass, so `req_disk_gb=True`
-    # / `req_mem_mb=True` (a JSON `true`) survives isfinite (True), `< 0` (False), `> _BIGINT_MAX` (False) and
+    # / `req_mem_mb=True` (a JSON `true`) survives isfinite (True), `< 0` (False), `> db.INT8_MAX` (False) and
     # `<= 0` (False) and would silently admit a 1 GB / 1 MB lease — the JSON-true-is-1 trap the input-
     # validation taxonomy (S03/S19) closes for every other seam (imgbuild.py, admin.py, settings.validate_patch
     # all `isinstance(_, bool)` before the int check). The two int8 amounts are guarded here; req_cpu is a
@@ -348,12 +349,12 @@ def validate(req: AdmissionRequest) -> str | None:
         return reasons.NEGATIVE_DISK
     # Bound the integer amounts to their ledger column ranges: an over-range value must be a CLEAN reason, not
     # an uncaught NumericValueOutOfRange escaping the lease INSERT (req_mem_mb / req_disk_gb are int8).
-    if req.req_mem_mb > _BIGINT_MAX or req.req_disk_gb > _BIGINT_MAX:
+    if req.req_mem_mb > db.INT8_MAX or req.req_disk_gb > db.INT8_MAX:
         return reasons.RESOURCE_TOO_LARGE
     # ttl_seconds must satisfy the lease CHECK (>= 10) and fit int4 (the column + the expires_at trigger's
     # make_interval(secs => ttl)); an out-of-range ttl would otherwise escape as a CheckViolation /
     # NumericValueOutOfRange / interval overflow instead of this clean reason.
-    if req.ttl_seconds < 10 or req.ttl_seconds > _INT_MAX:
+    if req.ttl_seconds < 10 or req.ttl_seconds > db.INT4_MAX:
         return reasons.INVALID_TTL
     if req.storage_id is not None and req.req_disk_gb <= 0:
         return reasons.STORAGE_WITHOUT_DISK
@@ -698,7 +699,7 @@ def admit(conn: psycopg.Connection[Any], req: AdmissionRequest) -> AdmissionResu
     #    comparator can tell a changed layout apart from a genuine retry (finding #4).
     existing = cur.execute(_LOOKUP, (req.idem_key,)).fetchone()
     if existing is not None:
-        stored_disks = tuple(cur.execute(_LEASE_DATA_DISKS, (existing[0],)).fetchall())
+        stored_disks = tuple(cur.execute(LEASE_DATA_DISKS, (existing[0],)).fetchall())
         result = replay_result(existing, req, stored_disks)
         conn.commit()
         log.info("admission idempotent %s -> lease %s (%s)",
@@ -754,7 +755,7 @@ def admit(conn: psycopg.Connection[Any], req: AdmissionRequest) -> AdmissionResu
         # fetched and compared (finding #4) so a concurrent same-key/DIFFERENT-layout loser gets a conflict.
         existing = cur.execute(_LOOKUP, (req.idem_key,)).fetchone()
         if existing is not None:
-            stored_disks = tuple(cur.execute(_LEASE_DATA_DISKS, (existing[0],)).fetchall())
+            stored_disks = tuple(cur.execute(LEASE_DATA_DISKS, (existing[0],)).fetchall())
             result = replay_result(existing, req, stored_disks)
         else:
             result = AdmissionResult(None, admitted=False, idempotent=False, reason=reasons.LOST_INSERT)
@@ -848,10 +849,10 @@ def enqueue(
     # CAP at int4 seconds (~68y): an unbounded max_wait would overflow `now() + make_interval(secs => maxwait)`
     # in the PENDING insert (DatetimeFieldOverflow) instead of behaving as "wait effectively forever". (ttl is
     # bounded upstream by validate(); a queued request always passes admit()/validate() first.)
-    max_wait_seconds = min(_INT_MAX, max(ttl_seconds, max_wait_seconds))
+    max_wait_seconds = min(db.INT4_MAX, max(ttl_seconds, max_wait_seconds))
     existing = cur.execute(_LOOKUP, (idem_key,)).fetchone()
     if existing is not None:
-        stored_disks = tuple(cur.execute(_LEASE_DATA_DISKS, (existing[0],)).fetchall())
+        stored_disks = tuple(cur.execute(LEASE_DATA_DISKS, (existing[0],)).fetchall())
         conn.commit()
         return _enqueue_replay(existing, req_cpu=req_cpu, req_mem_mb=req_mem_mb, storage_id=storage_id,
                                req_disk_gb=req_disk_gb, project_id=project_id, template_id=template_id,
@@ -901,7 +902,7 @@ def enqueue(
         if again is None:
             conn.commit()
             return EnqueueResult(None, queued=False, reason=reasons.LOST_INSERT)
-        stored_disks = tuple(cur.execute(_LEASE_DATA_DISKS, (again[0],)).fetchall())
+        stored_disks = tuple(cur.execute(LEASE_DATA_DISKS, (again[0],)).fetchall())
         conn.commit()
         return _enqueue_replay(again, req_cpu=req_cpu, req_mem_mb=req_mem_mb, storage_id=storage_id,
                                req_disk_gb=req_disk_gb, project_id=project_id, template_id=template_id,

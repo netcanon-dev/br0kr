@@ -23,6 +23,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
+# The destroy verdicts: what the destroy and fence-stamp calls answer, and what the engine branches on (review
+# CODE-06). Part of the contract, so the engine and pve.py name them from here rather than spelling them.
+DESTROYED = "destroyed"                       # the fence matched and the guest is deleted
+GONE = "gone"                                 # no guest (or volume) there: a teardown's success, nothing to do
+FENCE_MISMATCH = "fence_mismatch"             # the guest is not this owner's: refused, left untouched
+# The decisions a destroy reaches before acting (pve.destroy_decision, pve.clone_orphan_decision).
+DESTROY = "destroy"                           # the fence matches: safe to delete
+FENCE_APPEARED = "fence_appeared"             # a lease fenced this vmid since the scan: spared
+REPL_FENCE_APPEARED = "repl_fence_appeared"   # a replication copy lives here: spared (its own reclaim removes it)
+NOT_CLONE = "not_clone"                       # no br0kr template marker, so not ours: spared
+IS_TEMPLATE = "is_template"                   # a template: never destroyed as an orphan
+
 
 class Driver(Protocol):
     """A Proxmox node driver, as the engine uses it. Each method is documented in full on `pve.Pve`."""

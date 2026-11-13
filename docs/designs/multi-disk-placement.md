@@ -289,11 +289,11 @@ lock. `admit()` (admission.py:486) and `promote_pinned()` acquire the full set.
 
 **Debit read.** `_STORAGE_AVAIL` (admission.py:104) gains a **third** subtraction term — the sum of
 `lease_data_disk.req_disk_gb` for **active** leases landing on the pool, filtered by the exact same
-`_ACTIVE_SQL` state set as the boot term:
+`CAPACITY_SQL` state set as the boot term:
 
 ```sql
 - COALESCE((SELECT sum(d.req_disk_gb) FROM lease_data_disk d JOIN lease l2 ON l2.id = d.lease_id
-            WHERE d.storage_id = s.id AND l2.state IN (…_ACTIVE_SQL…)), 0)
+            WHERE d.storage_id = s.id AND l2.state IN (…CAPACITY_SQL…)), 0)
 ```
 
 `inventory.py` (the `list_storage` `used_gb` query) mirrors `_STORAGE_AVAIL` and **must** gain the same term in

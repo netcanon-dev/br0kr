@@ -320,12 +320,14 @@ def set_context(**fields: Any) -> None:
 
 
 def clear_context() -> None:
-    """Reset ambient context to empty. Primarily for test isolation."""
+    """Reset ambient context to empty. Primarily for test isolation. Part of this drop-in module's API (the
+    shared logging kit, docs/standards/logging.md), kept though br0kr's own code does not call it."""
     _log_context.set({})
 
 
 def current_context() -> dict[str, Any]:
-    """Snapshot the current ambient context (debugging / tests)."""
+    """Snapshot the current ambient context (debugging / tests; tests/unit/test_tick_steps.py reads it). Part
+    of this drop-in module's API (the shared logging kit)."""
     return dict(_log_context.get())
 
 
@@ -419,7 +421,8 @@ def configure_logging(
 
 
 def using_json_format() -> bool:
-    """True if any root handler currently uses JSONFormatter (tests / gating)."""
+    """True if any root handler currently uses JSONFormatter (tests / gating). Part of this drop-in module's API
+    (the shared logging kit), kept though br0kr's own code does not call it."""
     return any(isinstance(h.formatter, JSONFormatter)
                for h in logging.getLogger().handlers)
 

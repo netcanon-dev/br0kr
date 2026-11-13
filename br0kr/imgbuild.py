@@ -34,6 +34,7 @@ from br0kr import reasons, statemachine
 # Both are read from the build machine (br0kr/statemachine.py, review ARCH-04), the one declaration of a build's
 # states and edges.
 TERMINAL_STATES: frozenset[str] = frozenset(statemachine.BUILD.terminal)
+TERMINAL_IN = statemachine.BUILD.sql_in(statemachine.BUILD.terminal)   # the same states, ordered, as a SQL IN-list
 BUILD_STATES: tuple[str, ...] = statemachine.BUILD.states
 # The CLAIMED states: a build the daemon has picked up (out of REQUESTED) and that is not yet terminal —
 # DOWNLOADING/IMPORTING while it actuates, plus RECLAIMING once the stale-build reclaim has claimed it for

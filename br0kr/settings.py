@@ -20,6 +20,8 @@ from typing import Any
 
 import psycopg
 
+from br0kr import db
+
 
 @dataclass(frozen=True)
 class Knob:
@@ -138,7 +140,6 @@ _BY_NAME: dict[str, Knob] = {k.name: k for k in KNOBS}
 DAEMON_KNOBS: tuple[Knob, ...] = tuple(k for k in KNOBS if k.daemon)
 _COLS: tuple[str, ...] = tuple(k.name for k in KNOBS)
 MAX_STR_LEN = 64   # guest_ip_prefix ceiling — mirrors the 0021 CHECK
-_INT4_MAX = 2_147_483_647   # every operator_setting int knob is an int4 column (migration 0021)
 
 
 @dataclass(frozen=True)
@@ -234,7 +235,7 @@ def validate_patch(patch: dict[str, Any]) -> str | None:
                 return f"not_an_int:{key}"
             if knob.minimum is not None and val < knob.minimum:
                 return f"below_min:{key}"
-            if val > _INT4_MAX:
+            if val > db.INT4_MAX:
                 return f"too_large:{key}"        # every int knob is an int4 column (0021) — refuse over-range
         elif knob.kind == "bool":
             if not isinstance(val, bool):

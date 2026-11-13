@@ -34,15 +34,14 @@ from typing import Any
 
 import psycopg
 
-from br0kr import lease, reasons, replication
-from br0kr.admission import CAPACITY_STATES
+from br0kr import imgbuild, lease, placement, reasons, replication
+
+# CAPACITY_SQL: the states the admission transaction debits by, so the inventory's "used" sums count the same leases
+# (a drift guard pins it in tests/unit/test_inventory.py).
+from br0kr.admission import CAPACITY_SQL
 
 log = logging.getLogger(__name__)
 
-# The capacity-counting state set, rendered for SQL — built from admission.CAPACITY_STATES so the
-# inventory's "used" sums debit by the SAME definition the admission transaction does (one source of
-# truth; a drift guard pins this in tests/unit/test_inventory.py).
-_ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
 # lease.LIVE_STATES (capacity-holding and still renewable/releasable): what a pin counts against max_pinned (0049).
 _LIVE_SQL = "(" + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")"
 
@@ -55,12 +54,12 @@ _LIVE_SQL = "(" + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")"
 # partition once per project, bounded by queue_max and far cheaper than the old full-history join.
 _NODE_USAGE = f"""
   SELECT n.id, n.cluster_id, n.cpu_total, n.mem_total_mb,
-         COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS cpu_used,
-         COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS mem_used,
-         COUNT(*)                   FILTER (WHERE l.state IN {_ACTIVE_SQL})     AS lease_count,
+         COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {CAPACITY_SQL}), 0) AS cpu_used,
+         COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0) AS mem_used,
+         COUNT(*)                   FILTER (WHERE l.state IN {CAPACITY_SQL})     AS lease_count,
          n.cordoned                                                            AS cordoned,
          n.pve_node                                                            AS pve_node
-  FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL}
+  FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {CAPACITY_SQL}
   GROUP BY n.id
 """
 
@@ -92,15 +91,15 @@ _LIST_CLUSTERS = f"""
 # a jsonb array — so the operator can see, per pool, WHERE it lives and which nodes may clone onto it.
 _LIST_STORAGE = f"""
   SELECT s.id, s.total_gb, s.cluster_id, s.pve_name, s.content_types,
-         COALESCE(SUM(l.req_disk_gb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0)
+         COALESCE(SUM(l.req_disk_gb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0)
          + COALESCE((SELECT sum(ti.size_gb) FROM template_instance ti
                      WHERE ti.storage_id = s.id AND ti.instance_state = 'READY'), 0)
          -- mirrors admission._STORAGE_AVAIL's lease_data_disk term (0046, multi-disk arc): a data disk's
          -- bytes must show as USED here exactly as they are floored in admit, or the dashboard drifts from
          -- the debit. INERT today (empty table); shipped with the floor (fail-safe ordering).
          + COALESCE((SELECT sum(d.req_disk_gb) FROM lease_data_disk d JOIN lease l2 ON l2.id = d.lease_id
-                     WHERE d.storage_id = s.id AND l2.state IN {_ACTIVE_SQL}), 0) AS used_gb,
-         COUNT(*)                    FILTER (WHERE l.state IN {_ACTIVE_SQL})     AS lease_count,
+                     WHERE d.storage_id = s.id AND l2.state IN {CAPACITY_SQL}), 0) AS used_gb,
+         COUNT(*)                    FILTER (WHERE l.state IN {CAPACITY_SQL})     AS lease_count,
          COALESCE((
            SELECT jsonb_agg(jsonb_build_object(
                     'node_id',     sn.node_id,
@@ -108,7 +107,7 @@ _LIST_STORAGE = f"""
                     'quarantined', sn.quarantined_at IS NOT NULL) ORDER BY sn.node_id)
            FROM storage_node sn WHERE sn.storage_id = s.id
          ), '[]'::jsonb) AS reachable_nodes
-  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id AND l.state IN {_ACTIVE_SQL}
+  FROM storage s LEFT JOIN lease l ON l.storage_id = s.id AND l.state IN {CAPACITY_SQL}
   GROUP BY s.id ORDER BY s.id
 """
 
@@ -120,22 +119,22 @@ _LIST_STORAGE = f"""
 # ONLY its own tenant — list_projects(project_id=...)); both share one body so they can't drift.
 _LIST_PROJECTS_TMPL = f"""
   SELECT p.id, p.cpu_limit, p.mem_limit_mb, p.max_leases, p.max_queued,
-         COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS cpu_used,
-         COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) AS mem_used,
-         COUNT(*)                   FILTER (WHERE l.state IN {_ACTIVE_SQL})     AS lease_count,
+         COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {CAPACITY_SQL}), 0) AS cpu_used,
+         COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0) AS mem_used,
+         COUNT(*)                   FILTER (WHERE l.state IN {CAPACITY_SQL})     AS lease_count,
          (SELECT count(*) FROM lease q WHERE q.project_id = p.id AND q.state = 'PENDING') AS queue_depth,
          p.cpu_limit_max, p.mem_limit_mb_max, p.max_leases_max, p.max_template_disk_gb,
          COALESCE((SELECT sum(t.size_gb) FROM template t WHERE t.owner_project_id = p.id), 0)
          + COALESCE((SELECT sum(b.size_gb) FROM template_build b
-                     WHERE b.project_id = p.id AND b.state NOT IN ('READY','FAILED')), 0)
+                     WHERE b.project_id = p.id AND b.state NOT IN {imgbuild.TERMINAL_IN}), 0)
          + COALESCE((SELECT sum(size_gb) FROM template_replication
-                     WHERE project_id = p.id AND job_state NOT IN ('READY','FAILED')), 0)
+                     WHERE project_id = p.id AND job_state NOT IN {replication.TERMINAL_IN}), 0)
          + COALESCE((SELECT sum(ti.size_gb) FROM template_instance ti
                      JOIN template_replication tr ON tr.id = ti.replication_id
                      WHERE tr.project_id = p.id AND ti.instance_state = 'READY'), 0) AS template_disk_used,
          p.max_pinned,
          COUNT(*) FILTER (WHERE l.pinned AND l.state IN {_LIVE_SQL})            AS pinned_count
-  FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {_ACTIVE_SQL}
+  FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {CAPACITY_SQL}
   {{where}}
   GROUP BY p.id ORDER BY p.id
 """
@@ -196,7 +195,7 @@ _QUEUE_HEAD = _QUEUE_HEAD_TMPL.format(extra="")
 _QUEUE_HEAD_PROJECT = _QUEUE_HEAD_TMPL.format(extra="AND l.project_id = %s")
 
 # Active-lease listing (PR2 driveability): every lease currently HOLDING capacity — the CAPACITY_STATES set
-# (ADMITTED/PROVISIONING/ACTIVE/RELEASING, via _ACTIVE_SQL, the SAME set the node/cluster/project "used" sums
+# (ADMITTED/PROVISIONING/ACTIVE/RELEASING, via CAPACITY_SQL, the SAME set the node/cluster/project "used" sums
 # debit by), so this table's rows reconcile with those lease counts. PENDING (queued, holds no capacity —
 # that is queue_view) and the terminal states (RELEASED/REJECTED/RELEASE_FAILED) are excluded. The head of
 # each row's `is_reservation` flags a cross-cluster MIGRATION reservation lease (the reserved br0kr-mig-
@@ -222,7 +221,7 @@ _LEASE_LIST_TMPL = f"""
          {_RES_FLAG_SQL}                                        AS is_reservation,
          l.pinned
   FROM lease l
-  WHERE l.state IN {_ACTIVE_SQL} {{extra}}
+  WHERE l.state IN {CAPACITY_SQL} {{extra}}
   ORDER BY l.created_at, l.id
   LIMIT %s
 """
@@ -656,7 +655,7 @@ _FLEET_STATS = f"""
                                                                            AS unverified_reachability_pairs,
     (SELECT count(*) FROM storage_node WHERE quarantined_at IS NOT NULL)   AS quarantined_reachability_pairs,
     (SELECT count(*) FROM template_instance
-       WHERE size_gb IS NULL AND instance_state IN ('READY', 'REPLICATING')) AS unsized_instances,
+       WHERE size_gb IS NULL AND instance_state IN {placement.LIVE_INSTANCE_IN}) AS unsized_instances,
     (SELECT count(*) FROM node n WHERE n.cluster_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM storage_node sn
                         WHERE sn.node_id = n.id AND sn.quarantined_at IS NULL))

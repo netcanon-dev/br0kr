@@ -35,25 +35,26 @@ from typing import Any
 import psycopg
 
 from br0kr import admission, lease, multidisk, placement, reasons, settings
-from br0kr.admission import CAPACITY_STATES, AdmissionRequest
+from br0kr.admission import CAPACITY_SQL, AdmissionRequest
 
 log = logging.getLogger(__name__)
 
-_ACTIVE_SQL = "(" + ",".join(f"'{s}'" for s in CAPACITY_STATES) + ")"
 # Replayable for a scheduled retry: a live grant OR a PENDING queued spot (a retry of a queued scheduled
 # request returns the same waiting spot via reason='queued', mirroring admission.replay_result).
 _REPLAYABLE = frozenset(lease.LIVE_STATES) | {"PENDING"}
 
 # admit() rejections that mean "this NODE won't take it — try the next candidate, the request is fine."
-# Storage is deliberately NOT here: the storage pool is GLOBAL (the `storage` table has no per-node
-# association), so if admit rejects a candidate on storage, EVERY candidate rejects identically —
-# that's a hard outcome surfaced once, not a reason to loop (and re-lock the pool) over every node.
+# Storage CAPACITY is deliberately NOT here: a pool's capacity is one row shared by every node that reaches it,
+# so if admit rejects a candidate on the pool's capacity, every candidate on that pool rejects identically: a
+# hard outcome surfaced once, not a reason to loop (and re-lock the pool) over every node. Whether a node can
+# REACH the pool (storage_node, 0031) is per node; that refusal is a per-candidate placement reason, retried on
+# the next node (placement.PLACEMENT_PER_CANDIDATE, below).
 # `node_cordoned` joins this set: node_headroom already filters cordoned nodes out of the candidate
 # snapshot, but a node cordoned BETWEEN the snapshot and the admit makes admit reject it node_cordoned —
 # treat that exactly like node-full (skip to the next candidate), not as a hard reject for the whole ask.
 _NODE_FULL_REASONS = reasons.NODE_FULL
-# Storage rejections: a bad pool id, or a globally-exhausted pool — both definitive for the whole
-# request (the pool is global), so surface them instead of trying every other node. `storage_unbound`
+# Storage rejections: a bad pool id, or an exhausted pool — both definitive for the whole request (capacity
+# belongs to the pool, not to a node), so surface them instead of trying every other node. `storage_unbound`
 # (0033: the debited pool has no cluster binding) joins them — no node changes an unbound quota row.
 _STORAGE_REJECTS = reasons.STORAGE
 # Project (tenant-budget) rejections: the quota is GLOBAL across all nodes, so an over-quota or
@@ -204,8 +205,8 @@ def _resolve_idem(conn: psycopg.Connection[Any], req: ScheduleRequest) -> Schedu
     row = conn.execute(_LOOKUP, (req.idem_key,)).fetchone()
     # The stored data-disk layout is fetched HERE (the caller) — same txn as the LOOKUP, before the commit —
     # and passed into the pure comparator so a schedule_lease retry of a multi-disk key is a conflict, not a
-    # silent replay (the multi-disk arc; the admission-side _LEASE_DATA_DISKS read, keyed on the lease id).
-    stored_disks = (tuple(conn.execute(admission._LEASE_DATA_DISKS, (row[0],)).fetchall())
+    # silent replay (the multi-disk arc; the admission-side LEASE_DATA_DISKS read, keyed on the lease id).
+    stored_disks = (tuple(conn.execute(admission.LEASE_DATA_DISKS, (row[0],)).fetchall())
                     if row is not None else ())
     conn.commit()   # end the read txn — every sibling read helper does, so no idle-in-transaction
     if row is None:
@@ -238,10 +239,10 @@ def node_headroom(conn: psycopg.Connection[Any], cluster_id: str | None) -> list
         params["cid"] = cluster_id
     rows = conn.execute(
         f"SELECT n.id, "
-        f"n.cpu_total    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0), "
-        f"n.mem_total_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {_ACTIVE_SQL}), 0) "
+        f"n.cpu_total    - COALESCE(SUM(l.req_cpu)    FILTER (WHERE l.state IN {CAPACITY_SQL}), 0), "
+        f"n.mem_total_mb - COALESCE(SUM(l.req_mem_mb) FILTER (WHERE l.state IN {CAPACITY_SQL}), 0) "
         # the state test is in the JOIN so the partial lease_node_active index applies (review PERF-01)
-        f"FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {_ACTIVE_SQL} "
+        f"FROM node n LEFT JOIN lease l ON l.node_id = n.id AND l.state IN {CAPACITY_SQL} "
         f"WHERE {where} GROUP BY n.id",
         params,
     ).fetchall()

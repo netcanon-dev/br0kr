@@ -26,10 +26,15 @@ from typing import Any
 
 import psycopg
 
-from br0kr import imgbuild, placement, reasons
+from br0kr import imgbuild, placement, reasons, statemachine
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
+
+# State IN-lists from the machines (review CODE-06): a build settled or being reclaimed (no vmid may be stamped on it
+# any more), and a settled replication (build.py cannot import replication, which reaches it through reconciler).
+_SETTLED_OR_RECLAIMING_IN = statemachine.BUILD.sql_in((*statemachine.BUILD.terminal, "RECLAIMING"))
+_REPL_TERMINAL_IN = statemachine.REPLICATION.sql_in(statemachine.REPLICATION.terminal)
 
 # The reclaim-eligible states, rendered as a SQL IN-list DIRECTLY from imgbuild.CLAIMED_STATES (the single
 # definition) so stale_builds/claim_stale_for_reclaim can never drift from it — the same derive-don't-repeat
@@ -207,7 +212,7 @@ def set_build_vmid(conn: psycopg.Connection[Any], build_id: int, vmid: int, node
     onto it would hand the reclaimer a guest handle it must NOT act on (and the ex-leader's own lost-CAS path
     at mark_ready destroys the guest it created). A no-op, too, if the build already reached a terminal state."""
     conn.execute("UPDATE template_build SET vmid = %s, node_id = %s, updated_at = now() "
-                 "WHERE id = %s AND state NOT IN ('READY','FAILED','RECLAIMING')", (vmid, node_id, build_id))
+                 f"WHERE id = %s AND state NOT IN {_SETTLED_OR_RECLAIMING_IN}", (vmid, node_id, build_id))
 
 
 def mark_importing(conn: psycopg.Connection[Any], build_id: int) -> bool:
@@ -324,9 +329,9 @@ def project_template_disk_used(conn: psycopg.Connection[Any], project_id: str) -
     row = conn.execute(
         "SELECT COALESCE((SELECT sum(size_gb) FROM template WHERE owner_project_id = %s), 0) "
         "     + COALESCE((SELECT sum(size_gb) FROM template_build "
-        "                 WHERE project_id = %s AND state NOT IN ('READY','FAILED')), 0) "
+        f"                 WHERE project_id = %s AND state NOT IN {imgbuild.TERMINAL_IN}), 0) "
         "     + COALESCE((SELECT sum(size_gb) FROM template_replication "
-        "                 WHERE project_id = %s AND job_state NOT IN ('READY','FAILED')), 0) "
+        f"                 WHERE project_id = %s AND job_state NOT IN {_REPL_TERMINAL_IN}), 0) "
         "     + COALESCE((SELECT sum(ti.size_gb) FROM template_instance ti "
         "                 JOIN template_replication tr ON tr.id = ti.replication_id "
         "                 WHERE tr.project_id = %s AND ti.instance_state = 'READY'), 0)",
@@ -345,7 +350,7 @@ def mark_failed(conn: psycopg.Connection[Any], build_id: int, error: str) -> boo
     log line. Redacting BEFORE the [:500] truncation ensures a scrubbed error can never be re-exposed by a cut."""
     row = conn.execute(
         "UPDATE template_build SET state = 'FAILED', error = %s, updated_at = now() "
-        "WHERE id = %s AND state NOT IN ('READY','FAILED') RETURNING id",
+        f"WHERE id = %s AND state NOT IN {imgbuild.TERMINAL_IN} RETURNING id",
         (redact_text(error)[:500], build_id)).fetchone()
     if row is not None:
         log.warning("template build %s FAILED: %s", build_id, error, extra={"build_id": build_id})
@@ -384,7 +389,7 @@ def force_fail(conn: psycopg.Connection[Any], build_id: int, reason: str | None 
     row = conn.execute(
         "WITH prev AS (SELECT id, state AS prior_state, vmid FROM template_build WHERE id = %s), "
         "     upd AS (UPDATE template_build SET state = 'FAILED', error = %s, updated_at = now() "
-        "             WHERE id = %s AND state NOT IN ('READY','FAILED') RETURNING id) "
+        f"             WHERE id = %s AND state NOT IN {imgbuild.TERMINAL_IN} RETURNING id) "
         "SELECT prev.prior_state, prev.vmid, (upd.id IS NOT NULL) "
         "FROM prev LEFT JOIN upd ON prev.id = upd.id",
         (build_id, err, build_id)).fetchone()

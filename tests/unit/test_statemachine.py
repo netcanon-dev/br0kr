@@ -412,3 +412,25 @@ def test_the_scan_reads_each_kind_of_guard_and_refuses_what_it_cannot_read():
                  "state = %(s)s", "{?}"):
         assert _set_target(sets, "state", None) == "{?}", sets
     assert _set_target("x = 1, updated_at = now()", "state", None) is None
+
+
+def test_the_job_modules_name_their_in_lists_instead_of_spelling_them():
+    """The state IN-lists the job modules (build, imgbuild, replication, migration) and their readers (admin,
+    gateway, inventory, placement) put in their SQL come from the machines or placement.LIVE_INSTANCE_STATES (review
+    CODE-06): each named list holds exactly its states, and no SQL in those modules spells out an IN-list of two or
+    more build, replication, migration or template-instance states. Guards a hand-copied state list coming back into
+    a guard and drifting from the machine (the review counted seventeen)."""
+    assert replication.TERMINAL_IN == "('READY','FAILED')"
+    assert replication._COPY_STATES == ("COPYING", "CONVERTING") and replication._COPY_IN == "('COPYING','CONVERTING')"
+    assert migration._TERMINAL_SQL == "('DONE','ABORTED')"
+    assert migration._CANCELLABLE_SQL == "('REQUESTED','RESERVED')"
+    assert migration._PENDING_SQL == "('REQUESTED','RESERVED','MIGRATING')"
+    assert imgbuild.TERMINAL_IN == "('READY','FAILED')"
+    states = set().union(*(m.states for m in (statemachine.BUILD, statemachine.REPLICATION, statemachine.MIGRATION)))
+    states |= {"REPLICATING", "READY", "RETIRED", "FAILED"}   # template_instance.instance_state (0032's CHECK)
+    spelled = re.compile(r"IN \(('[A-Z_]+'(?:,\s*'[A-Z_]+')+)\)")
+    for mod in ("build", "imgbuild", "replication", "migration", "admin", "gateway", "inventory", "placement"):
+        text = Path(importlib.import_module(f"br0kr.{mod}").__file__ or "").read_text(encoding="utf-8")
+        for m in spelled.finditer(text):
+            listed = {s.strip(" '") for s in m.group(1).split(",")}
+            assert not listed <= states, f"br0kr/{mod}.py spells out {m.group(0)}"

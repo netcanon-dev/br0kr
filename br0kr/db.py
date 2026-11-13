@@ -45,6 +45,12 @@ import psycopg.conninfo
 
 log = logging.getLogger(__name__)
 
+# The ledger's integer column ceilings, the one home for them (review CODE-06): a value past these overflows an int4 or
+# int8 column as an opaque NumericValueOutOfRange, so each validator checks against them and refuses with a clean
+# reason first. (numeric columns, such as cpu, have no practical bound; an isfinite guard covers their real hazard.)
+INT4_MAX = 2_147_483_647                 # int / int4: ttl_seconds, max_leases, vmid, the operator_setting int knobs
+INT8_MAX = 9_223_372_036_854_775_807     # bigint / int8: the mem_mb and disk_gb columns
+
 # Surface a dropped/half-open connection as a prompt error instead of a multi-minute TCP
 # stall — important for the leader connection (its death must free the advisory lock fast)
 # and for the gateway (an agent shouldn't block on a dead ledger). Applied to EVERY

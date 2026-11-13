@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from br0kr import admission, inventory, lease
+from br0kr import admission, inventory, lease, placement
 
 pytestmark = pytest.mark.unit
 
@@ -37,10 +37,10 @@ def test_active_sql_is_derived_from_admission_capacity_states():
     ignoring RELEASING differently). The rendered SQL fragment is built from admission.CAPACITY_STATES and
     must equal admission's own. Guards the two definitions drifting apart."""
     expected = "(" + ",".join(f"'{s}'" for s in admission.CAPACITY_STATES) + ")"
-    assert expected == inventory._ACTIVE_SQL
-    assert inventory._ACTIVE_SQL == admission._ACTIVE_SQL
-    assert "PENDING" not in inventory._ACTIVE_SQL          # a queued lease holds no capacity
-    assert "'RELEASING'" in inventory._ACTIVE_SQL          # but a releasing one still does
+    assert expected == inventory.CAPACITY_SQL
+    assert inventory.CAPACITY_SQL == admission.CAPACITY_SQL
+    assert "PENDING" not in inventory.CAPACITY_SQL          # a queued lease holds no capacity
+    assert "'RELEASING'" in inventory.CAPACITY_SQL          # but a releasing one still does
 
 
 def test_pct_normal_zero_total_and_oversubscribed():
@@ -382,7 +382,7 @@ def test_list_leases_scopes_by_project_and_clamps_limit():
     regressing. The real SQL + scoping are proven in scripts/harness_inventory.py."""
     assert "AND l.project_id = %s" in inventory._LEASE_LIST_PROJECT
     assert "AND l.project_id = %s" not in inventory._LEASE_LIST
-    assert inventory._ACTIVE_SQL in inventory._LEASE_LIST and "PENDING" not in inventory._ACTIVE_SQL
+    assert inventory.CAPACITY_SQL in inventory._LEASE_LIST and "PENDING" not in inventory.CAPACITY_SQL
     assert "idem_key LIKE %s" in inventory._LEASE_LIST     # the reservation flag
     # both reserved namespaces are covered (drift-guard against dropping the repl prefix)
     assert lease.MIGRATION_IDEM_PREFIX + "%" in inventory._RES_PATTERNS
@@ -491,7 +491,7 @@ def test_fleet_stats_sql_counts_placement_backlogs_over_the_right_tables():
     assert "state = 'ADMITTED' AND hold_reason IS NOT NULL" in sql                     # held_leases
     assert "FROM storage_node WHERE verified_at IS NULL AND quarantined_at IS NULL" in sql
     assert "FROM storage_node WHERE quarantined_at IS NOT NULL" in sql
-    assert "size_gb IS NULL AND instance_state IN ('READY', 'REPLICATING')" in sql     # live, unsized
+    assert f"size_gb IS NULL AND instance_state IN {placement.LIVE_INSTANCE_IN}" in sql   # live, unsized
     assert "n.cluster_id IS NOT NULL" in sql and "sn.quarantined_at IS NULL" in sql    # zero-reachable cluster nodes
     assert "FROM template_replication" in sql and \
         "job_state IN ('REQUESTED','COPYING','CONVERTING','RECLAIMING')" in sql        # active replication jobs

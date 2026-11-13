@@ -212,3 +212,33 @@ def test_take_code_consumes_by_hash_in_one_statement_that_checks_expiry() -> Non
     assert bound == {"client_id": "client-1", "project_id": "team-a", "scope": "consume", "code_challenge": "chal",
                      "redirect_uri": "https://client.example/callback", "resource": "https://br0kr.example.com/mcp"}
     assert oauth.take_code(_OneRowConn(None), "the-code") is None
+
+
+def test_a_client_that_hangs_up_mid_reply_is_a_dropped_connection_not_an_error(
+        caplog: pytest.LogCaptureFixture) -> None:
+    """When the socket breaks while the handler writes its reply (headers or body), _write closes the connection
+    and logs one INFO line naming only the path (never its query string), with no exception escaping and nothing
+    at ERROR. Guards the CI flake where a client dropped while a 400 for a bad body was written: the BrokenPipeError
+    rose inside the handler's own except branch and logged an ERROR stack."""
+    import logging
+
+    class _Gone:
+        def write(self, _data: bytes) -> int:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    handler = object.__new__(oauth._make_handler())
+    handler.wfile = _Gone()
+    handler.request_version, handler.command = "HTTP/1.1", "POST"
+    handler.requestline = "POST /token?code=sekrit HTTP/1.1"
+    handler.path, handler.client_address = "/token?code=sekrit", ("127.0.0.1", 1)
+    handler.close_connection = False
+    with caplog.at_level(logging.INFO, logger="br0kr.oauth"):
+        handler._json(400, {"error": "invalid_request"})
+    assert handler.close_connection is True
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("client went away before the 400 reply" in m and "/token" in m for m in msgs), msgs
+    assert not any("sekrit" in m for m in msgs)

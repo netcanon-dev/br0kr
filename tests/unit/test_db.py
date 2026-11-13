@@ -507,3 +507,10 @@ def test_the_pool_logger_is_quietened_with_the_other_noisy_libraries():
             root.addHandler(handler)
         root.setLevel(saved_level)
         pool_log.setLevel(saved_pool_level)
+
+
+def test_the_integer_column_ceilings_are_postgres_int4_and_int8():
+    """db.INT4_MAX and db.INT8_MAX, the one home of the column ceilings every validator checks (review CODE-06), are
+    Postgres's int4 and int8 maxima. Guards a typo letting an over-range value reach an INSERT (an opaque 503
+    instead of a clean reason), or refusing a value the column holds."""
+    assert db.INT4_MAX == 2**31 - 1 and db.INT8_MAX == 2**63 - 1

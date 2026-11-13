@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import psycopg
 
-from br0kr import auth, build, imgbuild, lease, placement
+from br0kr import auth, build, db, imgbuild, lease, placement
 from br0kr.logging_setup import canonicalize_url
 from br0kr.nodes import (
     valid_content_type,
@@ -47,11 +47,8 @@ _TERMINAL_IN = "(" + ", ".join(f"'{s}'" for s in lease.TERMINAL_STATES) + ")"
 
 log = logging.getLogger(__name__)
 
-# Column ceilings — a value past these overflows the bigint/int column as an opaque DB error (a 503);
-# the validators reject it as a crisp 400 instead. (numeric columns — cpu — have no practical bound; the
-# isfinite guard covers their only real hazard.)
-_BIGINT_MAX = 9_223_372_036_854_775_807
-_INT_MAX = 2_147_483_647
+# Column ceilings (db.INT4_MAX / db.INT8_MAX): a value past them overflows the column as an opaque DB error (a 503);
+# the validators reject it as a crisp 400 instead.
 
 _SET_QUOTA = """
   UPDATE project SET cpu_limit = %s, mem_limit_mb = %s, max_leases = %s, max_queued = %s,
@@ -94,9 +91,9 @@ def validate_quota(
         return "non_positive_max_leases"
     if max_queued is not None and max_queued <= 0:
         return "non_positive_max_queued"
-    if mem_limit_mb > _BIGINT_MAX:
+    if mem_limit_mb > db.INT8_MAX:
         return "mem_limit_too_large"
-    if max_leases > _INT_MAX or (max_queued is not None and max_queued > _INT_MAX):
+    if max_leases > db.INT4_MAX or (max_queued is not None and max_queued > db.INT4_MAX):
         return "lease_limit_too_large"
     return None
 
@@ -119,12 +116,12 @@ def validate_ceilings(
     if mem_limit_mb_max is not None:
         if mem_limit_mb_max <= 0:
             return "non_positive_mem_limit_max"
-        if mem_limit_mb_max > _BIGINT_MAX:
+        if mem_limit_mb_max > db.INT8_MAX:
             return "mem_limit_max_too_large"
     if max_leases_max is not None:
         if max_leases_max <= 0:
             return "non_positive_max_leases_max"
-        if max_leases_max > _INT_MAX:
+        if max_leases_max > db.INT4_MAX:
             return "max_leases_max_too_large"
     return None
 
@@ -140,7 +137,7 @@ def validate_template_disk_quota(max_template_disk_gb: int | None) -> str | None
         return "invalid_max_template_disk_gb"
     if max_template_disk_gb <= 0:
         return "non_positive_max_template_disk_gb"
-    if max_template_disk_gb > _BIGINT_MAX:
+    if max_template_disk_gb > db.INT8_MAX:
         return "max_template_disk_gb_too_large"
     return None
 
@@ -173,7 +170,7 @@ def validate_max_pinned(max_pinned: int) -> str | None:
         return "invalid_max_pinned"
     if max_pinned < 0:
         return "negative_max_pinned"
-    if max_pinned > _INT_MAX:
+    if max_pinned > db.INT4_MAX:
         return "max_pinned_too_large"
     return None
 
@@ -265,7 +262,7 @@ def validate_node(cpu_total: float, mem_total_mb: int) -> str | None:
         return "non_positive_cpu_total"
     if mem_total_mb <= 0:
         return "non_positive_mem_total"
-    if mem_total_mb > _BIGINT_MAX:
+    if mem_total_mb > db.INT8_MAX:
         return "mem_total_too_large"
     return None
 
@@ -277,7 +274,7 @@ def validate_storage(total_gb: int) -> str | None:
         return "non_finite_total_gb"
     if total_gb <= 0:
         return "non_positive_total_gb"
-    if total_gb > _BIGINT_MAX:
+    if total_gb > db.INT8_MAX:
         return "total_gb_too_large"
     return None
 
@@ -337,7 +334,8 @@ def _node_has_live_instances(conn: psycopg.Connection[Any], node_id: str) -> boo
     the common case; the placement gate's source-cluster-coherence check is the fail-closed backstop for drift
     that arises another way — a replica claimed into a since-repointed node, a check-then-act race.)"""
     return conn.execute(
-        "SELECT 1 FROM template_instance WHERE node_id = %s AND instance_state IN ('READY','REPLICATING') LIMIT 1",
+        f"SELECT 1 FROM template_instance WHERE node_id = %s "
+        f"AND instance_state IN {placement.LIVE_INSTANCE_IN} LIMIT 1",
         (node_id,)).fetchone() is not None
 
 
@@ -395,7 +393,7 @@ def create_node(
     if cluster_id is not None and conn.execute(
         "SELECT 1 FROM node WHERE cluster_id = %s LIMIT 1", (cluster_id,)).fetchone() is not None and conn.execute(
         "SELECT 1 FROM template_instance WHERE cluster_id = %s AND storage_id IS NULL "
-        "AND instance_state IN ('REPLICATING','READY') LIMIT 1", (cluster_id,)).fetchone() is not None:
+        f"AND instance_state IN {placement.LIVE_INSTANCE_IN} LIMIT 1", (cluster_id,)).fetchone() is not None:
         return {"node_id": node_id, "created": False, "reason": "cluster_has_unbound_instances"}
     row = conn.execute(
         "INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id,pve_node) VALUES (%s,%s,%s,%s,%s) "
@@ -1081,7 +1079,7 @@ def validate_template(vmid: int) -> str | None:
     here). Pure, so the catalog validation is unit-testable without a database."""
     if vmid <= 0:
         return "non_positive_vmid"
-    if vmid > _INT_MAX:
+    if vmid > db.INT4_MAX:
         return "vmid_too_large"
     return None
 
@@ -1328,7 +1326,7 @@ def retire_instance(conn: psycopg.Connection[Any], instance_id: int) -> dict[str
     misleading in-use). The physical guest is untouched (teardown is a separate destroy step). Does NOT commit."""
     row = conn.execute(
         f"UPDATE template_instance SET instance_state='RETIRED' "
-        f"WHERE id=%s AND instance_state IN ('READY','REPLICATING') "
+        f"WHERE id=%s AND instance_state IN {placement.LIVE_INSTANCE_IN} "
         f"  AND NOT EXISTS (SELECT 1 FROM lease WHERE template_instance_id=%s AND state NOT IN {_TERMINAL_IN}) "
         f"RETURNING id", (instance_id, instance_id)).fetchone()
     if row is not None:
@@ -1525,7 +1523,7 @@ def request_template_build(
     if _exists(conn, "template", target_template_id):
         return {"build_id": None, "requested": False, "reason": "template_exists"}
     if conn.execute(
-        "SELECT 1 FROM template_build WHERE target_template_id = %s AND state NOT IN ('READY','FAILED') "
+        f"SELECT 1 FROM template_build WHERE target_template_id = %s AND state NOT IN {imgbuild.TERMINAL_IN} "
         "LIMIT 1", (target_template_id,)).fetchone() is not None:
         return {"build_id": None, "requested": False, "reason": "build_in_progress"}
     row = conn.execute(

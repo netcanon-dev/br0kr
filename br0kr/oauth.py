@@ -340,14 +340,23 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
 
         def _write(self, code: int, content_type: str, data: bytes,
                    extra: dict[str, str] | None = None) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            for hk, hv in (extra or {}).items():
-                self.send_header(hk, hv)
-            self.end_headers()
-            self.wfile.write(data)
+            # The one response path, guarded whole (end_headers() flushes to the socket too): a client that hung
+            # up before or during the reply is a dropped connection, logged at INFO, never an ERROR stack. The
+            # write can happen inside a handler's own except branch (a 400 for a bad body), where nothing else
+            # would catch it (review CODE-06; it surfaced as a CI flake in the idle-client test).
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                for hk, hv in (extra or {}).items():
+                    self.send_header(hk, hv)
+                self.end_headers()
+                self.wfile.write(data)
+            except ConnectionError:   # BrokenPipe, ConnectionReset, ConnectionAborted (a Windows hang-up)
+                self.close_connection = True
+                log.info("oauth %s: client went away before the %d reply, connection dropped", self.path.split("?")[0],
+                         code)
 
         def _json(self, code: int, obj: dict[str, Any], extra: dict[str, str] | None = None) -> None:
             self._write(code, "application/json", json.dumps(obj).encode(), extra)

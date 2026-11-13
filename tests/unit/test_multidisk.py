@@ -157,21 +157,21 @@ def test_coerce_defers_value_policy_to_validate_data_disks() -> None:
 
 def test_admission_storage_avail_debits_lease_data_disk() -> None:
     """Wiring needle: admission._STORAGE_AVAIL must subtract the lease_data_disk term with the SAME
-    _ACTIVE_SQL state filter as the boot term — a fake cursor can't catch a missing SQL term, so pin the
+    CAPACITY_SQL state filter as the boot term — a fake cursor can't catch a missing SQL term, so pin the
     query text. Guards the data-disk floor silently dropping out of the debit (over-sell, the unsafe
     direction)."""
     sql = admission._STORAGE_AVAIL
     assert "lease_data_disk" in sql
     # the data term joins the disk to its lease and filters on the same active-state set as the boot term
-    assert sql.count(admission._ACTIVE_SQL) >= 2
+    assert sql.count(admission.CAPACITY_SQL) >= 2
 
 
 def test_inventory_list_storage_mirrors_the_data_disk_term() -> None:
     """Wiring needle: inventory._LIST_STORAGE's used_gb must ADD the same lease_data_disk term admit
     subtracts, WITH the same active-state filter, or the dashboard's per-pool used/available drifts from the
-    actual debit. Guards a stale inventory mirror AND a data term missing its _ACTIVE_SQL clause (which would
+    actual debit. Guards a stale inventory mirror AND a data term missing its CAPACITY_SQL clause (which would
     show a PENDING/terminal lease's data disk as used)."""
     assert "lease_data_disk" in inventory._LIST_STORAGE
-    # _ACTIVE_SQL must appear in the boot sum, the data term, AND lease_count → at least 3 uses; a data term
+    # CAPACITY_SQL must appear in the boot sum, the data term, AND lease_count → at least 3 uses; a data term
     # that dropped its state filter would leave only 2.
-    assert inventory._LIST_STORAGE.count(inventory._ACTIVE_SQL) >= 3
+    assert inventory._LIST_STORAGE.count(inventory.CAPACITY_SQL) >= 3

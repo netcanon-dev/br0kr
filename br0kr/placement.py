@@ -40,6 +40,11 @@ from br0kr import audit, multidisk, nodes, pve, reasons
 
 log = logging.getLogger(__name__)
 
+# A template instance that exists or is being written (template_instance.instance_state, 0032): the copies the
+# live_uniq index counts, and the ones a delete or a new copy must not collide with (review CODE-06).
+LIVE_INSTANCE_STATES: tuple[str, ...] = ("READY", "REPLICATING")
+LIVE_INSTANCE_IN = "(" + ",".join(f"'{s}'" for s in LIVE_INSTANCE_STATES) + ")"
+
 # ── Reason taxonomy (agent-facing; docstring-enumerated, classified for the scheduler + queue) ─────────────
 # Admit-time REFUSALS — a templated ask the gate turns away up front (fail-closed). All are operator-mutable
 # (bind a seed / declare reachability / register an instance / pick a reachable pool), so NONE join
@@ -692,7 +697,7 @@ def preflight_unbound_multinode(conn: psycopg.Connection[Any]) -> list[dict[str,
     the remedy is bind_instance_placement. Read-only; commits to end the read transaction."""
     rows = conn.execute(
         "SELECT ti.cluster_id, ti.id, ti.template_id FROM template_instance ti "
-        "WHERE ti.instance_state IN ('READY', 'REPLICATING') AND ti.storage_id IS NULL "
+        f"WHERE ti.instance_state IN {LIVE_INSTANCE_IN} AND ti.storage_id IS NULL "
         "AND (SELECT count(*) FROM node n WHERE n.cluster_id = ti.cluster_id) > 1 "
         "ORDER BY ti.cluster_id, ti.id"
     ).fetchall()

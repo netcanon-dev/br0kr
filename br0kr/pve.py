@@ -43,6 +43,16 @@ from urllib3.util.retry import Retry
 
 # imgbuild: the driver refuses to reap-DELETE anything but a broker-owned import artifact (below)
 from br0kr import imgbuild, metrics
+from br0kr.driver import (
+    DESTROY,
+    DESTROYED,
+    FENCE_APPEARED,
+    FENCE_MISMATCH,
+    GONE,
+    IS_TEMPLATE,
+    NOT_CLONE,
+    REPL_FENCE_APPEARED,
+)
 
 log = logging.getLogger(__name__)
 
@@ -433,10 +443,10 @@ def destroy_decision(exists: bool, tags: str | None, lease_id: int) -> str:
       • 'destroy'        — fence matches; safe to delete.
     """
     if not exists:
-        return "gone"
+        return GONE
     if not fence_matches(tags, lease_id):
-        return "fence_mismatch"
-    return "destroy"
+        return FENCE_MISMATCH
+    return DESTROY
 
 
 def has_template_marker(tags: str | None) -> bool:
@@ -469,14 +479,14 @@ def clone_orphan_decision(exists: bool, tags: str | None) -> str:
     The order is load-bearing: a re-used vmid that has since been fenced (lease OR replication) must read
     '*_fence_appeared' (and be spared), NEVER 'destroy'."""
     if not exists:
-        return "gone"
+        return GONE
     if parse_fence_tag(tags) is not None:
-        return "fence_appeared"
+        return FENCE_APPEARED
     if parse_repl_fence(tags) is not None:
-        return "repl_fence_appeared"   # a replication copy — spared here; the §6.6 repl reclaim tears it down
+        return REPL_FENCE_APPEARED   # a replication copy — spared here; the §6.6 repl reclaim tears it down
     if not has_template_marker(tags):
-        return "not_clone"
-    return "destroy"
+        return NOT_CLONE
+    return DESTROY
 
 
 # A sentinel `Pve.list_node_storage` returns when PVE denies the token access to the node-storage listing
@@ -960,8 +970,8 @@ class Pve:
         fields = {"vmid": vmid, **(extra or {})}
         for stage in ("before stop", "before delete"):
             verdict = recheck()
-            if verdict != "destroy":
-                emit = log.info if verdict == "gone" else log.warning       # 'gone' is benign, not a refusal
+            if verdict != DESTROY:
+                emit = log.info if verdict == GONE else log.warning       # 'gone' is benign, not a refusal
                 emit("%s: vmid %s not destroyed (%s: re-check → %s; vmid reused/vanished)", what, vmid, stage,
                      verdict, extra=fields)
                 return verdict
@@ -987,7 +997,7 @@ class Pve:
             log.warning("%s: vmid %s DELETE did not succeed (task=%s) — will retry", what, vmid, rc, extra=fields)
             raise DeleteTaskFailed(f"{what}: DELETE of vmid {vmid} did not succeed (task={rc})")
         log.info("%s: vmid %s deleted (task=%s)", what, vmid, rc, extra=fields)
-        return "destroyed"
+        return DESTROYED
 
     def agent_network_interfaces(self, vmid: int) -> Any:
         """The guest's network interfaces as the QEMU guest agent reports them (the `result` list of
@@ -1126,10 +1136,10 @@ class Pve:
             # before the stop and again before the DELETE, so a vmid reused (since-fenced), converted to a
             # template, or gone during the window is spared.
             if not self.exists(vmid):
-                return "gone"
+                return GONE
             fresh = self._get(f"/nodes/{self.node}/qemu/{vmid}/config")
             if int(fresh.get("template", 0) or 0) == 1:
-                return "is_template"
+                return IS_TEMPLATE
             return clone_orphan_decision(True, fresh.get("tags"))
 
         return self._stop_then_fenced_delete(vmid, _recheck, f"destroy_clone_orphan(vmid={vmid})",
@@ -1227,7 +1237,7 @@ class Pve:
             res = self._delete(f"/nodes/{self.node}/storage/{storage}/content/{volid}")
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:
-                return "gone"
+                return GONE
             raise
         if isinstance(res, str) and res.startswith("UPID:"):
             # Honor the delete task's exitstatus: an 'imgdel' worker that FAILED (NFS hiccup, file held open) or
@@ -1316,25 +1326,25 @@ class Pve:
         guest destroyed / a live catalog template destroyed under leader overlap. A guest already carrying OUR
         fence is provably ours → the identity checks are skipped (idempotent re-stamp)."""
         if not self.exists(vmid):
-            return "gone"
+            return GONE
         cfg = self._get(f"/nodes/{self.node}/qemu/{vmid}/config")
         tags = cfg.get("tags")
         if parse_fence_tag(tags) is not None:
-            return "fence_mismatch"   # a live lease holds this vmid
+            return FENCE_MISMATCH   # a live lease holds this vmid
         other = parse_repl_fence(tags)
         if other is not None and other != replication_id:
-            return "fence_mismatch"   # a DIFFERENT replication job holds it
+            return FENCE_MISMATCH   # a DIFFERENT replication job holds it
         if other is None:
             # ADOPTING a not-yet-ours guest — require POSITIVE identity (a collided vmid pointing at a foreign
             # lease's unfenced clone, or a stripped catalog template, must NEVER be adopted). Our own just-landed
             # clone carries the marker, is template=0, and has the deterministic _replica_name → it passes.
             present = {t for t in re.split(r"[;,\s]+", (tags or "").strip()) if t}
             if TEMPLATE_TAG not in present:
-                return "fence_mismatch"   # not our clone (no marker)
+                return FENCE_MISMATCH   # not our clone (no marker)
             if int(cfg.get("template", 0) or 0) == 1:
-                return "fence_mismatch"   # a converted guest we do not own (e.g. a stripped catalog template)
+                return FENCE_MISMATCH   # a converted guest we do not own (e.g. a stripped catalog template)
             if expected_name is not None and cfg.get("name") != expected_name:
-                return "fence_mismatch"   # a DIFFERENT guest at this (recycled/collided) vmid — not THIS job's clone
+                return FENCE_MISMATCH   # a DIFFERENT guest at this (recycled/collided) vmid — not THIS job's clone
         self.configure(vmid, {"tags": f"{repl_fence_tag(replication_id)};{TEMPLATE_TAG}"})
         return "stamped"
 
@@ -1354,7 +1364,7 @@ class Pve:
         destroyed a healthy, fully-converted copy)."""
         cfg = self._get(f"/nodes/{self.node}/qemu/{vmid}/config")
         if parse_repl_fence(cfg.get("tags")) != replication_id:
-            return "fence_mismatch"
+            return FENCE_MISMATCH
         tags = f"{repl_fence_tag(replication_id)};{TEMPLATE_TAG}"
         if int(cfg.get("template", 0) or 0) == 1:
             self._post(f"/nodes/{self.node}/qemu/{vmid}/config", {"tags": tags})   # already a template → converge
@@ -1373,8 +1383,8 @@ class Pve:
         API error or a failed/timed-out DELETE task (review S08), which the caller (the reclaim) retries."""
         def _recheck() -> str:
             if not self.exists(vmid):
-                return "gone"
-            return "destroy" if parse_repl_fence(self.read_tags(vmid)) == replication_id else "fence_mismatch"
+                return GONE
+            return DESTROY if parse_repl_fence(self.read_tags(vmid)) == replication_id else FENCE_MISMATCH
 
         return self._stop_then_fenced_delete(vmid, _recheck, f"fenced_destroy_replica(repl={replication_id})",
                                              {"replication_id": replication_id}, on_progress=on_progress)
@@ -1392,8 +1402,8 @@ class Pve:
             # Re-derive the build-fence verdict from a FRESH read — _stop_then_fenced_delete calls this both
             # before the stop and again before the DELETE, so a vmid reused by another build/lease is refused.
             if not self.exists(vmid):
-                return "gone"
-            return "destroy" if parse_build_fence(self.read_tags(vmid)) == build_id else "fence_mismatch"
+                return GONE
+            return DESTROY if parse_build_fence(self.read_tags(vmid)) == build_id else FENCE_MISMATCH
 
         return self._stop_then_fenced_delete(vmid, _recheck, f"destroy_build_vm(build={build_id})",
                                              {"build_id": build_id}, on_progress=on_progress)
