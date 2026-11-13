@@ -99,7 +99,7 @@ WHY: a regression a 2 ms unit test can catch shouldn't need a 30 s browser boot 
 ```bash
 pytest -m "not e2e and not slow"     # the hermetic default — local + CI
 pytest -m e2e                         # opt-in, dedicated CI job
-pytest --cov=br0kr --cov-report=term-missing
+pytest --cov=br0kr --cov-report=term-missing   # fails below the floor, pyproject.toml fail_under
 ```
 
 **The harness tier.** The invariants only a real database can prove (lock order, CAS predicates, migrations,
@@ -148,6 +148,21 @@ safely delete it. Enforced, not aspirational, because aspirational rules rot.
 `--cov` targets `br0kr` and omits test files and any code you've deliberately not covered yet
 (see `[tool.coverage]` in `pyproject.toml`). WHY: a coverage number diluted by code you chose not to
 test is a lie — scope it so the figure means something.
+
+**The floor.** `fail_under` in `pyproject.toml` is the measured total minus 2. A PR that drops the unit suite's
+coverage below it fails CI's test job, and `pytest --cov` fails locally too. Raise it each quarter to the new
+measurement minus 2. Lower it only with a reason in the commit; the test that pins it
+(`tests/unit/test_repo_hygiene.py`) must change too, so a lowered floor shows up in review. WHY: a number only
+printed into a log drifts down unseen.
+
+**The report.** CI keeps `coverage.xml` from the py3.13 leg as a run artifact (`coverage-py3.13`, 30 days), with
+no third-party service. The terminal report in the log lists each module's uncovered lines.
+
+**What reads low, and why.** Nothing in `br0kr` is omitted, so the figure is honest about what the unit suite
+covers. The SQL-heavy modules (admission, lease, migration, replication) read low because the real-Postgres
+harness job proves their lock and CAS paths, and that job is not counted. Others (logging setup, the OAuth shim,
+the gateway, the scheduler) read low only for lack of unit tests: the floor's margin is the place to start
+adding them.
 
 ---
 

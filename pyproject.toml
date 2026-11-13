@@ -166,7 +166,15 @@ markers = [
 # =============================================================================
 [tool.coverage.run]
 source = ["br0kr"]   # scope to YOUR code so the number reflects what's under test
+# Nothing in br0kr is omitted, so the figure is honest about what the unit suite covers. Some modules read low
+# (testing.md §5): the SQL-heavy ones because the real-Postgres harness job, which is not counted, proves them;
+# the others for lack of unit tests.
 omit = ["tests/*"]
 
 [tool.coverage.report]
 show_missing = true        # print the uncovered line numbers — actionable, not just a %
+# The floor (review TEST-05): the measured total minus 2. Measured 85.7% on 2026-11-13 (CI, every Python leg),
+# so 83. Below it, `pytest --cov` fails, and so does CI's test job. Raise it each quarter to the new
+# measurement minus 2. Lowering it needs a reason in the commit and an edit to the test that pins it
+# (tests/unit/test_repo_hygiene.py). docs/standards/testing.md §5 says why.
+fail_under = 83

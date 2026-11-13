@@ -335,3 +335,23 @@ def test_no_review_tool_names_outside_the_history():
         if _REVIEW_TOOL_WORDS.search(line):
             hits.append(f"CHANGELOG.md [Unreleased] line {n}")
     assert not hits, f"review-tool names outside the history (say what would go wrong instead): {hits}"
+
+
+def test_coverage_floor_is_set_and_ci_applies_it():
+    """pyproject.toml sets a coverage floor (`[tool.coverage.report] fail_under`, review TEST-05) of at least the
+    first measurement minus 2, and ci.yml's test job runs pytest with `--cov=br0kr` (pytest-cov applies the floor
+    only when coverage is on), with nothing that switches it off, keeping coverage.xml as a run artifact.
+
+    Guards the floor going dead without anyone noticing: a removed `--cov`, an added `--no-cov`, `-p no:cov` or
+    `--cov-fail-under`, a removed or lowered `fail_under`, and coverage again drifts down with nothing failing,
+    which is what the review found. Raising the floor needs
+    no edit here; lowering it does, so the change is visible in review."""
+    cfg = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["coverage"]["report"]
+    assert isinstance(cfg.get("fail_under"), (int, float)) and cfg["fail_under"] >= 83, cfg.get("fail_under")
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci.split("\n  test:\n", 1)[1].split("\n  harness:\n", 1)[0]
+    assert "--cov=br0kr" in job and "--cov-report=xml" in job
+    assert not [off for off in ("--no-cov", "no:cov", "--cov-fail-under") if off in job]
+    assert "--cov-fail-under" not in str(tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+                                         ["tool"]["pytest"]["ini_options"].get("addopts", ""))
+    assert "uses: actions/upload-artifact@" in job and "path: coverage.xml" in job

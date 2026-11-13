@@ -75,6 +75,9 @@ enforces most of them, and a PR that drops one should be rejected in review.
   - The PR gate runs `pytest -m "not e2e and not slow"` — fast, hermetic tiers
     only. Slow/e2e tiers (real browser, live service) run in a dedicated job or
     out-of-band so the gate stays quick.
+  - It runs with `--cov=br0kr`, so it fails below `pyproject.toml`'s
+    `fail_under` coverage floor, and the py3.13 leg keeps `coverage.xml` as the
+    run artifact `coverage-py3.13` ([testing.md §5](testing.md#5-coverage-reflects-whats-actually-under-test)).
 - **`harness` job** runs `bash scripts/run_harness.sh --ci` against a
   `postgres:16` service container: the real-Postgres race and saga proofs. The
   unit suite stubs the advisory locks and CAS predicates, so this job is what

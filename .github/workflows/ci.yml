@@ -129,8 +129,21 @@ jobs:
       - name: pytest (offline — e2e/slow excluded; the hermetic default)
         # The PR gate runs the fast, hermetic tiers. Slow/e2e tiers (real
         # browser, live service) run in a dedicated job or out-of-band so the
-        # gate stays fast. Coverage targets the br0kr package.
-        run: pytest -m "not e2e and not slow" --cov=br0kr --cov-report=term-missing
+        # gate stays fast. Coverage targets the br0kr package, and the step
+        # fails below pyproject.toml's `fail_under` floor (review TEST-05).
+        run: pytest -m "not e2e and not slow" --cov=br0kr --cov-report=term-missing --cov-report=xml
+
+      - name: keep the coverage report
+        # coverage.xml as a run artifact (no third-party service): download it
+        # from the run page to see which lines a PR left uncovered. One leg is
+        # enough; the total is the same on every supported Python.
+        if: ${{ !cancelled() && matrix.python == '3.13' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-py3.13
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 30
 
   harness:
     # The race and saga proofs need a real Postgres: the unit suite stubs the

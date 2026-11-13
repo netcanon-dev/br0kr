@@ -19,7 +19,7 @@ pip install -r tests/requirements-dev.txt
 pytest -m "not e2e and not slow"                 # the hermetic default (what the gate runs)
 pytest -m e2e                                    # reserved: no e2e tests yet (see the pyramid below)
 BR0KR_THROWAWAY_PG=1 PGHOST=... pytest -m harness   # the real-Postgres harness tier (opt-in, see below)
-pytest --cov=br0kr --cov-report=term-missing
+pytest --cov=br0kr --cov-report=term-missing   # fails below the floor, pyproject.toml fail_under
 ```
 
 ## The pyramid
