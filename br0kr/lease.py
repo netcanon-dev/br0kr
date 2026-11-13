@@ -52,14 +52,14 @@ committing op would also commit it).
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
 
-from br0kr import multidisk
+from br0kr import multidisk, statemachine
 
 log = logging.getLogger(__name__)
 
@@ -109,9 +109,13 @@ def is_reserved_idem_key(idem_key: str | None) -> bool:
     return idem_key is not None and any(idem_key.startswith(p) for p in RESERVED_IDEM_PREFIXES)
 
 # The legal edges of the state machine — and, for every edge below, there is a
-# guarded-CAS function here that implements it (no transition is performed by a raw
-# UPDATE elsewhere). A transition NOT listed is a bug, not a race.
-VALID_TRANSITIONS: dict[str, frozenset[str]] = {
+# guarded-CAS function here that implements it. One raw UPDATE elsewhere takes a lease edge:
+# replication.sweep_waiters rejects a queued lease whose awaited replication failed (PENDING →
+# REJECTED), checked against this machine by tests/unit/test_statemachine.py. A transition NOT
+# listed is a bug, not a race. Declared with the same
+# Machine class as the job machines (br0kr/statemachine.py, review ARCH-04), here beside
+# its CAS functions; VALID_TRANSITIONS is its read-only edge table.
+LEASE = statemachine.Machine("lease", {
     "PENDING": frozenset({"ADMITTED", "REJECTED"}),
     "ADMITTED": frozenset({"PROVISIONING", "RELEASING"}),
     "PROVISIONING": frozenset({"ACTIVE", "RELEASING"}),
@@ -120,7 +124,8 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "RELEASED": frozenset(),
     "REJECTED": frozenset(),
     "RELEASE_FAILED": frozenset(),
-}
+})
+VALID_TRANSITIONS: Mapping[str, frozenset[str]] = LEASE.transitions
 
 # Terminal states = the machine's sinks (no outgoing edge): a lease that is fully done — holds no capacity,
 # has no guest, and needs no node. DERIVED from VALID_TRANSITIONS so it can never drift. Used by
@@ -974,9 +979,10 @@ def list_held(
 _VMID_OWNED_SQL = "(" + ",".join(f"'{s}'" for s in (*LIVE_STATES, "RELEASING")) + ")"
 _VMID_TERMINAL_SQL = "(" + ",".join(f"'{s}'" for s, _e in VALID_TRANSITIONS.items() if not _e) + ")"
 # The replication-job states in which a transient COPY guest exists at a stamped vmid — the ones the
-# `replication_cluster_vmid` fence index (0034) constrains. Kept as a literal (lease.py is imported BY
-# replication.py, so it can't import back) — a drift-guard test pins it against replication.LIVE_STATES.
-_REPL_VMID_ACTIVE_SQL = "('COPYING','CONVERTING','RECLAIMING')"
+# `replication_cluster_vmid` fence index (0034) constrains: every live state but REQUESTED, which has no guest
+# yet. Read from the replication machine (br0kr/statemachine.py imports nothing back, so lease.py can use it).
+_REPL_VMID_ACTIVE_SQL = statemachine.REPLICATION.sql_in(
+    s for s in statemachine.REPLICATION.live if s != "REQUESTED")
 
 
 def clone_orphan_reclaimable(

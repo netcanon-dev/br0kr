@@ -53,6 +53,16 @@ ledger or acts on Proxmox, and what proves it.
    reason code a hint in the page (`static/dashboard.js`); `tests/unit/test_dashboard.py` fails on a `_Reject` code
    or an `admin.py` validator code that has none.
 
+## Adding a job state or transition
+
+1. Declare it first: the state or edge goes in its machine in `statemachine.py` (a lease's in `lease.LEASE`). The
+   modules' named state lists come from there, and each machine's states must match the schema that stores them,
+   its live states the partial indexes over them.
+2. Write the step's guarded UPDATE beside it as before (`… WHERE id = %s AND state = 'FROM' RETURNING id`).
+   `tests/unit/test_statemachine.py` reads every state-setting UPDATE in `build.py`, `replication.py` and
+   `migration.py` and fails on an edge the machine does not list, a declared edge no step takes, or a guard it
+   cannot read.
+
 ## Adding a tick step
 
 1. Write the step's `run(daemon, conn, summary)` in the `tick_*.py` module that owns that kind of work, or in a new

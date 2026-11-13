@@ -163,6 +163,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `replication.py` | Template-replication jobs: eligibility, CAS transitions, the copy saga. | writes; via admission | via pve | `unit/test_replication.py`, `harness_replication.py` |
 | `scheduler.py` | Picks a node for an unpinned ask: ranks candidates, tries `admit()` on each. | reads; via admission | — | `unit/test_scheduler.py`, `harness_schedule.py` |
 | `settings.py` | The `operator_setting` knobs: ledger, then env, then default, applied each tick. | writes | — | `unit/test_settings.py`, `harness_settings.py` |
+| `statemachine.py` | The job state machines (build, replication, migration): each one's states and legal edges. | — | — | `unit/test_statemachine.py` |
 | `sweeper.py` | The teardown backstop: destroys fenced guests whose lease is terminal or gone. | via replication | via pve | `integration/test_sweeper.py`, `harness_sweeper_watermark.py` |
 | `tick_builds.py` | Tick steps: template downloads and the stale-build reclaim. | via build, reconciler | acts (build reclaim); via reconciler | `integration/test_daemon.py`, `harness_build_node_pick.py` |
 | `tick_config.py` | Tick steps: hot-apply the operator settings, then hot-reload the node registry. | via settings | — | `unit/test_daemon.py`, `integration/test_daemon.py` |

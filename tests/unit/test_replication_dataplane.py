@@ -673,15 +673,6 @@ def test_do_copy_rebuild_skips_the_failure_reap_when_it_loses_the_reclaim_claim(
     assert drv.freed == []   # reclaim lost → skip the reap (a winner may still be importing from the source)
 
 
-def test_reclaim_vmid_active_states_match_replication_live_states():
-    """lease._REPL_VMID_ACTIVE_SQL (the clone-orphan guard's repl term) must list exactly the vmid-bearing live
-    replication states — replication.LIVE_STATES minus REQUESTED (which has no vmid). A drift-guard so the
-    sweep-eats-the-copy protection can't silently stop covering a state."""
-    for s in (s for s in replication.LIVE_STATES if s != "REQUESTED"):
-        assert f"'{s}'" in lease._REPL_VMID_ACTIVE_SQL
-    assert "'REQUESTED'" not in lease._REPL_VMID_ACTIVE_SQL
-
-
 def test_run_pending_replications_starts_no_copy_once_told_to_stop(monkeypatch):
     """With `should_stop` True the replication pass steps no job, after beating once (the heartbeat that lets the
     daemon notice a lost leadership). Guards review REL-05: a batch of copies started after the daemon knows it

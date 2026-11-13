@@ -34,7 +34,7 @@ from typing import Any
 import psycopg
 import requests
 
-from br0kr import admission, imgbuild, lease, placement, pve, reasons, reconciler
+from br0kr import admission, imgbuild, lease, placement, pve, reasons, reconciler, statemachine
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -47,8 +47,8 @@ log = logging.getLogger(__name__)
 IMPLEMENTED_MECHANISMS: frozenset[str] = frozenset({"clone_shared", "rebuild_source"})
 
 # The non-terminal job states — the ones the `replication_one_active` unique index constrains and the fleet
-# stat counts. Derived once so every reader agrees (the build.py CLAIMED_STATES discipline).
-LIVE_STATES: tuple[str, ...] = ("REQUESTED", "COPYING", "CONVERTING", "RECLAIMING")
+# stat counts. Read from the replication machine (br0kr/statemachine.py, review ARCH-04) so every reader agrees.
+LIVE_STATES: tuple[str, ...] = statemachine.REPLICATION.live
 
 _COLS = ("id, template_id, source_instance_id, target_cluster_id, target_storage_id, target_node_id, vmid, "
          "mechanism, job_state, attempts, error, requested_by, project_id, size_gb, guest_settled_at, "
@@ -519,8 +519,8 @@ def prune_replications(
 # ══════════════════════════════════════════════════════════════════════════════════════════════════════
 
 # The states run_replication_step advances vs the states the stale reclaim tears down (a stamped guest may exist).
-_ADVANCE_STATES: tuple[str, ...] = ("REQUESTED", "COPYING", "CONVERTING")
-_RECLAIM_STATES: tuple[str, ...] = ("COPYING", "CONVERTING", "RECLAIMING")
+_ADVANCE_STATES: tuple[str, ...] = tuple(s for s in statemachine.REPLICATION.live if s != "RECLAIMING")
+_RECLAIM_STATES: tuple[str, ...] = tuple(s for s in statemachine.REPLICATION.live if s != "REQUESTED")
 _ADVANCE_IN = "(" + ",".join(f"'{s}'" for s in _ADVANCE_STATES) + ")"
 _RECLAIM_IN = "(" + ",".join(f"'{s}'" for s in _RECLAIM_STATES) + ")"
 

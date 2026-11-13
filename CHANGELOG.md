@@ -45,6 +45,8 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The job state machines are declared once, in `br0kr/statemachine.py`, and the jobs' guarded UPDATEs are checked.**
+  `test_statemachine.py` fails on a build, replication or migration edge its machine lacks; no SQL changed (ARCH-04).
 - **The dashboard's script is a file, `br0kr/static/dashboard.js`, and its CSP is `script-src 'self'` alone.**
   No inline script or handler is left: a control names an allow-listed action in `data-act`, so an injected
   inline script or handler never runs (UI-08).

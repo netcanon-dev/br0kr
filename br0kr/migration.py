@@ -65,14 +65,16 @@ from typing import Any
 
 import psycopg
 
-from br0kr import admission, lease, pdm, pve, reasons
+from br0kr import admission, lease, pdm, pve, reasons, statemachine
 from br0kr.admission import AdmissionRequest
 
 log = logging.getLogger(__name__)
 
-# Non-terminal saga states the daemon keeps driving; the partial index `migration_pending` covers them.
-ACTIVE_STATES: tuple[str, ...] = ("REQUESTED", "RESERVED", "MIGRATING")
-_PENDING_SQL = "(" + ",".join(f"'{s}'" for s in ACTIVE_STATES) + ")"
+# Non-terminal saga states the daemon keeps driving; the partial index `migration_pending` covers them. Read from
+# the migration machine (br0kr/statemachine.py, review ARCH-04).
+ACTIVE_STATES: tuple[str, ...] = statemachine.MIGRATION.live
+TERMINAL_STATES: tuple[str, ...] = statemachine.MIGRATION.terminal   # DONE, ABORTED: the saga is settled
+_PENDING_SQL = statemachine.MIGRATION.sql_in(ACTIVE_STATES)
 _LIVE_LEASE_SQL = "(" + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")"
 
 # A reservation must outlive a slow cross-cluster copy; the daemon re-heartbeats it each step while
@@ -577,7 +579,7 @@ def cancel_migration(conn: psycopg.Connection[Any], migration_id: int) -> dict[s
     mig = _refresh(conn, migration_id)
     if mig is None:
         return {"migration_id": migration_id, "cancelled": False, "state": None, "reason": reasons.UNKNOWN_MIGRATION}
-    if mig.state in ("DONE", "ABORTED"):
+    if mig.state in TERMINAL_STATES:
         return {"migration_id": migration_id, "cancelled": False, "state": mig.state,
                 "reason": "already_terminal"}
     # Guarded abort: ONLY the provably-pre-copy states (REQUESTED/RESERVED) — a copy is POSTed only AFTER
@@ -595,7 +597,7 @@ def cancel_migration(conn: psycopg.Connection[Any], migration_id: int) -> dict[s
     # The CAS matched nothing → the saga is MIGRATING (a copy MAY be in flight — the POST precedes the upid
     # persist, so migrate_upid can be NULL yet a copy live) or it raced terminal.
     fresh = _require(_refresh(conn, migration_id), migration_id)
-    if fresh.state in ("DONE", "ABORTED"):
+    if fresh.state in TERMINAL_STATES:
         return {"migration_id": migration_id, "cancelled": False, "state": fresh.state,
                 "reason": "already_terminal"}
     log.info("migration %s cancel REFUSED (state %s, task %s) — a copy may be in flight; the daemon settles it "
@@ -659,7 +661,7 @@ def _reserve(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm) -> 
 
     _link_reservation(conn, mig.id, res.lease_id)   # CAS REQUESTED→RESERVED (idempotent on resume)
     mig = _require(_refresh(conn, mig.id), mig.id)
-    if mig.state in ("DONE", "ABORTED"):
+    if mig.state in TERMINAL_STATES:
         # A concurrent operator cancel ABORTED the saga between admit() COMMITTING the reservation and this
         # link CAS — so _link_reservation missed, and cancel's own _settle_by_key ran BEFORE admit committed
         # (found nothing), leaving the just-admitted reservation orphaned (ADMITTED, unlinked). Settle it now
@@ -691,7 +693,7 @@ def _actuate(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm,
     # have advanced this row — so the state / migrate_upid the resume decision keys on MUST be fresh, else a
     # resume could re-POST a second copy or abort+settle while the OTHER leader's copy is still in flight.
     mig = _require(_refresh(conn, mig.id), mig.id)
-    if mig.state in ("DONE", "ABORTED"):
+    if mig.state in TERMINAL_STATES:
         return mig   # already finalized by another pass / the overlapping leader — nothing to do
     facts = _read_facts(conn, mig)
     # CONVERGENCE (resume / two-daemon overlap): if the lease is ALREADY on the target, the flip
@@ -761,7 +763,7 @@ def _actuate(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm,
         return mig
     if mig.state != "MIGRATING":
         mig = _set_state(conn, mig.id, "MIGRATING")   # mark actuation attempted (resume marker)
-        if mig.state in ("DONE", "ABORTED"):
+        if mig.state in TERMINAL_STATES:
             # A concurrent operator cancel (or an overlapping leader) terminated the saga before we could claim
             # it MIGRATING — `_set_state`'s CAS excludes terminal, so it no-op'd and re-read a terminal row. Do
             # NOT POST the copy: this MIGRATING CAS is the atomic CLAIM that serializes against
@@ -791,7 +793,7 @@ def _actuate(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm,
             return _abort(conn, mig, f"actuation:{verdict}")
         assert upid is not None
         mig = _set_migrate_upid(conn, mig.id, upid)   # → mig.migrate_upid = the persisted winner (ours/overlap's)
-        if mig.state in ("DONE", "ABORTED"):
+        if mig.state in TERMINAL_STATES:
             return mig   # an overlapping leader finalized it while we POSTed — do not touch
     if mig.migrate_upid is None:
         return mig   # defensive: non-terminal with no upid can't happen after the CAS — retry, never wait(None)
@@ -822,7 +824,7 @@ def _commit(conn: psycopg.Connection[Any], mig: Migration, facts: _Facts, dest: 
     # guards on LEASE liveness, not saga state, so without this a stale commit would move the lease's debit
     # onto the target with NO reservation held → over-commit. On a terminal row, do not flip.
     fresh = _refresh(conn, mig.id)
-    if fresh is not None and fresh.state in ("DONE", "ABORTED"):
+    if fresh is not None and fresh.state in TERMINAL_STATES:
         log.info("migration %s: saga already %s at commit — not flipping (converged/aborted concurrently)",
                  mig.id, fresh.state, extra={"lease_id": mig.lease_id})
         return fresh

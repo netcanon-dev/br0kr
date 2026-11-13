@@ -18,9 +18,11 @@ rollout.
 - **One race-critical seam.** Every capacity grant is made under the scope advisory locks in
   `br0kr/admission.py`: `admit()` and its sibling `promote_pinned()` share one locked core, and nothing else adds
   a debit. Capacity is freed only by the guarded-CAS lease transitions in `br0kr/lease.py`, which need no lock
-  (each targets one existing row). Inputs reach their handlers through explicit tables (the dashboard's route
-  map and its action table `dashboard_actions._ACTIONS`, the MCP verb registry `br0kr/verbs.py`, the daemon's
-  `tick_steps.STEPS`), never through per-case branching scattered across the codebase.
+  (each targets one existing row). A job's transitions (build, replication, migration) are the edges of its
+  machine in `br0kr/statemachine.py`, and a test checks every guarded UPDATE in those modules against it. Inputs reach their
+  handlers through explicit tables (the dashboard's route map and its action table `dashboard_actions._ACTIONS`,
+  the MCP verb registry `br0kr/verbs.py`, the daemon's `tick_steps.STEPS`), never through per-case branching
+  scattered across the codebase.
 - **Config-as-data, validated.** node/storage/quota limits (SQL rows) are data; they must pass
   validation before they run.
 - **Tests, docs, and logging are first-class.** A behaviour change isn't *done*

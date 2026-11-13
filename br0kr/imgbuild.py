@@ -26,14 +26,15 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
-from br0kr import reasons
+from br0kr import reasons, statemachine
 
 # A build is live until it reaches one of these; mirrors the lease lifecycle's terminal set. Kept here (the
 # pure module) so the daemon's "claim a live build" and admin's "one active build per target" agree on one
 # definition — a drift guard pins it against the 0015 CHECK in tests.
-TERMINAL_STATES: frozenset[str] = frozenset({"READY", "FAILED"})
-BUILD_STATES: tuple[str, ...] = (
-    "REQUESTED", "DOWNLOADING", "IMPORTING", "RECLAIMING", "READY", "FAILED")
+# Both are read from the build machine (br0kr/statemachine.py, review ARCH-04), the one declaration of a build's
+# states and edges.
+TERMINAL_STATES: frozenset[str] = frozenset(statemachine.BUILD.terminal)
+BUILD_STATES: tuple[str, ...] = statemachine.BUILD.states
 # The CLAIMED states: a build the daemon has picked up (out of REQUESTED) and that is not yet terminal —
 # DOWNLOADING/IMPORTING while it actuates, plus RECLAIMING once the stale-build reclaim has claimed it for
 # teardown (review S04). A vmid is NOT held for the whole window — a DOWNLOADING build has none (the download
@@ -44,7 +45,7 @@ BUILD_STATES: tuple[str, ...] = (
 # daemon's reclaim scan and build.stale_builds/claim_stale_for_reclaim agree on one set (build.py derives its
 # SQL IN-list straight from this set, so the two can't drift). RECLAIMING stays in the set precisely so a
 # destroy that raises leaves the build reclaimable and a later cutoff retries it.
-CLAIMED_STATES: frozenset[str] = frozenset({"DOWNLOADING", "IMPORTING", "RECLAIMING"})
+CLAIMED_STATES: frozenset[str] = frozenset(statemachine.BUILD.live) - {"REQUESTED"}
 
 _SHA256_RE = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 # A control char / whitespace / newline in a url is an injection vector (the url is passed to the Proxmox
