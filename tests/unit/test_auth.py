@@ -34,6 +34,21 @@ def test_generate_secret_is_high_entropy_and_unique():
 
 
 # ── the tier → verb policy (fail-closed) ─────────────────────────────────────────────────────────────
+def test_allowed_verbs_is_the_tier_policy_over_the_whole_registry():
+    """allowed_verbs(scope) lists exactly the verbs tier_allows grants that scope, sorted: a read token gets no
+    lease or quota verb, provision gets set_quota, an operator gets its operator verbs and the reads but no tenant
+    verb, and an unknown scope gets nothing. Guards whoami's `can` (review UX-07) disagreeing with what
+    _authorize actually lets the token call."""
+    for scope in ("read", "consume", "provision", "operator", "bogus"):
+        got = auth.allowed_verbs(scope)
+        assert got == sorted(v for v in auth.VERB_TIER if auth.tier_allows(scope, v)), scope
+    assert "request_lease" not in auth.allowed_verbs("read") and "whoami" in auth.allowed_verbs("read")
+    assert "set_quota" in auth.allowed_verbs("provision") and "set_quota" not in auth.allowed_verbs("consume")
+    ops = auth.allowed_verbs("operator")
+    assert "node_cordon" in ops and "list_nodes" in ops and "request_lease" not in ops
+    assert auth.allowed_verbs("bogus") == []
+
+
 def test_read_tier_allows_reads_but_not_reservations():
     """A `read` token may call the inventory/capacity/status verbs but NOT reserve/renew/release. Guards a
     read-only credential being able to consume capacity — the core point of the lowest tier."""

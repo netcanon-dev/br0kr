@@ -117,7 +117,7 @@ Each runs on a database of its own, so any of them can run at the same time as a
 | `harness_admin.py` | A lowered quota is seen by the next admit; existing leases are untouched. |
 | `harness_auth.py` | Agent tokens: mint, resolve, revoke, expire, tier gating, lease ownership. |
 | `harness_cli.py` | `br0kr-admin`: a token minted headless resolves; its expiry, audit rows, list, revoke, refusals. |
-| `harness_provision.py` | A `provision` token's self-raised quota stays within the ceiling and the node floor. |
+| `harness_provision.py` | A `provision` token's self-raised quota stays within the ceiling and the node floor; a partial set changes only the limits given. |
 | `harness_node_decommission.py` | A force-delete severs terminal history; a node with live or queued leases refuses. |
 | `harness_settings.py` | Operator settings: resolve, override, validate. |
 | `harness_dashboard_actas.py` | An operator's "create VM" debits the chosen project through admission. |

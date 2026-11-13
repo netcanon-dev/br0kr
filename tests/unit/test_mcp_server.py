@@ -525,12 +525,16 @@ def test_cancel_and_the_bulk_writes_audit_each_change_and_nothing_else(monkeypat
 def test_whoami_reflects_the_bound_project_scope_and_token(monkeypatch):
     """whoami returns the token's OWN {project_id, scope, token_id} with NO ledger read — so an agent can
     confirm WHICH tenant the globally-selected connector is bound to (connectors are per host/app, not per
-    workspace). An OPERATOR token (project_id None) reports project_id None + scope operator. Guards the
-    identity echo drifting or ever returning the token SECRET (only the numeric id is exposed) — Task 2."""
+    workspace) — plus `can`, the tools its tier may call, straight from auth.allowed_verbs (review UX-07). An
+    OPERATOR token (project_id None) reports project_id None + scope operator. Guards the identity echo drifting
+    or ever returning the token SECRET (only the numeric id is exposed) — Task 2 — and `can` disagreeing with
+    the policy _authorize enforces."""
     monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("Kontroll", "provision", 4))
-    assert mcp_server.whoami(object()) == {"project_id": "Kontroll", "scope": "provision", "token_id": 4}
+    assert mcp_server.whoami(object()) == {"project_id": "Kontroll", "scope": "provision", "token_id": 4,
+                                           "can": auth.allowed_verbs("provision")}
     monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal(None, "operator", 9))
-    assert mcp_server.whoami(object()) == {"project_id": None, "scope": "operator", "token_id": 9}
+    assert mcp_server.whoami(object()) == {"project_id": None, "scope": "operator", "token_id": 9,
+                                           "can": auth.allowed_verbs("operator")}
 
 
 def test_whoami_returns_the_authorize_error_unchanged(monkeypatch):
@@ -1132,6 +1136,22 @@ def test_set_quota_applies_to_the_tokens_own_project(monkeypatch):
     out = mcp_server.set_quota(object(), cpu_limit=16.0, mem_limit_mb=32768, max_leases=15)
     assert out == {"updated": True}
     assert captured == {"project": "team-a", "cpu_limit": 16.0, "mem_limit_mb": 32768, "max_leases": 15}
+
+
+def test_set_quota_takes_any_limit_alone_and_audits_only_what_was_asked(monkeypatch):
+    """set_quota(cpu_limit=...) alone reaches gateway.set_quota with the other two limits None (kept as they are),
+    and the audit row records only the limit that was asked for (review UX-07). Guards 'raise only CPU' needing
+    the other limits re-sent, and an audit row claiming limits were set to null."""
+    monkeypatch.setattr(mcp_common, "_authorize", lambda _ctx, _v: auth.Principal("team-a", "provision", 1))
+    monkeypatch.setattr(mcp_common, "_conn", lambda: _CtxConn())
+    captured: dict = {}
+    monkeypatch.setattr(gateway, "set_quota",
+                        lambda c, pid, **k: captured.update(project=pid, **k) or {"updated": True})
+    rows: list = []
+    monkeypatch.setattr(audit, "record", lambda c, **k: rows.append((k["action"], k["params"])))
+    assert mcp_server.set_quota(object(), cpu_limit=16.0) == {"updated": True}
+    assert captured == {"project": "team-a", "cpu_limit": 16.0, "mem_limit_mb": None, "max_leases": None}
+    assert rows == [("set_quota", {"cpu_limit": 16.0})]
 
 
 def test_set_quota_denied_for_a_non_provision_token(monkeypatch):

@@ -136,6 +136,7 @@ SELF_SERVICE_DISABLED: Final = "self_service_disabled"
 NON_FINITE: Final = "non_finite"
 NON_POSITIVE: Final = "non_positive"
 EXCEEDS_CEILING: Final = "exceeds_ceiling"
+NOTHING_TO_SET: Final = "nothing_to_set"
 
 # ── Template downloads (request_template_download) ──────────────────────────────────────────────────────────────
 TEMPLATE_DOWNLOADS_DISABLED: Final = "template_downloads_disabled"

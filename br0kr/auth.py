@@ -118,6 +118,14 @@ def tier_allows(scope: str, verb: str) -> bool:
     return TIER_RANK[scope] >= TIER_RANK[required]
 
 
+def allowed_verbs(scope: str) -> list[str]:
+    """Every verb a principal of `scope` may invoke, sorted: tier_allows over the whole registry (review UX-07,
+    whoami's `can`). Pure reflection of the policy, so it can never disagree with what _authorize enforces. An
+    operator verb is listed for an operator token even on a gateway that withholds the operator tools
+    (BR0KR_MCP_OPERATOR_TOOLS=0, the tenant gateway)."""
+    return sorted(v for v in VERB_TIER if tier_allows(scope, v))
+
+
 def bearer_secret(auth_header: str | None) -> str | None:
     """Extract the token secret from an HTTP `Authorization: Bearer <secret>` header, or None if the
     header is missing or not a non-empty Bearer credential. The scheme prefix is required (a bare value

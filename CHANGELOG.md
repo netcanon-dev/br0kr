@@ -47,6 +47,9 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **Agent polish: `whoami` lists the tools the token may call (`can`); `set_quota` takes any of its three
+  limits** (an omitted one keeps its value; none is `nothing_to_set`); clearer leads for the queue and scheduling
+  tools (UX-07).
 - **A knob stays a column on `operator_setting`, by decision; the daemon applies its knobs in one loop.** Adding
   one is a migration and a `Knob` row (`daemon=True` if the daemon reads it); see br0kr/README (ARCH-06).
 - **The Proxmox driver contract is named: `br0kr/driver.py`, a Protocol the engine is typed against.** mypy now

@@ -47,9 +47,10 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
   so a non-trusted network needs TLS in front (SECURITY.md C12). Proven on real Postgres
   (`scripts/harness_auth.py`).
   The **provision tier** (`br0kr/gateway.set_quota`) lets a token raise/lower its OWN project's quota over
-  MCP, but only within an operator-set ceiling (the project `*_max` columns, `0009`): each dimension is
-  capped at its `*_max` (a NULL ceiling = not self-raisable; no ceiling at all = `self_service_disabled`),
-  and because admission re-reads availability under its scope lock, a self-raised quota still can't beat the
+  MCP (any of the three limits; an omitted one keeps its value), but only within an operator-set
+  ceiling (the project `*_max` columns, `0009`): each dimension is capped at its `*_max` (a NULL ceiling =
+  not self-raisable; no ceiling at all = `self_service_disabled`), and because admission re-reads
+  availability under its scope lock, a self-raised quota still can't beat the
   node/storage floor (`scripts/harness_provision.py`: cpu_limit raised to 16 on a 10-cpu node admits 5
   leases then the NODE binds). The operator sets the ceiling (`admin.validate_ceilings` rejects a non-finite
   one — a NaN ceiling would un-cap the cap); `project_capacity` returns the ceiling so an agent sees its

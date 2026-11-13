@@ -113,10 +113,11 @@ client **is** the mechanism.
 
 Once connected the agent sees the tools and calls them like any other MCP tool. The core flow:
 
-0. `whoami` — confirm **which project** this token acts as (`{project_id, scope, token_id}`). This matters for
-   an **app-level connector** (e.g. a Claude Desktop / claude.ai custom connector), which is selected per
-   host/app, **not** per workspace: a single shared connector always acts as its ONE token's project no matter
-   which project you have open, so `whoami` is how you verify the binding. The main reads (`list_nodes`,
+0. `whoami` — confirm **which project** this token acts as, and which tools its tier may call
+   (`{project_id, scope, token_id, can}`). This matters for an **app-level connector** (e.g. a Claude
+   Desktop / claude.ai custom connector), which is selected per host/app, **not** per workspace: a single
+   shared connector always acts as its ONE token's project no matter which project you have open, so
+   `whoami` is how you verify the binding. The main reads (`list_nodes`,
    `cluster_capacity`, `project_capacity`, `list_leases`) also echo `acting_as: <project_id>` so the bound
    tenant is visible on every capacity check. (Isolation itself is enforced regardless — a token can only ever
    spend its OWN project's quota; `whoami`/`acting_as` just make the binding *legible*.)

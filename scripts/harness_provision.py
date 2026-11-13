@@ -9,6 +9,8 @@ self-raised quota CANNOT overprovision hardware — admission's node floor still
   B. RAISE WITHIN CEILING: set_quota raises the project's cpu/mem/lease quota up to the operator-set
      *_max ceiling; the project row reflects the new limits; max_queued is untouched.
   C. REFUSE ABOVE CEILING: a request above any ceiling is refused 'exceeds_ceiling', the quota unchanged.
+  C2. PARTIAL SET (review UX-07): set_quota(mem_limit_mb=...) alone changes only memory (the write's COALESCE
+     keeps the NULL-passed limits on real Postgres) and answers the resulting row; no limit is 'nothing_to_set'.
   D. SELF-SERVICE DISABLED: a project with NO ceilings set refuses set_quota 'self_service_disabled'.
   E. UNKNOWN PROJECT: set_quota on a missing project → 'unknown_project'.
   F. THE FLOOR (headline): after a provision token raises cpu_limit ABOVE the node's capacity, admission
@@ -122,6 +124,21 @@ def main() -> int:
     check("set_quota_above_ceiling_refused",
           not over["updated"] and over["reason"] == "exceeds_ceiling" and float(cpu_now) == 16.0,
           f"reason={over['reason']} cpu={cpu_now}")
+
+    # ── C2: a partial set (review UX-07): only the limit given changes; NULL keeps the others on Postgres ──
+    with connect() as c:
+        part = gateway.set_quota(c, "team-a", mem_limit_mb=65536)
+    with connect() as c:
+        row = c.execute("SELECT cpu_limit, mem_limit_mb, max_leases FROM project WHERE id='team-a'").fetchone()
+        c.commit()
+    check("partial_set_changes_only_the_limit_given",
+          part["updated"] and (float(row[0]), int(row[1]), int(row[2])) == (16.0, 65536, 20)
+          and part["quota"] == {"cpu_limit": 16.0, "mem_mb_limit": 65536, "max_leases": 20},
+          f"out={part['reason']} quota={part['quota']} row={row}")
+    with connect() as c:
+        empty = gateway.set_quota(c, "team-a")
+    check("no_limit_is_nothing_to_set", not empty["updated"] and empty["reason"] == "nothing_to_set",
+          f"reason={empty['reason']}")
 
     # ── D: self-service disabled (no ceiling on team-c) ────────────────────────────
     with connect() as c:

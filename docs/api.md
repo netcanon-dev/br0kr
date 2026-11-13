@@ -30,11 +30,11 @@ operator tools need an operator token. A tenant token always acts on its own pro
 | [`node_capacity`](#node_capacity) | read | all gateways | Current free capacity on a node (cpu + mem, derived live) so you can size a request before making it. |
 | [`project_capacity`](#project_capacity) | read | all gateways | Remaining tenant budget for YOUR project (cpu + mem + how many more leases it may hold, derived live) so you can check your quota before requesting. |
 | [`project_usage`](#project_usage) | read | all gateways | Report YOUR project's usage over a window: leases that held capacity in it, and their lease-hours, cpu-hours and memory GiB-hours inside it. |
-| [`queue_status`](#queue_status) | read | all gateways | Check a QUEUED lease: its state and how many requests are AHEAD of it in line (its GLOBAL position across the whole queue). |
-| [`queue_view`](#queue_view) | read | all gateways | View YOUR project's admission queue: depth plus the oldest-first head of your waiting requests (up to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's target node has been cordoned (it won't promote until an operator uncordons it or you cancel and re-request elsewhere), else null (a null with room still waiting is transient — it will promote). |
+| [`queue_status`](#queue_status) | read | all gateways | Check ONE queued lease's place in line: its state and how many requests are AHEAD of it (its GLOBAL position across the whole queue; for your whole queue use queue_view). |
+| [`queue_view`](#queue_view) | read | all gateways | View YOUR project's WHOLE admission queue: depth plus the oldest-first head of your waiting requests (up to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's target node has been cordoned (it won't promote until an operator uncordons it or you cancel and re-request elsewhere), else null (a null with room still waiting is transient — it will promote). |
 | [`replication_status`](#replication_status) | read | all gateways | Status of a replication job: its state (REQUESTED → COPYING → CONVERTING → READY \| FAILED), mechanism, attempts, any (pre-redacted) error, the target (cluster/storage), the declared size, `replication_enabled` (whether the data plane is advancing jobs yet), and `age_seconds`. |
 | [`wait_for_lease`](#wait_for_lease) | read | all gateways | Wait server-side (timeout_s, at most 60 s) until your lease reaches until_state (ADMITTED, PROVISIONING or ACTIVE; default ACTIVE) or ends, instead of polling lease_status. |
-| [`whoami`](#whoami) | read | all gateways | Identify the tenant + privilege THIS token acts as — so you can confirm WHICH project the connector is bound to before you request or release anything. |
+| [`whoami`](#whoami) | read | all gateways | Identify the project and tier THIS token acts as, and what it may call, before you request or release anything (a connector is chosen per host or app, not per project, so a shared connector always acts as its one token's project). |
 | [`cancel_lease`](#cancel_lease) | consume | all gateways | Give up a QUEUED request (or release a live lease you no longer want). |
 | [`cancel_leases`](#cancel_leases) | consume | all gateways | Give up MANY queued requests (or release the live ones) in one call — the bulk form of cancel_lease. |
 | [`release_lease`](#release_lease) | consume | all gateways | Release a lease when you're done so its capacity is reclaimed. |
@@ -42,7 +42,7 @@ operator tools need an operator token. A tenant token always acts on its own pro
 | [`renew_lease`](#renew_lease) | consume | all gateways | Heartbeat a lease to extend its TTL. |
 | [`renew_leases`](#renew_leases) | consume | all gateways | Heartbeat MANY leases in one call (keep a whole fleet alive) — the bulk form of renew_lease. |
 | [`request_lease`](#request_lease) | consume | all gateways | Reserve capacity for a VM on a node (race-free admission control). |
-| [`schedule_lease`](#schedule_lease) | consume | all gateways | Reserve capacity and let the broker PICK the node for you (placement/scheduling). |
+| [`schedule_lease`](#schedule_lease) | consume | all gateways | Reserve capacity ANYWHERE: the broker PICKS the node (placement, not a timed schedule). |
 | [`request_template_download`](#request_template_download) | provision | all gateways | Download a net-new OS image and register it as a PRIVATE catalog template owned by YOUR project. |
 | [`set_quota`](#set_quota) | provision | all gateways | Raise or lower YOUR project's quota within the envelope your operator set (the provision tier's self-service). |
 | [`cancel_migration`](#cancel_migration) | operator | `gateway-operator` only | OPERATOR only: cancel a migration saga, releasing its held target reservation WITHOUT destroying the workload — the guest stays on the source and the lease is untouched. |
@@ -149,13 +149,13 @@ Tier **read**, served by all gateways. Report YOUR project's usage over a window
 
 ### queue_status
 
-Tier **read**, served by all gateways. Check a QUEUED lease: its state and how many requests are AHEAD of it in line (its GLOBAL position across the whole queue).
+Tier **read**, served by all gateways. Check ONE queued lease's place in line: its state and how many requests are AHEAD of it (its GLOBAL position across the whole queue; for your whole queue use queue_view).
 
 - `lease_id` (integer, required)
 
 ### queue_view
 
-Tier **read**, served by all gateways. View YOUR project's admission queue: depth plus the oldest-first head of your waiting requests (up to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's target node has been cordoned (it won't promote until an operator uncordons it or you cancel and re-request elsewhere), else null (a null with room still waiting is transient — it will promote).
+Tier **read**, served by all gateways. View YOUR project's WHOLE admission queue: depth plus the oldest-first head of your waiting requests (up to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's target node has been cordoned (it won't promote until an operator uncordons it or you cancel and re-request elsewhere), else null (a null with room still waiting is transient — it will promote).
 
 - `limit` (integer, default `100`)
 
@@ -176,7 +176,7 @@ Tier **read**, served by all gateways. Wait server-side (timeout_s, at most 60 s
 
 ### whoami
 
-Tier **read**, served by all gateways. Identify the tenant + privilege THIS token acts as — so you can confirm WHICH project the connector is bound to before you request or release anything.
+Tier **read**, served by all gateways. Identify the project and tier THIS token acts as, and what it may call, before you request or release anything (a connector is chosen per host or app, not per project, so a shared connector always acts as its one token's project).
 
 No parameters.
 
@@ -239,7 +239,7 @@ Tier **consume**, served by all gateways. Reserve capacity for a VM on a node (r
 
 ### schedule_lease
 
-Tier **consume**, served by all gateways. Reserve capacity and let the broker PICK the node for you (placement/scheduling).
+Tier **consume**, served by all gateways. Reserve capacity ANYWHERE: the broker PICKS the node (placement, not a timed schedule).
 
 - `idem_key` (string, required)
 - `req_cpu` (number, required)
@@ -275,9 +275,9 @@ Tier **provision**, served by all gateways. Download a net-new OS image and regi
 
 Tier **provision**, served by all gateways. Raise or lower YOUR project's quota within the envelope your operator set (the provision tier's self-service).
 
-- `cpu_limit` (number, required)
-- `mem_limit_mb` (integer, required)
-- `max_leases` (integer, required)
+- `cpu_limit` (number | null, default `null`)
+- `mem_limit_mb` (integer | null, default `null`)
+- `max_leases` (integer | null, default `null`)
 
 ### cancel_migration
 

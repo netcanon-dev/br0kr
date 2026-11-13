@@ -573,16 +573,23 @@ def project_capacity(conn: psycopg.Connection[Any], project_id: str) -> dict[str
 # node/storage FLOOR still caps what actually admits (a token can never overprovision hardware).
 _SELF_QUOTA_READ = ("SELECT cpu_limit, mem_limit_mb, max_leases, "
                     "cpu_limit_max, mem_limit_mb_max, max_leases_max FROM project WHERE id = %s")
-_SELF_QUOTA_WRITE = ("UPDATE project SET cpu_limit = %s, mem_limit_mb = %s, max_leases = %s WHERE id = %s")
+# A NULL (an omitted limit) keeps the column's value as it is at write time, so a partial set never writes back a
+# stale read of a limit it did not touch (review UX-07).
+_SELF_QUOTA_WRITE = ("UPDATE project SET cpu_limit = COALESCE(%s, cpu_limit), "
+                     "mem_limit_mb = COALESCE(%s, mem_limit_mb), max_leases = COALESCE(%s, max_leases) "
+                     "WHERE id = %s RETURNING cpu_limit, mem_limit_mb, max_leases, "
+                     "cpu_limit_max, mem_limit_mb_max, max_leases_max")
 
 
 def validate_self_quota(
-    cpu_limit: float, mem_limit_mb: int, max_leases: int,
+    cpu_limit: float | None, mem_limit_mb: int | None, max_leases: int | None,
     ceil_cpu: float | None, ceil_mem: int | None, ceil_leases: int | None,
     cur_cpu: float, cur_mem: int, cur_leases: int,
 ) -> str | None:
     """Return why a self-service quota request is refused, else None. Pure, so the cap policy is
-    unit-testable without a database.
+    unit-testable without a database. A None limit is one the request leaves as it is (review UX-07): it is not
+    checked, so a dimension the agent did not touch is never why its request is refused (an operator may have set
+    a limit above the self-service ceiling). All three None is `nothing_to_set`.
 
     The non-finite guard is LOAD-BEARING and checked BEFORE the sign check (same as admin.validate_quota /
     admission.validate): a NaN/Inf cpu_limit survives `<= 0` AND the table `CHECK (> 0)` and would then
@@ -594,32 +601,35 @@ def validate_self_quota(
     NULL ceiling means that dimension is NOT self-raisable, so it is capped at the CURRENT limit (lowering
     is still allowed). A request above the cap is `exceeds_ceiling`. (No overflow check needed on the WRITE:
     a passing value is <= the ceiling or the current limit, both already in-column.)"""
-    if not math.isfinite(cpu_limit):
+    dims: list[tuple[float | int | None, float | int | None, float | int]] = [
+        (cpu_limit, ceil_cpu, cur_cpu), (mem_limit_mb, ceil_mem, cur_mem), (max_leases, ceil_leases, cur_leases)]
+    asked = [(v, ceil, cur) for v, ceil, cur in dims if v is not None]
+    if not asked:
+        return reasons.NOTHING_TO_SET
+    if cpu_limit is not None and not math.isfinite(cpu_limit):
         return reasons.NON_FINITE
-    if cpu_limit <= 0 or mem_limit_mb <= 0 or max_leases <= 0:
+    if any(v <= 0 for v, _ceil, _cur in asked):
         return reasons.NON_POSITIVE
-    if cpu_limit > (ceil_cpu if ceil_cpu is not None else cur_cpu):
-        return reasons.EXCEEDS_CEILING
-    if mem_limit_mb > (ceil_mem if ceil_mem is not None else cur_mem):
-        return reasons.EXCEEDS_CEILING
-    if max_leases > (ceil_leases if ceil_leases is not None else cur_leases):
+    if any(v > (ceil if ceil is not None else cur) for v, ceil, cur in asked):
         return reasons.EXCEEDS_CEILING
     return None
 
 
 def set_quota(
-    conn: psycopg.Connection[Any], project_id: str, *, cpu_limit: float, mem_limit_mb: int, max_leases: int
+    conn: psycopg.Connection[Any], project_id: str, *, cpu_limit: float | None = None,
+    mem_limit_mb: int | None = None, max_leases: int | None = None,
 ) -> dict[str, Any]:
     """Set a project's cpu/mem/lease quota within its operator-set ceiling — the provision tier's
-    self-service. The caller (br0kr/mcp_tools.py) has already bound `project_id` to the token's own
-    project and checked the `provision` scope, so this verb trusts WHO is asking and only enforces the
-    ceiling. Does NOT touch `max_queued` (operator-managed). Returns {project_id, updated, reason, quota,
-    ceiling}: `quota` is the resulting (on success) or current (on refusal) cpu/mem/lease limits and
-    `ceiling` the *_max envelope, so an agent always learns how high it may climb. reason:
-    unknown_project / self_service_disabled (no ceiling set on any dimension) / exceeds_ceiling /
-    non_finite / non_positive. Self-commits (one read+write txn). Reading the ceiling then writing under
-    READ COMMITTED has a benign race with a concurrent operator ceiling change — the node floor caps actual
-    allocation regardless, so a momentarily-stale ceiling can't overprovision."""
+    self-service. Each limit is optional: an omitted (None) one keeps its value (review UX-07). The caller
+    (br0kr/mcp_tools.py) has already bound `project_id` to the token's own project and checked the `provision`
+    scope, so this verb trusts WHO is asking and only enforces the ceiling. Does NOT touch `max_queued`
+    (operator-managed). Returns {project_id, updated, reason, quota, ceiling}: `quota` is the resulting (on
+    success) or current (on refusal) cpu/mem/lease limits and `ceiling` the *_max envelope, so an agent always
+    learns how high it may climb. reason: unknown_project / self_service_disabled (no ceiling set on any
+    dimension) / nothing_to_set (no limit given) / exceeds_ceiling / non_finite / non_positive. Self-commits (one
+    read+write txn). Reading the ceiling then writing under READ COMMITTED has a benign race with a concurrent
+    operator ceiling change — the node floor caps actual allocation regardless, so a momentarily-stale ceiling
+    can't overprovision."""
     row = conn.execute(_SELF_QUOTA_READ, (project_id,)).fetchone()
     if row is None:
         conn.commit()
@@ -642,14 +652,21 @@ def set_quota(
         conn.commit()
         return {"project_id": project_id, "updated": False, "reason": reason,
                 "quota": cur, "ceiling": ceiling}
-    conn.execute(_SELF_QUOTA_WRITE, (cpu_limit, mem_limit_mb, max_leases, project_id))
+    new = conn.execute(_SELF_QUOTA_WRITE, (cpu_limit, mem_limit_mb, max_leases, project_id)).fetchone()
     conn.commit()
+    if new is None:   # the project was deleted between the read and the write
+        return {"project_id": project_id, "updated": False, "reason": reasons.UNKNOWN_PROJECT,
+                "quota": None, "ceiling": None}
+    # the answer is the row as written: the quota and the ceiling from one snapshot, even under a concurrent
+    # operator edit
+    quota = {"cpu_limit": float(new[0]), "mem_mb_limit": int(new[1]), "max_leases": int(new[2])}
+    ceiling = {"cpu_limit": None if new[3] is None else float(new[3]),
+               "mem_mb_limit": None if new[4] is None else int(new[4]),
+               "max_leases": None if new[5] is None else int(new[5])}
     log.info("self-service quota set: project=%s cpu=%s mem_mb=%s max_leases=%s",
-             project_id, cpu_limit, mem_limit_mb, max_leases, extra={"project": project_id})
-    return {"project_id": project_id, "updated": True, "reason": None,
-            "quota": {"cpu_limit": float(cpu_limit), "mem_mb_limit": int(mem_limit_mb),
-                      "max_leases": int(max_leases)},
-            "ceiling": ceiling}
+             project_id, quota["cpu_limit"], quota["mem_mb_limit"], quota["max_leases"],
+             extra={"project": project_id})
+    return {"project_id": project_id, "updated": True, "reason": None, "quota": quota, "ceiling": ceiling}
 
 
 def request_template_download(

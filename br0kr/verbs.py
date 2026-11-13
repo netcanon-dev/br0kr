@@ -167,7 +167,7 @@ pin_refused_on_replay. Then renew it like any lease, or release it and ask again
 Requires a consume-tier (or higher) token; an unauthorized call returns {"error": ...}.
 """),
     Verb("schedule_lease", "consume", _admitted_or_queued, HANDLER, "mcp_tools.schedule_lease", doc="""\
-Reserve capacity and let the broker PICK the node for you (placement/scheduling).
+Reserve capacity ANYWHERE: the broker PICKS the node (placement, not a timed schedule).
 
 Use this instead of request_lease when you don't care WHICH node — you just need room.
 Set cluster_id to place on any node in that cluster; omit it to place on any cluster with
@@ -264,12 +264,13 @@ cancelled/released/noop; a noop is ok false with lease_not_live: already gone, n
 You may only cancel a lease that belongs to YOUR project (else {"error":"lease_forbidden"}).
 Requires a consume-tier token."""),
     Verb("queue_status", "read", 'exists', OWN_LEASE, "gateway.queue_status", not_found=reasons.UNKNOWN_LEASE, doc="""\
-Check a QUEUED lease: its state and how many requests are AHEAD of it in line (its GLOBAL
-position across the whole queue). Returns {lease_id, state, queue_position, blocked_reason, exists}.
-queue_position is null once the lease is no longer PENDING (it has been promoted, cancelled,
-or timed out). blocked_reason names why a PENDING lease can't promote yet — 'node_cordoned' (its pinned
-node is closed to provisioning), else null (just waiting its turn). You may only check a lease that
-belongs to YOUR project (else {"error":"lease_forbidden"}). Requires a read-tier (or higher) token."""),
+Check ONE queued lease's place in line: its state and how many requests are AHEAD of it (its GLOBAL
+position across the whole queue; for your whole queue use queue_view). Returns {lease_id, state,
+queue_position, blocked_reason, exists}. queue_position is null once the lease is no longer PENDING (it has
+been promoted, cancelled, or timed out). blocked_reason names why a PENDING lease can't promote yet —
+'node_cordoned' (its pinned node is closed to provisioning), else null (just waiting its turn). You may only
+check a lease that belongs to YOUR project (else {"error":"lease_forbidden"}). Requires a read-tier (or
+higher) token."""),
     # The bulk forms fan a lease verb over many of the token's OWN leases in one call (br0kr/bulk.py): the same
     # tier and per-lease ownership gate as their single counterparts, no new authority.
     Verb("renew_leases", "consume", None, OWN_LEASES, "gateway.renew_lease", bulk_item='renewed', doc="""\
@@ -343,22 +344,22 @@ lease_slots_available, exists} (`acting_as` = your bound project — same as pro
 read-tier (or higher) token."""),
     # reflect the token's own project/scope/id (no ledger read)
     Verb("whoami", "read", None, HANDLER, "mcp_tools.whoami", doc="""\
-Identify the tenant + privilege THIS token acts as — so you can confirm WHICH project the connector is
-bound to before you request or release anything. (MCP connectors are selected per host/app, not per
-project, so a globally-shared connector always acts as its ONE token's project regardless of which
-workspace you opened — call this to see which.) Returns {project_id, scope, token_id}: `project_id` is your
-tenant (null for a cross-tenant OPERATOR token), `scope` is your tier (read/consume/provision/operator),
-and `token_id` identifies the authenticating token (its SECRET is never returned). The main capacity/lease
-reads also echo `acting_as` = this project_id. Requires any authenticated (read-tier or higher) token."""),
+Identify the project and tier THIS token acts as, and what it may call, before you request or release
+anything (a connector is chosen per host or app, not per project, so a shared connector always acts as its
+one token's project). Returns {project_id, scope, token_id, can}: `project_id` is your tenant (null for a
+cross-tenant OPERATOR token), `scope` your tier (read/consume/provision/operator), `token_id` the
+authenticating token (its secret is never returned), and `can` the tools your tier may call (operator tools
+only where this gateway serves them). The capacity and lease reads also echo `acting_as` = this
+project_id. Requires any authenticated (read-tier or higher) token."""),
     Verb("set_quota", "provision", 'updated', HANDLER, "mcp_tools.set_quota", doc="""\
 Raise or lower YOUR project's quota within the envelope your operator set (the provision tier's
-self-service). cpu/mem/lease limits must each be > 0 and at most your project's ceiling; a dimension
-with no ceiling can't be raised above its current value, and if your operator hasn't set ANY ceiling
-the request is refused (reason 'self_service_disabled'). The node/cluster floor still caps what
-actually admits, so this can never overprovision hardware — it only widens your tenant budget within
-the operator's bound (see your ceiling via project_capacity). Returns {project_id, updated, reason,
-quota, ceiling} — your resulting quota and the ceiling envelope. Always applies to YOUR token's
-project. Requires a provision-tier token (read/consume tokens get {"error":"forbidden_scope"})."""),
+self-service). Pass only the limits to change (cpu_limit, mem_limit_mb, max_leases): an omitted one keeps its
+value, and passing none is refused nothing_to_set. Each limit you pass must be > 0 and at most your
+project's ceiling; a dimension with no ceiling can't be raised above its current value, and if your operator
+set NO ceiling every request is refused (self_service_disabled). The node/cluster floor still caps what
+admits, so this never overprovisions hardware. Returns {project_id, updated, reason, quota, ceiling}: your
+resulting quota and the ceiling envelope (project_capacity shows it too). Requires a provision-tier token
+(read/consume tokens get {"error":"forbidden_scope"})."""),
     Verb("request_template_download", "provision", 'requested', HANDLER, "mcp_tools.request_template_download", doc="""\
 Download a net-new OS image and register it as a PRIVATE catalog template owned by YOUR project
 (phase A4.2). The image is fetched + imported + templatized by the broker's leader daemon (asynchronous —
@@ -422,7 +423,7 @@ a read-tier (or higher) token."""),
     Verb("queue_view", "read", None, LOOKUP, "inventory.queue_view",
          params=(Param("limit", int, 100),), scope=TENANT,
          doc="""\
-View YOUR project's admission queue: depth plus the oldest-first head of your waiting requests (up
+View YOUR project's WHOLE admission queue: depth plus the oldest-first head of your waiting requests (up
 to `limit`), each with its position, how long it has waited, time left before its wait ceiling, the
 ask (target node/cluster, resources), and `blocked_reason` — 'node_cordoned' when a pinned request's
 target node has been cordoned (it won't promote until an operator uncordons it or you cancel and

@@ -67,7 +67,7 @@
   },
   "schedule_lease": {
    "tier": "consume",
-   "sha256": "3b03e1f69527f0c86b5147f29f3a37dcb52dad34ffab3ca5398c68ab86ed86e1",
+   "sha256": "74f706f101ef8f942cfe5aafebf106c00ea8af57756aac2bca8df5cd2aa69540",
    "row": {
     "kind": "handler",
     "call": "mcp_tools.schedule_lease",
@@ -163,7 +163,7 @@
   },
   "queue_status": {
    "tier": "read",
-   "sha256": "0fc45999c1565bfe0bc2e98e72ca16e10ea9103a9053c7bfe1b0aff007ff16a2",
+   "sha256": "c6d8a9f44d4941956aa6f184aff425168db96483fac0c0f3d708ac73769aacae",
    "row": {
     "kind": "own_lease",
     "call": "gateway.queue_status",
@@ -319,7 +319,7 @@
   },
   "whoami": {
    "tier": "read",
-   "sha256": "b2bd7134645f748a5e582025eccd942e6ecf6d6f4574206c426096ec137b83e6",
+   "sha256": "ede53721bce35febbc998ba5535bc9fed64af956d91acdb55367745c92ed5222",
    "row": {
     "kind": "handler",
     "call": "mcp_tools.whoami",
@@ -335,7 +335,7 @@
   },
   "set_quota": {
    "tier": "provision",
-   "sha256": "d66d136c945bb2523216d6dc3cb030aa66244cecf84d416cb81ccf4ce812de3e",
+   "sha256": "58f3aaff77eccc2c1c6ffac4c5fd3f32c62428a02554558c19f310ec32ca8052",
    "row": {
     "kind": "handler",
     "call": "mcp_tools.set_quota",
@@ -474,7 +474,7 @@
   },
   "queue_view": {
    "tier": "read",
-   "sha256": "cccdb8a9801ec0de0f62daf1ea014d543b4acdb9886515f498e9fdb41a4e1f7b",
+   "sha256": "91fcadcc87948c7da66ee8eee59789234dc4cf8d72d3abac04918f496bec500a",
    "row": {
     "kind": "lookup",
     "call": "inventory.queue_view",

@@ -77,20 +77,26 @@ def test_validate_self_quota_rejects_non_positive():
 # ── the verb's branch logic (a fake connection; the SQL is proven in scripts/harness_provision.py) ──
 class _QConn:
     """A stand-in connection: the read returns `row` (the project's limits+ceilings, or None for an unknown
-    project); an UPDATE's params are recorded in `writes`; commits are counted."""
+    project); an UPDATE's params are recorded in `writes`, and its RETURNING row is what the write's COALESCE
+    leaves (a None param keeps the current limit); commits are counted."""
 
     def __init__(self, row: tuple | None) -> None:
         self._row = row
+        self._next = row
         self.writes: list[tuple] = []
         self.commits = 0
 
     def execute(self, sql: str, params: tuple) -> _QConn:
+        self._next = self._row
         if sql.lstrip().startswith("UPDATE"):
             self.writes.append(params)
+            assert self._row is not None
+            kept = tuple(new if new is not None else cur for new, cur in zip(params[:3], self._row[:3]))
+            self._next = kept + tuple(self._row[3:6])   # RETURNING the quota and the ceiling
         return self
 
     def fetchone(self) -> tuple | None:
-        return self._row
+        return self._next
 
     def commit(self) -> None:
         self.commits += 1
@@ -138,6 +144,38 @@ def test_set_quota_writes_within_the_ceiling_and_echoes_the_envelope():
                    "ceiling": {"cpu_limit": 32.0, "mem_mb_limit": 65536, "max_leases": 20}}
     assert conn.writes == [(16.0, 32768, 15, "team-a")]   # the three quota cols + the WHERE id, no max_queued
     assert conn.commits == 1
+
+
+def test_set_quota_changes_only_the_limits_given():
+    """set_quota(cpu_limit=...) alone writes NULL for the other two, which the write's COALESCE keeps as they are,
+    and answers the resulting quota from the row the write returns (review UX-07). Guards 'raise only CPU' needing
+    the other limits re-sent, and a partial set writing back a stale read of a limit it did not touch."""
+    conn = _QConn((8.0, 16384, 10, 32.0, 65536, 20))
+    out = gateway.set_quota(conn, "team-a", cpu_limit=16.0)
+    assert out["updated"] is True and out["quota"] == {"cpu_limit": 16.0, "mem_mb_limit": 16384, "max_leases": 10}
+    assert conn.writes == [(16.0, None, None, "team-a")]
+    assert "COALESCE(%s, mem_limit_mb)" in gateway._SELF_QUOTA_WRITE and "RETURNING" in gateway._SELF_QUOTA_WRITE
+
+
+def test_set_quota_with_no_limit_is_nothing_to_set_and_writes_nothing():
+    """A set_quota call that passes no limit is refused nothing_to_set with the current quota and ceiling echoed,
+    and writes nothing. Guards an empty call writing a no-op row and an audit entry that says a quota was set."""
+    conn = _QConn((8.0, 16384, 10, 32.0, 65536, 20))
+    out = gateway.set_quota(conn, "team-a")
+    assert out["updated"] is False and out["reason"] == "nothing_to_set"
+    assert out["quota"] == {"cpu_limit": 8.0, "mem_mb_limit": 16384, "max_leases": 10}
+    assert conn.writes == []
+
+
+def test_validate_self_quota_never_checks_an_omitted_limit():
+    """An omitted (None) limit is not validated: with the current cpu limit (32, set by the operator) above its
+    self-service ceiling (16), raising only memory is allowed, while passing that cpu value back is refused; a
+    passed limit is still checked for sign and ceiling. Guards a partial set being refused for a dimension the
+    agent never touched."""
+    assert gateway.validate_self_quota(None, 32768, None, 16.0, 65536, 20, 32.0, 16384, 10) is None
+    assert gateway.validate_self_quota(32.0, 32768, None, 16.0, 65536, 20, 32.0, 16384, 10) == "exceeds_ceiling"
+    assert gateway.validate_self_quota(None, None, 0, 16.0, 65536, 20, 32.0, 16384, 10) == "non_positive"
+    assert gateway.validate_self_quota(None, None, None, 16.0, 65536, 20, 32.0, 16384, 10) == "nothing_to_set"
 
 
 # ── request_template_download: the concurrent-target UNIQUE collision is a clean reason, not a crash ──

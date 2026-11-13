@@ -318,11 +318,14 @@ def whoami(ctx: Context) -> dict[str, Any]:
     principal = mcp_common._authorize(ctx, "whoami")
     if isinstance(principal, dict):
         return principal
-    # Pure reflection of the resolved principal — no ledger read; the secret never leaves _authorize.
-    return {"project_id": principal.project_id, "scope": principal.scope, "token_id": principal.token_id}
+    # Pure reflection of the resolved principal — no ledger read; the secret never leaves _authorize. `can` is the
+    # tier policy itself (auth.allowed_verbs), so it cannot disagree with what _authorize enforces (review UX-07).
+    return {"project_id": principal.project_id, "scope": principal.scope, "token_id": principal.token_id,
+            "can": auth.allowed_verbs(principal.scope)}
 
 
-def set_quota(ctx: Context, cpu_limit: float, mem_limit_mb: int, max_leases: int) -> dict[str, Any]:
+def set_quota(ctx: Context, cpu_limit: float | None = None, mem_limit_mb: int | None = None,
+              max_leases: int | None = None) -> dict[str, Any]:
     """The set_quota tool; its description, tier and verdict are its row in br0kr/verbs.py."""
     principal = mcp_common._authorize(ctx, "set_quota")
     if isinstance(principal, dict):
@@ -331,9 +334,10 @@ def set_quota(ctx: Context, cpu_limit: float, mem_limit_mb: int, max_leases: int
     with mcp_common._conn() as c:
         r = gateway.set_quota(c, principal.project_id, cpu_limit=cpu_limit,
                               mem_limit_mb=mem_limit_mb, max_leases=max_leases)
-        if r.get("updated"):
+        if r.get("updated"):   # the audit row records the limits asked for; an omitted one kept its value
+            asked = {"cpu_limit": cpu_limit, "mem_limit_mb": mem_limit_mb, "max_leases": max_leases}
             mcp_common._audit_write(c, principal, "set_quota", target=principal.project_id,
-                         params={"cpu_limit": cpu_limit, "mem_limit_mb": mem_limit_mb, "max_leases": max_leases})
+                                    params={k: v for k, v in asked.items() if v is not None})
         return r
 
 
