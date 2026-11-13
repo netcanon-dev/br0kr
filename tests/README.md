@@ -35,6 +35,11 @@ pytest --cov=br0kr --cov-report=term-missing   # fails below the floor, pyprojec
 
 Markers are declared in `pyproject.toml` (`--strict-markers` — a typo is an error).
 
+**On Windows.** `tests/unit/test_dr_hba_guard.py` drives two shell scripts, so it needs a bash that runs, finds
+`awk` and can read the script by its path. Where there is none, a `bash.exe` that only launches WSL included, the
+module skips; `tests/unit/test_standby_recovery.py` needs a POSIX host and skips on Windows. In CI (`CI=true`)
+neither ever skips: a missing tool there fails loudly.
+
 ## Real-Postgres harnesses (`scripts/harness_*.py`)
 
 The race and saga invariants (the advisory-lock order, the lease CAS predicates) can only be proven

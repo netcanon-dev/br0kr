@@ -389,3 +389,12 @@ def test_prs_gate_on_the_image_python_and_main_tests_the_support_range():
         text = (_ROOT / "tests" / gate).read_text(encoding="utf-8")
         assert switch in text, gate
         assert "-m pytest -q tests/unit/test_repo_hygiene.py" in text.split(switch, 1)[1].split("else", 1)[0], gate
+
+
+def test_pre_commit_config_has_no_commented_out_hooks():
+    """.pre-commit-config.yaml carries only live hooks: no commented-out `- repo:`, `rev:` or `- id:` stub.
+    Guards a disabled hook block lingering until a reader takes it for part of the setup, or someone uncomments
+    a stale pin; ruff and mypy run in CI and tests/validate.sh, which the file's header says (review TEST-07)."""
+    text = (_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    stubs = [line for line in text.splitlines() if re.match(r"\s*#\s*(-\s*(repo|id):|rev:|hooks:)", line)]
+    assert not stubs, stubs

@@ -7,8 +7,9 @@ password. pg-primary-tls-entrypoint.sh runs this on every DR boot and refuses (e
 trust replication rule — while EXEMPTING the stock loopback lines every official-image volume carries
 (`local` + `host … 127.0.0.1/32|::1/128 … trust`), so a correctly-provisioned DR primary still boots on
 restart (review S09/F1). Here we drive it directly over crafted pg_hba.conf fixtures — no Postgres, no
-Docker — so the exact address-aware matcher is pinned. Requires bash + awk (both present in the gate image
-and the postgres:16 runtime the entrypoint actually runs in).
+Docker — so the exact address-aware matcher is pinned. Requires a bash that runs and finds awk (both present in
+the gate image, on CI's runner and in the postgres:16 runtime the entrypoint actually runs in). Without one, as on
+Windows, the module skips; in CI (`CI` set) it never skips (review TEST-07).
 
 The second half covers docker/retire-trust-replication.sh (review SEC-05), which both bundled ledger entrypoints
 run on every start: it turns that same legacy trust rule into scram on an existing same-host volume, and warns
@@ -26,9 +27,31 @@ import pytest
 
 _GUARD = Path(__file__).resolve().parents[2] / "docker" / "assert-dr-hba-safe.sh"
 
+
+def _bash_with_awk() -> bool:
+    """True when `bash` is on PATH, runs, finds awk AND can read the guard script by the path the tests pass it.
+    A PATH lookup alone is not enough: Windows can carry a bash.exe that only launches WSL, which is found and then
+    fails every call, or, with a distro that has bash, runs but cannot read a `C:\\...` path. Either way these tests
+    failed there instead of skipping (review TEST-07)."""
+    if shutil.which("bash") is None:
+        return False
+    try:
+        probe = subprocess.run(["bash", "-c", 'command -v awk >/dev/null && test -r "$1"', "_", str(_GUARD)],
+                               capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+def _in_ci() -> bool:
+    """True on a CI runner (GitHub sets CI=true); `CI=false` or unset is not CI."""
+    return os.environ.get("CI", "").strip().lower() in ("1", "true", "yes")
+
+
+# CI always runs the module: a probe that fails there should fail the tests loudly, not skip them unseen.
 pytestmark = [pytest.mark.unit,
-              pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None,
-                                 reason="bash + awk required")]
+              pytest.mark.skipif(not _in_ci() and not _bash_with_awk(),
+                                 reason="needs a bash that runs, finds awk and reads the script (CI always runs these)")]
 
 # The stock loopback replication-trust lines initdb writes on EVERY official postgres image (it passes no
 # --auth flag → trust). Harmless: unreachable via the published TCP port. Present on a fresh DR volume too
@@ -275,3 +298,29 @@ def test_guard_warns_on_a_same_host_volume_served_in_dr_mode(tmp_path):
     assert r.returncode == 0 and "WARNING" in r.stderr and "hostssl" in r.stderr
     quiet = _run(_STOCK_LOOPBACK + "hostssl replication replicator 10.0.0.0/8 scram-sha-256\n", tmp_path)
     assert quiet.returncode == 0 and quiet.stderr == ""
+
+
+def test_bash_probe_rejects_a_bash_that_cannot_run(monkeypatch):
+    """_bash_with_awk() is False when bash is missing, when calling it raises, and when it exits non-zero (the
+    WSL launcher's "execvpe(/bin/bash) failed", or a bash that cannot read the script's path), and True only on a
+    zero exit of a probe that names the guard script. _in_ci() is True only for a CI value meaning yes. Guards the
+    skip predicate drifting back to a PATH lookup, which made these tests fail on Windows instead of skipping, and
+    `CI=false` forcing them to run there (review TEST-07)."""
+    import types
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert _bash_with_awk() is False
+    monkeypatch.setattr(shutil, "which", lambda name: "/bin/" + name)
+
+    def boom(*a, **k):
+        raise OSError("execvpe failed")
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert _bash_with_awk() is False
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=1))
+    assert _bash_with_awk() is False
+    monkeypatch.setattr(subprocess, "run", lambda argv, **k: calls.append(argv) or types.SimpleNamespace(returncode=0))
+    assert _bash_with_awk() is True
+    assert calls[-1][-1] == str(_GUARD)
+    for value, want in (("true", True), ("1", True), ("false", False), ("0", False), ("", False)):
+        monkeypatch.setenv("CI", value)
+        assert _in_ci() is want, value

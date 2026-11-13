@@ -86,7 +86,8 @@ Step "test-docs" ([bool]$py) {
 
 # --- js-syntax --- ruff/py_compile do not read the dashboard client, br0kr/static/dashboard.js, so
 # `node --check` is the real gate. The helper self-skips green when node
-# is absent, so the gated tool is the python helper, not node.
+# is absent, so the gated tool is the python helper, not node. CI enforces
+# it: GitHub's ubuntu runner ships node.
 Step "js-syntax" ([bool]$py) {
   & $py.Source tests/check_dashboard_js.py
 }

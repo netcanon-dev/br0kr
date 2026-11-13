@@ -64,7 +64,8 @@ if [ -n "$PY" ]; then step test-docs 0 "$PY" tests/check_test_docs.py; fi
 
 # js-syntax: `node --check` on the dashboard client, br0kr/static/dashboard.js, catches a syntax error
 # ruff/py_compile can't see. The helper SELF-SKIPS green when node is absent, so it enforces wherever node
-# exists without failing the node-less --strict gate; the backtick-parity unit test is the dep-free backstop.
+# exists, CI included (GitHub's ubuntu runner ships node), without failing a node-less --strict run such as a
+# python-only container; the backtick-parity unit test is the dep-free backstop.
 # present=0 (the python helper, not node, is the gated tool) so --strict never fails it for a missing node.
 if [ -n "$PY" ]; then step js-syntax 0 "$PY" tests/check_dashboard_js.py; fi
 

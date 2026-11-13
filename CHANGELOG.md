@@ -114,6 +114,8 @@ resolve in this repository.
   more release, then goes (review UX-03).
 
 ### Fixed
+- **On Windows the DR-guard tests skip instead of failing** when `bash` only launches WSL; CI never skips them.
+  Test-infra comments now match what runs, and the commented-out pre-commit hooks are gone (TEST-07).
 - **The OAuth shim drops a client that hung up mid-reply quietly.** A BrokenPipe while writing an error reply
   logged an ERROR stack (a CI flake); it is now one INFO line naming only the path (CODE-06).
 - **A standby whose replication slot is lost or gone re-clones itself on its next start** (REL-06), only when the

@@ -7,9 +7,10 @@ read JavaScript, and a syntax error in this file ships a dead page (a stray back
 still lived in a Python string), so this runs `node --check` on it. It is wired into tests/validate.sh as one
 step; it is NOT a pytest test (no test_ prefix), mirroring tests/check_test_docs.py.
 
-node is not in every gate image (the validate container is python-only), so this SELF-SKIPS green when node is
-absent — enforced wherever node exists (local dev, a node-equipped CI step), never failing the node-less --strict
-run. The backtick-parity test in tests/unit/test_dashboard.py is the dependency-free backstop that always runs.
+node is not everywhere the gate runs (a python-only container has none), so this SELF-SKIPS green when node is
+absent: enforced wherever node exists, local dev and CI included (GitHub's ubuntu runner ships node, and CI's
+validate job prints `node --check ok`), never failing a node-less --strict run. The backtick-parity test in
+tests/unit/test_dashboard.py is the dependency-free backstop that always runs.
 """
 from __future__ import annotations
 

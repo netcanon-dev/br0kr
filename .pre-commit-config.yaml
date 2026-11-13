@@ -28,14 +28,3 @@ repos:
       - id: check-merge-conflict      # block committing unresolved <<<<<<< markers
       - id: check-yaml                # YAML must parse (yamllint covers style; this covers syntax)
         args: ["--allow-multiple-documents"]
-
-  # ---------------------------------------------------------------------------
-  # Off: CI and tests/validate.sh run ruff on every change. Uncomment to also run it on commit.
-  # Config lives in pyproject.toml [tool.ruff].
-  # ---------------------------------------------------------------------------
-  # - repo: https://github.com/astral-sh/ruff-pre-commit
-  #   rev: v0.15.0
-  #   hooks:
-  #     - id: ruff          # lint
-  #       args: [--fix]
-  #     - id: ruff-format   # auto-format (only if you adopt `ruff format`)

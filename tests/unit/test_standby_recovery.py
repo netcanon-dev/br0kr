@@ -5,8 +5,10 @@ replication slot.
 The script decides from what the primary and the data directory say, so the tests drive it with fake `psql`,
 `pg_isready` and `pg_controldata` on PATH (no Postgres, no Docker) and pin the whole decision matrix, above all the
 cases that must NEVER wipe: a promoted standby, an unreachable primary, unreadable evidence, and a primary that may
-lack data this standby has (another cluster, another timeline, or behind it). Requires bash + awk on a POSIX host,
-like test_dr_hba_guard.py; scripts/run_compose_smoke.sh and scripts/run_standby_recovery.sh drive the real thing.
+lack data this standby has (another cluster, another timeline, or behind it). Requires bash + awk on a POSIX host
+(the fakes are `#!/bin/sh` scripts on PATH), so it skips on Windows; in CI (`CI` set) it never skips, so a runner
+missing a tool fails loudly (review TEST-07). scripts/run_compose_smoke.sh and scripts/run_standby_recovery.sh drive
+the real thing.
 """
 from __future__ import annotations
 
@@ -19,9 +21,12 @@ import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "docker" / "standby-recovery.sh"
 
+_IN_CI = os.environ.get("CI", "").strip().lower() in ("1", "true", "yes")   # GitHub sets CI=true
+
 pytestmark = [pytest.mark.unit,
-              pytest.mark.skipif(shutil.which("bash") is None or shutil.which("awk") is None or os.name == "nt",
-                                 reason="bash + awk on a POSIX host required")]
+              pytest.mark.skipif(not _IN_CI and (shutil.which("bash") is None or shutil.which("awk") is None
+                                                 or os.name == "nt"),
+                                 reason="bash + awk on a POSIX host required (CI always runs these)")]
 
 # One fake for all three tools: it logs each call and answers from FAKE_* variables.
 _FAKE = r"""#!/bin/sh
