@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
-from br0kr import admin, audit, auth, build, dashboard, dashboard_actions, gateway, inventory, ui_assets
+from br0kr import admin, audit, auth, build, dashboard, dashboard_actions, dashboard_page, gateway, inventory, ui_assets
 
 pytestmark = pytest.mark.integration
 
@@ -134,9 +134,10 @@ def test_parse_node_forwards_pve_node_for_the_operator_surface():
 def test_page_node_form_and_table_expose_pve_node():
     """The dashboard's node create/edit FORM carries a pve_node input and the node TABLE renders the column
     (GAP-1 — the operator can register a provisionable node end-to-end in the GUI, no SQL). A drift guard on
-    the client PAGE string the JS `node --check` gate can't assert semantically."""
-    assert "'PVE node name (in-cluster; blank=capacity-only)','text','pve_node'" in dashboard.PAGE
-    assert "<th>PVE node</th>" in dashboard.PAGE
+    the client script the JS `node --check` gate can't assert semantically."""
+    script = dashboard_page.APP_JS.decode("utf-8")
+    assert "'PVE node name (in-cluster; blank=capacity-only)','text','pve_node'" in script
+    assert "<th>PVE node</th>" in script
 
 
 def test_page_and_overview_render(canned):
@@ -169,12 +170,14 @@ def test_unknown_path_is_404(canned):
 
 
 def test_vendored_assets_serve_bytes_content_type_and_immutable_caching(canned):
-    """Each vendored UI asset (br0kr/ui_assets.py) serves over the real socket: 200, its declared
-    Content-Type, the immutable Cache-Control the version-pinned /assets/<tag>/ path makes safe, and the
-    payload bytes EXACTLY as embedded. Guards the asset branch being dropped from do_GET (an unthemed
-    dashboard on a 404'd stylesheet) and the cache header regressing to revalidate-every-poll."""
+    """Each static asset serves over the real socket: the vendored UI files (br0kr/ui_assets.py) and the client
+    script (br0kr/static/dashboard.js), with 200, the declared Content-Type, the immutable Cache-Control their
+    version-pinned or content-hashed /assets/ path makes safe, and the bytes EXACTLY as loaded. Guards the asset
+    branch being dropped from do_GET (an unthemed or, for the script, dead dashboard on a 404) and the cache
+    header regressing to revalidate-every-poll."""
+    assert set(dashboard._ASSETS) == set(ui_assets.ASSETS) | {dashboard_page.APP_JS_PATH}
     with _serving(lambda: _FakeConn()) as port:
-        for path, (ctype, body) in ui_assets.ASSETS.items():
+        for path, (ctype, body) in dashboard._ASSETS.items():
             with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
                 assert r.status == 200
                 assert r.headers["Content-Type"] == ctype
@@ -328,7 +331,7 @@ def test_page_health_and_meta_stay_open_under_read_auth(canned):
     with _serving(lambda: _FakeConn(), read_token="rt") as port:
         code, body = _get(port, "/")
         assert code == 200 and body.startswith("<!doctype html>")       # shell open
-        for path in ui_assets.ASSETS:                                    # the three vendored UI files stay open too
+        for path in dashboard._ASSETS:                                   # the vendored UI files + the client script
             assert _get(port, path)[0] == 200                            # a <link>/<script> fetch carries no bearer
         assert _get(port, "/healthz")[0] == 200                          # probe open
         assert _get(port, "/api/meta")[0] == 200                         # meta open (client reads it pre-token)

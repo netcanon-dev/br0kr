@@ -1,9 +1,9 @@
 """Behaviour tests for the dashboard's client script: what an operator SEES when a read or an action fails.
 
-The client JS lives in a Python string (br0kr/dashboard_page.py's PAGE), so the unit tests can only look for
-text in it. These run the script AS SERVED (the same extraction tests/check_dashboard_js.py makes) in node,
-against a minimal fake DOM and a fake dashboard server (tests/integration/dashboard_client_harness.js), and
-assert on the rendered result. They exist because the failure this guards against looks healthy: a loader that
+The unit tests can only look for text in the client script (br0kr/static/dashboard.js). These run it AS SERVED,
+the file the page loads, in node against a minimal fake DOM and a fake dashboard server
+(tests/integration/dashboard_client_harness.js), and assert on the rendered result. A click goes through the
+page's own data-act dispatcher, as in a browser. They exist because the failure this guards against looks healthy: a loader that
 swallowed a 401 rendered 'no sources allowlisted — add one', a failed poll left every panel showing old numbers
 with no age, and action results were blocking native alert() boxes no screen reader announced.
 
@@ -12,7 +12,6 @@ ubuntu runners ship node.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -29,16 +28,11 @@ _HARNESS = _HERE / "dashboard_client_harness.js"
 
 
 @pytest.fixture(scope="module")
-def served_script(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The dashboard client script exactly as the browser receives it, written to a file node can run."""
-    spec = importlib.util.spec_from_file_location("check_dashboard_js", _HERE.parent / "check_dashboard_js.py")
-    assert spec is not None and spec.loader is not None
-    gate = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gate)
-    script = gate.page_script()
-    assert script is not None, "PAGE has no <script> block"
-    path: Path = tmp_path_factory.mktemp("dashboard") / "page.js"
-    path.write_text(script, encoding="utf-8")
+def served_script() -> Path:
+    """The dashboard client script exactly as the browser receives it: the file the page loads and the server
+    serves byte for byte (tests/unit/test_dashboard.py pins that)."""
+    path = _HERE.parents[1] / "br0kr" / "static" / "dashboard.js"
+    assert path.is_file(), path
     return path
 
 
@@ -78,7 +72,7 @@ def test_each_operator_panel_renders_its_own_read_failure(served_script: Path) -
     assert "could not load dashboard operators — no answer from the dashboard server" in got["operators"]
     assert "could not load the audit log — query_failed" in got["audit"]
     assert "no audit entries" not in got["audit"]
-    assert 'onclick="loadAudit()">retry' in got["auditMore"]
+    assert 'data-act="loadAudit()">retry' in got["auditMore"]
     assert "could not load the build jobs — bad_response" in got["downloads"]
     assert "no build jobs yet" not in got["downloads"]
 
@@ -466,7 +460,7 @@ def test_a_dialog_takes_focus_keeps_tab_inside_and_returns_focus_on_escape(serve
     assert got["innerPrevented"] is False
     assert got["closed"] == {"hidden": True, "html": "", "returned": True}
     assert got["repainted"] is True
-    assert got["after"] == {"tag": "BUTTON", "onclick": "editItem('node',0)", "focusedWith": {"preventScroll": True}}
+    assert got["after"] == {"tag": "BUTTON", "act": "editItem('node',0)", "focusedWith": {"preventScroll": True}}
 
 
 def test_a_dialog_focuses_what_is_safe_and_a_replacement_keeps_the_first_opener(served_script: Path) -> None:
@@ -494,10 +488,10 @@ def test_focus_follows_a_control_that_changes_or_goes_away(served_script: Path) 
     cases: matching only on the exact label threw focus to the top of the page after any action that changes
     or removes its own button, and a position fallback could leave focus on another lease's one-press renew."""
     got = _run(served_script, "paint_focus_fallbacks")
-    assert got["flipped"] == {"onclick": "toggleCordon(0)", "text": "uncordon"}
+    assert got["flipped"] == {"act": "toggleCordon(0)", "text": "uncordon"}
     assert got["removed"] == {"tag": "H2", "text": "Nodes", "tabIndex": -1, "focusedWith": {"preventScroll": True}}
     assert got["detached"] is True
-    assert got["back"] == {"onclick": "openTokenForm()", "fresh": True, "inTokens": True}
+    assert got["back"] == {"act": "openTokenForm()", "fresh": True, "inTokens": True}
 
 
 def test_a_poll_keeps_keyboard_focus_on_the_panel_control(served_script: Path) -> None:
@@ -509,7 +503,7 @@ def test_a_poll_keeps_keyboard_focus_on_the_panel_control(served_script: Path) -
     got = _run(served_script, "panel_focus_survives_polls")
     assert got["unchanged"] == {"same": True, "connected": True}
     assert got["replaced"] is True and got["inNodes"] is True
-    assert got["onclick"] == "editItem('node',0)" and got["focusedWith"] == {"preventScroll": True}
+    assert got["act"] == "editItem('node',0)" and got["focusedWith"] == {"preventScroll": True}
 
 
 def test_red_marks_what_cannot_be_put_back_and_each_confirm_names_its_action(served_script: Path) -> None:
@@ -717,7 +711,7 @@ def test_a_storage_quarantine_is_cleared_from_the_storage_card(served_script: Pa
     Guards the review's done-when (a quarantine can be cleared from the storage card) and a chip posting the
     wrong pair."""
     got = _run(served_script, "parity_storage_pair")
-    assert 'onclick="openStoragePair(0,0)"' in got["card"] and "quarantined" in got["card"]
+    assert 'data-act="openStoragePair(0,0)"' in got["card"] and "quarantined" in got["card"]
     assert "clear quarantine" in got["modal"] and "remove this node" in got["modal"]
     assert got["cleared"]["posts"] == [{"path": "/api/storage/quarantine/clear",
                                         "body": {"storage_id": "fast", "node_id": "n1"}}]
@@ -871,3 +865,25 @@ def test_the_dismissal_roster_is_hidden_when_locked_and_names_its_read_failure(s
     got = _run(served_script, "parity_dismissals_read_fails")["discovery"]
     assert "could not load the discovery dismissals — ledger_unreachable" in got
     assert "no dismissed findings" not in got
+
+
+def test_the_data_act_dispatcher_runs_only_listed_actions_with_literal_arguments(served_script: Path) -> None:
+    """A click runs the data-act handler of the element clicked and then of each element around it, innermost
+    first, with literal arguments (numbers, true/false/null/NaN, and `this` as the element itself); two calls
+    joined by ';' both run, and the elements around the target are the ones it had when the click started (a
+    handler that redraws its own row does not cancel the outer one); data-change runs on a change. A handler naming anything outside ACTS (eval, fetch, a
+    prototype name) or holding a non-literal or malformed argument throws and runs nothing; an inner handler that
+    throws still lets the outer one run, and the error is reported. Guards the dispatcher that replaced the inline
+    handlers (review UI-08): it must keep their semantics for the page's own markup, and must never let
+    attribute text reach a function the page did not list."""
+    got = _run(served_script, "dispatcher_rules")
+    assert got["nested"] == {"error": None, "seen": [["goTo", 3, -1.5, True, False, None, None], ["setTab", "x"]]}
+    assert got["self"] == {"selected": True}
+    assert got["two"] == {"error": None, "seen": [["loadTokens"], ["loadOperators"]]}
+    # the path is fixed when the click starts: a handler that detaches its own element still lets the outer run
+    assert got["detached"] == {"error": None, "seen": [["loadTokens"], ["setTab", "z"]]}
+    for spec in ("eval('1')", "fetch()", "goTo(x)", "goTo(1)junk", "goTo('a\\b')", "goTo(1,)", "constructor()"):
+        assert got["refused"][spec]["seen"] == [], spec
+        assert got["refused"][spec]["error"] == f"bad page action: {spec}", spec
+    assert got["keepsGoing"] == {"error": "loadAudit broke", "seen": [["loadAudit"], ["setTab", "y"]]}
+    assert got["change"] == {"error": None, "seen": [["syncNever"]]}

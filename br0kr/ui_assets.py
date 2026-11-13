@@ -1,8 +1,8 @@
 """ui_assets.py — the vendored netcanon-dev/ui-design-spec dist deliverable, embedded as Python
-string constants. br0kr ships NO static dir and NO templates (the dashboard is one PAGE string in
-br0kr/dashboard_page.py served by a stdlib http.server), so the unified UI assets follow the same
-zero-dependency delivery: a Python module + three exact GET routes in br0kr/dashboard.py — no
-filesystem reads at request time, no packaging data-files, nothing fetched from anywhere.
+string constants. The dashboard is one PAGE string in br0kr/dashboard_page.py plus its own client script,
+br0kr/static/dashboard.js, served by a stdlib http.server; the vendored files stay Python constants so their
+sha256 gate below reads them in place: a Python module + three exact GET routes in br0kr/dashboard.py — no
+filesystem reads at request time, nothing fetched from anywhere.
 
 VENDORED — DO NOT EDIT THE PAYLOADS BY HAND. Source: netcanon-dev/ui-design-spec, tag v0.2.1
 (commit 1c4af32911e0ddc370a4a3049112adb4e35e8f7f) — see that repo's dist/README.md for the

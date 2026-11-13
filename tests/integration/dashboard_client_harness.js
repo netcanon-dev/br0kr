@@ -1,6 +1,6 @@
-// dashboard_client_harness.js — runs the dashboard client script AS SERVED (the <script> block of
-// br0kr/dashboard_page.py's PAGE value) in node, against a minimal fake DOM and a fake dashboard server, then
-// runs ONE named scenario and prints what it observed as JSON on stdout.
+// dashboard_client_harness.js — runs the dashboard client script AS SERVED (br0kr/static/dashboard.js, the file
+// the page loads) in node, against a minimal fake DOM and a fake dashboard server, then runs ONE named scenario
+// and prints what it observed as JSON on stdout. Clicks go through the page's own data-act dispatcher (dispatch).
 //
 // Driven by tests/integration/test_dashboard_client.py, which holds the assertions and says what each scenario
 // proves. Usage: node dashboard_client_harness.js <served-script.js> <scenario>
@@ -141,6 +141,7 @@ class El {
     return this.querySelectorAll(sel)[0] || null;
   }
   up() { return this._parent || this._owner || this.parentNode || null; }
+  get parentElement() { return this.up(); }
   // a detached element is in nothing (a browser's getElementById would not even find it)
   contains(x) {
     if (!x || (x !== this && !x.isConnected)) return false;
@@ -208,6 +209,22 @@ async function press(key, { shift = false, on = null } = {}) {
   return ev;
 }
 async function fire(type) { (listeners[type] || []).forEach(fn => fn({})); await settle(); }
+// A click (or change) as a browser dispatches it: the element's own handler and listeners, then each element's
+// around it, then the document's, where the page's data-act / data-change dispatcher listens. A listener that
+// throws is reported after the dispatch (a browser would log it; a scenario should crash on it).
+async function dispatch(el, type) {
+  const ev = { type, target: el, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+  const errors = [];
+  const call = fn => { try { fn(ev); } catch (e) { errors.push(e); } };
+  for (let n = el; n; n = n.up()) {
+    if (n['on' + type]) call(e => n['on' + type](e));
+    (n._ls[type] || []).forEach(call);
+  }
+  (listeners[type] || []).forEach(call);
+  await settle();
+  if (errors.length) throw errors[0];
+}
+const clickOn = el => dispatch(el, 'click');
 const storage = () => {
   const m = new Map();
   return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)),
@@ -346,9 +363,9 @@ const leaseStatus = path => {
 };
 const posts = n => calls.slice(n).filter(c => c.method === 'POST').map(c => ({ path: c.path, body: c.body }));
 const pressSave = async () => {
-  const m = /<button class="act" onclick="([^"]*)">/.exec($('form-slot').innerHTML);
-  if (!m) throw new Error('the open dialog has no primary button with an inline handler');
-  await run(unesc(m[1])); await settle();
+  const b = $('form-slot').querySelectorAll('button').find(x => x.className === 'act' && 'data-act' in x.attrs);
+  if (!b) throw new Error('the open dialog has no primary button with a data-act handler');
+  await clickOn(b);
 };
 const click = async id => {
   if (!$('form-slot').innerHTML.includes(`id="${id}"`)) throw new Error(`the open dialog has no #${id}`);
@@ -359,15 +376,50 @@ const strip = () => ({ html: $('attention').innerHTML, hidden: $('attention').hi
   tenancy: $('badge-tenancy').textContent, tab: run('TAB') });
 const FAILED_BUILD = (id, at) => ({ build_id: id, target_template_id: 'debian-' + id, state: 'FAILED', cluster_id: 'c1',
   vmid: null, url: 'https://images.example/d.qcow2', error: 'checksum mismatch', updated_at: at });
-// a button in a panel, found by its inline handler (the element the page drew, as a browser would hand it out)
-const buttonIn = (panel, onclick) => {
-  const b = $(panel).querySelectorAll('button').find(x => x.getAttribute('onclick') === onclick);
-  if (!b) throw new Error(`#${panel} has no button running ${onclick}`);
+// a button in a panel, found by its data-act handler (the element the page drew, as a browser would hand it out)
+const buttonIn = (panel, act) => {
+  const b = $(panel).querySelectorAll('button').find(x => x.getAttribute('data-act') === act);
+  if (!b) throw new Error(`#${panel} has no button running ${act}`);
   return b;
 };
 async function confirmYes() { await run("document.getElementById('cm-ok').onclick()"); await settle(); }
 
 const SCENARIOS = {
+  // the data-act dispatcher (review UI-08), driven through a real click / change dispatch
+  async dispatcher_rules() {
+    await boot({ token: 't' });
+    run(`var SEEN = [];
+      for (const n of ['goTo', 'setTab', 'loadTokens', 'loadOperators', 'syncNever'])
+        ACTS[n] = (...a) => SEEN.push([n, ...a]);
+      ACTS.loadAudit = () => { SEEN.push(['loadAudit']); throw new Error('loadAudit broke'); };`);
+    const el = (tag, attr, spec, parent) => {
+      const e = document.createElement(tag); e.setAttribute(attr, spec); if (parent) parent.appendChild(e); return e;
+    };
+    const seen = () => { const s = run('SEEN.splice(0)'); return JSON.parse(JSON.stringify(s)); };
+    const outcome = async (fn) => { try { await fn(); return null; } catch (e) { return String(e.message); } };
+    const outer = el('div', 'data-act', "setTab('x')");
+    const inner = el('button', 'data-act', 'goTo(3, -1.5, true, false, null, NaN)', outer);
+    const nested = { error: await outcome(() => clickOn(inner)), seen: seen() };
+    const box = el('input', 'data-act', 'selectText(this)');
+    box.select = () => { box.selected = true; };
+    await clickOn(box);
+    const self = { selected: box.selected === true };
+    const two = { error: await outcome(() => clickOn(el('button', 'data-act', 'loadTokens();loadOperators()'))),
+      seen: seen() };
+    const holder = el('div', 'data-act', "setTab('z')");
+    sandbox.GONER = el('button', 'data-act', 'loadTokens()', holder);
+    run(`ACTS.loadTokens = () => { SEEN.push(['loadTokens']); GONER.remove(); };`);
+    const detached = { error: await outcome(() => clickOn(sandbox.GONER)), seen: seen() };
+    const refused = {};
+    for (const spec of ["eval('1')", 'fetch()', 'goTo(x)', 'goTo(1)junk', "goTo('a\\b')", 'goTo(1,)', 'constructor()']) {
+      refused[spec] = { error: await outcome(() => clickOn(el('button', 'data-act', spec))), seen: seen() };
+    }
+    const throwsInner = el('button', 'data-act', 'loadAudit()', el('div', 'data-act', "setTab('y')"));
+    const keepsGoing = { error: await outcome(() => clickOn(throwsInner)), seen: seen() };
+    const change = { error: await outcome(() => dispatch(el('input', 'data-change', 'syncNever()'), 'change')),
+      seen: seen() };
+    return { nested, self, two, detached, refused, keepsGoing, change };
+  },
   async parity_storage_pair() {
     await boot({ token: 't', routes: { '/api/overview': PARITY(),
       '/api/storage/quarantine/clear': ok({ storage_id: 'fast', node_id: 'n1', cleared: true, reason: null }),
@@ -623,7 +675,7 @@ const SCENARIOS = {
     await boot({ token: 't' });
     const edit = buttonIn('nodes', "editItem('node',0)");
     edit.focus();
-    await run(edit.getAttribute('onclick')); await settle();
+    await clickOn(edit);
     const slot = $('form-slot');
     const opened = { hidden: slot.hidden, titleId: slot.querySelector('h3').id,
       title: slot.querySelector('h3').textContent, focus: document.activeElement.id };
@@ -644,7 +696,7 @@ const SCENARIOS = {
     const now = document.activeElement;
     return { opened, controls: all.length, tabPrevented: tab.defaultPrevented, wrapped,
       shiftPrevented: shiftTab.defaultPrevented, wrappedBack, innerPrevented: inner.defaultPrevented, closed,
-      repainted: !edit.isConnected, after: { tag: now.tagName, onclick: now.getAttribute('onclick'),
+      repainted: !edit.isConnected, after: { tag: now.tagName, act: now.getAttribute('data-act'),
         focusedWith: now.focusedWith } };
   },
   async dialog_initial_focus() {
@@ -684,7 +736,7 @@ const SCENARIOS = {
     routes['/api/overview'] = ok({ ...OVERVIEW, nodes: [{ ...OVERVIEW.nodes[0], cpu_used: 4, cpu_pct: 50 }] });
     await run('poll()'); await settle();
     const now = document.activeElement;
-    return { unchanged, replaced: !edit.isConnected, onclick: now.getAttribute('onclick'),
+    return { unchanged, replaced: !edit.isConnected, act: now.getAttribute('data-act'),
       focusedWith: now.focusedWith, inNodes: $('nodes').contains(now) };
   },
   async paint_focus_fallbacks() {
@@ -697,7 +749,7 @@ const SCENARIOS = {
     routes['/api/overview'] = ok({ ...OVERVIEW, nodes: [{ ...OVERVIEW.nodes[0], cordoned: true }, node2] });
     await run('poll()'); await settle();
     let a = document.activeElement;
-    const flipped = { onclick: a.getAttribute('onclick'), text: a.textContent };
+    const flipped = { act: a.getAttribute('data-act'), text: a.textContent };
     // the row goes away: focus lands on the section heading, never on a neighbouring row's button
     const gone = buttonIn('nodes', "delItem('node',1)");
     gone.focus();
@@ -716,7 +768,7 @@ const SCENARIOS = {
     const detached = !create.isConnected;
     await press('Escape');
     a = document.activeElement;
-    return { flipped, removed, detached, back: { onclick: a.getAttribute('onclick'), fresh: a !== create,
+    return { flipped, removed, detached, back: { act: a.getAttribute('data-act'), fresh: a !== create,
       inTokens: $('tokens').contains(a) } };
   },
   async confirm_labels() {
@@ -749,12 +801,12 @@ const SCENARIOS = {
     routes['/api/lease/status'] = fail(503, 'ledger_unreachable');   // no answer: the worst case, said so
     asked.unchecked = await ask('cancelLease(99)');
     const buttons = {};
-    for (const [name, panel, onclick] of [['activeLease', 'leases', 'cancelLease(7)'],
+    for (const [name, panel, act] of [['activeLease', 'leases', 'cancelLease(7)'],
       ['admittedLease', 'leases', 'cancelLease(8)'], ['provisioningLease', 'leases', 'cancelLease(9)'],
       ['deleteNode', 'nodes', "delItem('node',0)"],
       ['deleteInstanceRow', 'instances', 'deleteInstance(0)'], ['cancelReplication', 'replications', 'cancelReplication(0)'],
       ['forceFailBuildWithGuest', 'downloads', 'forceFailBuild(0)'], ['forceFailBuildNoGuest', 'downloads', 'forceFailBuild(1)']]) {
-      const b = buttonIn(panel, onclick);
+      const b = buttonIn(panel, act);
       buttons[name] = { red: red(b), text: b.textContent };
     }
     return { asked, buttons };

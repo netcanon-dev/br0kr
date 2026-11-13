@@ -154,7 +154,7 @@ test is a lie — scope it so the figure means something.
 ## 6. UI tests select by behaviour, not by appearance
 
 br0kr's one UI is the dashboard. `tests/integration/test_dashboard_client.py` runs its script as served, in
-node, against a fake DOM, and finds a control by its `id` or its handler (`onclick="cancelLease(7)"`), never by a
+node, against a fake DOM, and finds a control by its `id` or its handler (`data-act="cancelLease(7)"`), never by a
 CSS class or by DOM position. WHY: a test should break when behaviour breaks, not when someone restyles a
 button.
 

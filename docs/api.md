@@ -427,7 +427,7 @@ missing or wrong one is 401. Setup: [docker-deploy.md §3](runbooks/docker-deplo
 | `/api/tokens` | operator |
 | `/api/whoami` | open |
 | `/healthz` | open |
-| `/assets/<version>/…` | open (the page's vendored CSS and JS) |
+| `/assets/<version>/…` | open (the page's CSS and JS: the vendored UI files and the client script) |
 
 ### Actions (POST, JSON body)
 

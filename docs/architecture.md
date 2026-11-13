@@ -128,7 +128,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `daemon.py` | The leader's reconcile loop: leadership, connections, health; each tick runs the step table. | via the tick steps | via the tick steps | `unit/test_daemon.py`, `harness_daemon.py` |
 | `dashboard.py` | Stdlib HTTP server: the read endpoints, and the auth, commit and audit around each operator action. | reads; via dashboard_actions, audit, auth | — | `unit/test_dashboard.py`, `integration/test_dashboard.py` |
 | `dashboard_actions.py` | The dashboard's POST actions: a body parser and a verb per path, and the outcome-aware audit tables. | via admin, gateway, actas, pin, replication, settings | — | `unit/test_dashboard.py`, `unit/test_api_reference.py` |
-| `dashboard_page.py` | The dashboard's one HTML page: its CSS and the polling client script. | — | — | `unit/test_dashboard.py`, `integration/test_dashboard_client.py` |
+| `dashboard_page.py` | The dashboard's HTML page and CSS, and the hashed path of its client script, `static/dashboard.js`. | — | — | `unit/test_dashboard.py`, `integration/test_dashboard_client.py` |
 | `db.py` | The one connection seam: READ COMMITTED pin, keepalives, retry, pools. | — | — | `unit/test_db.py`, `harness_ledger_ha.py` |
 | `envelope.py` | Adds `ok` and a `reason` to every MCP tool answer. | — | — | `unit/test_envelope.py` |
 | `gateway.py` | Transport-agnostic agent verbs: request, schedule, renew, release, status, jobs. | writes self-quota; via admission, lease, jobs | — | `unit/test_gateway.py`, `harness_gateway.py` |

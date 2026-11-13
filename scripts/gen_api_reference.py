@@ -152,7 +152,7 @@ def action_verbs() -> dict[str, Any]:
 
 
 def _render_dashboard() -> list[str]:
-    from br0kr import dashboard, ui_assets
+    from br0kr import dashboard
 
     verbs = action_verbs()
     undocumented = sorted(p for p in dashboard._ACTIONS if verbs.get(p) is None or not verbs[p].__doc__)
@@ -169,10 +169,10 @@ def _render_dashboard() -> list[str]:
            "missing or wrong one is 401. Setup: [docker-deploy.md §3](runbooks/docker-deploy.md#3-bring-it-up).", "",
            "### Reads (GET)", "", "| Path | Access |", "|---|---|"]
     for path, tag in sorted(dashboard._ROUTES.items()):
-        if path in ui_assets.ASSETS:
+        if tag == "asset":
             continue
         out.append(f"| `{path}` | {dashboard.GET_ACCESS[tag]} |")
-    out.append("| `/assets/<version>/…` | open (the page's vendored CSS and JS) |")
+    out.append("| `/assets/<version>/…` | open (the page's CSS and JS: the vendored UI files and the client script) |")
     out += ["", "### Actions (POST, JSON body)", "",
             "Every action needs the operator token or a named operator. An action that changes something is",
             "recorded in the audit log.", "",

@@ -69,7 +69,7 @@ connection or driver in; to swap real ↔ fake you change that one patch, nothin
 tests/
   validate.sh / validate.ps1   # the gate (RUN/ok/FAIL/SKIP, fail-closed, --strict for CI)
   check_test_docs.py           # meta-test: every test carries a docstring
-  check_dashboard_js.py        # js-syntax gate: node --check on the dashboard PAGE <script> as served (self-skips w/o node)
+  check_dashboard_js.py        # js-syntax gate: node --check on br0kr/static/dashboard.js (self-skips w/o node)
   check_line_endings.py        # artifact gate: the `git archive` deploy tarball must be LF (self-skips w/o a git tree)
   conftest.py                  # the mock seams + isolation fixtures
   requirements-dev.txt         # the (tiny) dev/test deps

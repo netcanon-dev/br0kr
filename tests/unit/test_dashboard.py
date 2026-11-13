@@ -16,9 +16,14 @@ from types import ModuleType
 
 import pytest
 
-from br0kr import dashboard, dashboard_actions
+from br0kr import dashboard, dashboard_actions, dashboard_page, ui_assets
 
 pytestmark = pytest.mark.unit
+
+# The page as a browser assembles it: the HTML shell (dashboard.PAGE) and the client script it loads,
+# br0kr/static/dashboard.js (review UI-08). The needle tests read _UI, wherever a piece now lives.
+_SCRIPT = dashboard_page.APP_JS.decode("utf-8")
+_UI = dashboard.PAGE + "\n" + _SCRIPT
 
 
 def test_route_maps_known_paths_and_404s_the_rest():
@@ -76,36 +81,22 @@ def test_leases_reader_calls_list_leases_and_page_has_the_section(monkeypatch):
     the HTML (a read-auth-tier inventory read, like queue/migrations — NOT operator-gated)."""
     monkeypatch.setattr(dashboard.inventory, "list_leases", lambda c: [{"lease_id": 9, "state": "ACTIVE"}])
     assert dashboard._API["leases"](object()) == {"leases": [{"lease_id": 9, "state": "ACTIVE"}]}
-    assert 'id="leases"' in dashboard.PAGE and "Active leases" in dashboard.PAGE
+    assert 'id="leases"' in _UI and "Active leases" in _UI
 
 
 def test_page_script_has_balanced_template_literals():
-    """The dashboard's client JS lives INSIDE a Python string (PAGE), so the validate gate (ruff / py_compile)
-    can't see a JS syntax error in it — a stray or missing backtick that breaks a template literal compiles
-    fine as Python and lints clean, yet ships a dead page. This is the hermetic, dep-free backstop for that
-    footgun: every JS template literal is a matched pair of backticks, so the count in the <script> block MUST
-    be even. Lesson from PR2 (the Active-leases table): a line-length refactor added a stray backtick that
-    only a browser — or a real `node --check` on the extracted script (run in the manual gate) — would catch."""
-    js = _script_block(dashboard.PAGE)
-    assert js is not None, "PAGE has no <script> block"
-    assert js.count("`") % 2 == 0, "odd number of backticks — an unbalanced JS template literal in PAGE"
-
-
-def _script_block(page: str) -> str | None:
-    """The page's inline client script: the text between the first `<script>` and the next `</script>` (the
-    `<script src=…>` asset tag does not match), or None. A plain split, the same one tests/check_dashboard_js.py
-    makes; the page is our own string, so this extracts, never sanitizes."""
-    _head, sep, rest = page.partition("<script>")
-    body, end, _tail = rest.partition("</script>")
-    return body if sep and end else None
+    """Every JS template literal in the client script is a matched pair of backticks, so the count MUST be even.
+    The dependency-free backstop for `node --check` (tests/check_dashboard_js.py), which self-skips where node is
+    absent: a stray backtick once shipped a dead page that compiled and linted clean (the script then lived in a
+    Python string), and only a browser or node would have caught it."""
+    assert _SCRIPT.count("`") % 2 == 0, "odd number of backticks — an unbalanced JS template literal"
 
 
 def _page_literal_source() -> str:
-    """The PAGE string literal exactly as written in br0kr/dashboard_page.py (quotes included)."""
-    from br0kr import dashboard_page
+    """The page shell's string literal (`_SHELL`) exactly as written in br0kr/dashboard_page.py (quotes included)."""
     src = Path(dashboard_page.__file__).read_text(encoding="utf-8")
     node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
-                and any(getattr(t, "id", None) == "PAGE" for t in n.targets))
+                and any(getattr(t, "id", None) == "_SHELL" for t in n.targets))
     literal = ast.get_source_segment(src, node.value)
     assert literal is not None
     return literal
@@ -123,22 +114,27 @@ def test_page_literal_holds_no_escape_that_changes_the_served_text():
     assert not odd, f"Python escapes in PAGE change the script the browser receives: {odd}"
 
 
-def test_js_syntax_gate_checks_the_script_as_served(tmp_path, monkeypatch):
-    r"""tests/check_dashboard_js.py hands node the script as the browser receives it (PAGE's runtime value), not
-    the source text: for a module whose PAGE holds `\'`, it returns the bare `'` the browser would get. Guards the
-    gate regressing to the source text, where that escape reads as valid JS and a dead page passes the check."""
+def test_the_page_loads_its_one_script_file_from_the_path_the_server_serves():
+    """The page shell holds no inline script: its only scripts are the vendored theme picker and ONE `<script
+    src>` naming APP_JS_PATH, whose hash is of br0kr/static/dashboard.js; the dashboard serves that path with the
+    file's bytes as JavaScript; and the syntax gate (tests/check_dashboard_js.py) checks that same file. Guards
+    the three drifting apart: a page naming a path nothing serves (a dead dashboard), a stale hash defeating the
+    immutable cache, or node checking a file the browser never gets (review UI-08)."""
+    import hashlib
     spec = importlib.util.spec_from_file_location(
         "check_dashboard_js", Path(__file__).resolve().parents[1] / "check_dashboard_js.py")
     assert spec is not None and spec.loader is not None
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
-    fake = tmp_path / "dashboard_page.py"
-    fake.write_text(r'''PAGE = """<html><script>f('it\'s')</script></html>"""''' + "\n", encoding="utf-8")
-    monkeypatch.setattr(gate, "_PAGE_MODULE", fake)
-    assert gate.page_script() == "f('it's')"            # what the browser gets: a broken JS string
-    served = _script_block(dashboard.PAGE)
-    monkeypatch.undo()
-    assert served is not None and gate.page_script() == served   # the real page, as served
+    path = dashboard_page.APP_JS_PATH
+    # tag names are case-insensitive in HTML, so the scan is too: an inline <SCRIPT> must not slip past it
+    assert re.findall(r"<script\b[^>]*>", dashboard.PAGE, re.IGNORECASE) == [
+        f'<script src="/assets/{ui_assets.SPEC_TAG}/theme-picker.js">', f'<script src="{path}">']
+    lowered = dashboard.PAGE.lower()
+    assert "<script>" not in lowered and lowered.count("</script") == 2   # nothing inline
+    body = gate.SCRIPT.read_bytes()
+    assert path == f"/assets/app-{hashlib.sha256(body).hexdigest()[:8]}/dashboard.js"
+    assert dashboard.route(path) == "asset" and dashboard._ASSETS[path] == ("text/javascript; charset=utf-8", body)
 
 
 def _enclosing_functions(js: str, needle: re.Pattern[str]) -> set[str]:
@@ -160,8 +156,8 @@ def test_page_reads_go_through_fetch_json_and_results_through_notify():
     and coercing its error body to an empty list, which is how a 401 rendered 'add one' (review UI-01), and an
     alert() creeping back. Hermetic: the behaviour itself is proven in tests/integration/test_dashboard_client.py
     where node exists."""
-    page = dashboard.PAGE
-    js = _script_block(page)
+    page = _UI
+    js = _SCRIPT
     assert js is not None
     raw_fetch = re.compile(r"(?<![\w.])fetch\(")
     assert _enclosing_functions(js, raw_fetch) == {"fetchJSON", "postJSON", "exportAudit"}
@@ -187,7 +183,7 @@ def test_reason_hint_explains_every_error_code_the_dashboard_request_handling_se
     UX-06). Refusals from the admission and inventory verbs reach the page as 200 `reason`s and use the same
     rules; the node behaviour test proves the wording."""
     from br0kr import admin, settings
-    js = _script_block(dashboard.PAGE)
+    js = _SCRIPT
     assert js is not None
     table = js.partition("const REASON_HINT = {")[2].partition("\n};")[0]
     exact = set(re.findall(r"^\s*(\w+):", table, re.MULTILINE))
@@ -221,8 +217,8 @@ def test_every_overview_panel_named_for_first_load_errors_exists_in_the_page():
     """PANELS lists the mounts a failed first load writes 'could not load …' into. Each must be a real element
     id in the page, or a renamed panel silently drops out of the first-load error (the fake DOM in the
     behaviour test creates any id it is asked for, so only this check sees the drift)."""
-    page = dashboard.PAGE
-    js = _script_block(page)
+    page = _UI
+    js = _SCRIPT
     assert js is not None
     panels = js.partition("const PANELS = {")[2].partition("};")[0]
     ids = re.findall(r"(\w+):'", panels)
@@ -276,8 +272,8 @@ def test_page_has_the_audit_panel_wiring():
                    # the request-generation guard that drops a stale in-flight page when filters change
                    # (regression guard for the load-more/filter race the review caught). Assert the actual
                    # STATEMENT forms (the stamp + the guard), not a bare string a comment could satisfy — a
-                   # true behavioral JS test isn't in this repo's toolchain (the JS lives in a Python string;
-                   # the JS gate is `node --check` on the extracted <script> + these wiring needles).
+                   # behavioural test of the audit pager is not in the node client tests, so these wiring needles
+                   # and `node --check` on br0kr/static/dashboard.js are what guard it).
                    "const gen = ++auditGen", "if(gen !== auditGen) return",
                    # audit filters AUTO-ACTUATE per step (no Apply button): the debounce + wiring helper, the
                    # one-time hookup in syncAudit, and the change/input listeners (select+date on change, text
@@ -293,14 +289,14 @@ def test_page_has_the_audit_panel_wiring():
                    # the guard checks tok() (cleared SYNCHRONOUSLY by lock()) not just the stale global canEdit, and
                    # a no-op re-apply is skipped so a type-then-backspace can't discard the load-more keyset pages.
                    "if(!(canEdit && tok())) return", "=== auditLastQS) return"):
-        assert needle in dashboard.PAGE, needle
+        assert needle in _UI, needle
     # the Apply button is GONE (auto-actuate replaces it) — but applyAuditFilters STAYS, called by the listeners.
-    assert 'onclick="applyAuditFilters()"' not in dashboard.PAGE
-    assert "function applyAuditFilters(" in dashboard.PAGE
+    assert 'data-act="applyAuditFilters()"' not in _UI
+    assert "function applyAuditFilters(" in _UI
     # the three wired id arrays must together cover exactly the 8 af-* filters clearAuditFilters/auditFilterQS use,
     # so the lists can't drift apart (a filter wired nowhere = permanently no auto-apply, no manual fallback).
     import re as _re
-    wired = set(_re.findall(r"'(af-[a-z]+)'", _re.search(r"function wireAuditFilters\(.*?\n\}", dashboard.PAGE,
+    wired = set(_re.findall(r"'(af-[a-z]+)'", _re.search(r"function wireAuditFilters\(.*?\n\}", _UI,
                                                           _re.S).group(0)))
     assert wired == {"af-surface", "af-outcome", "af-since", "af-until", "af-action", "af-target",
                      "af-project", "af-token"}, wired
@@ -332,8 +328,8 @@ def test_form_slot_is_a_centered_modal_overlay():
     """An add/edit form renders into #form-slot as a CENTERED MODAL overlay (position:fixed) — so a form opened
     from a panel lower down the page stays IN VIEW instead of rendering off-screen at the top of the page — and
     Escape closes it (guarded on a rendered form so lease-select mode, also `paused`, is unaffected). Guards a
-    regression to the old top-of-page inline flow. Source-needle (the CSS/JS live in dashboard.PAGE)."""
-    page = dashboard.PAGE
+    regression to the old top-of-page inline flow. Source-needle over the page's CSS and its script."""
+    page = _UI
     assert "#form-slot:not(:empty){position:fixed" in page            # the modal overlay, not an inline block
     assert "if(e.key === 'Escape'" in page and "closeForm()" in page   # Escape-to-close is wired
 
@@ -346,8 +342,8 @@ def test_the_page_meets_the_accessibility_floor():
     field carry a label, not just a placeholder; the status glyphs say their meaning in words; and no text is
     set below 11 px. Guards a new dialog or panel writer bypassing the helpers (its focus would be lost again)
     and the labels or roles being dropped in a later edit. The review found 0 aria- and 0 role= attributes."""
-    page = dashboard.PAGE
-    js = _script_block(page)
+    page = _UI
+    js = _SCRIPT
     assert js is not None
     assert '<div id="form-slot" role="dialog" aria-modal="true" aria-labelledby="dlg-title" hidden></div>' in page
     assert "function openDialog(html){" in js and "h.id = 'dlg-title'" in js
@@ -381,7 +377,7 @@ def test_every_colour_comes_from_the_root_palette():
     on-accent, danger-emphasis + white) rather than a fixed text colour that only works in one mode. Guards
     review UI-07: about a dozen hardcoded dark literals (input wells, ghost buttons, the warning banner, the modal
     backdrop, button text) kept light mode unreadable, so the mode buttons had to stay hidden."""
-    page = dashboard.PAGE
+    page = _UI
     style = page[page.index("<style>"):page.index("</style>")]
     start = style.index("  :root{")
     end = style.index("color-scheme:light dark}", start) + len("color-scheme:light dark}")
@@ -412,13 +408,13 @@ def test_page_uses_client_side_tabs_grouped_into_four_panels():
     and the classification drifting from the four agreed groups. The operator sections keep their OWN display:none
     gating on the <section> (a different element than the .tabpanel), so tab-visibility never fights it — the
     Security & Ops panel carries a #sec-hint shown until unlocked. The needs-attention strip sits above the panels,
-    outside every .tabpanel, so it shows whichever tab is open. The JS lives in a Python string, so this is a
-    source/PAGE-needle test; `node --check` on the extracted <script> is the syntax half of the gate, and
+    outside every .tabpanel, so it shows whichever tab is open. A source-needle test over the page and its
+    script; `node --check` on br0kr/static/dashboard.js is the syntax half of the gate, and
     tests/integration/test_dashboard_client.py proves the strip's behaviour."""
-    page = dashboard.PAGE
+    page = _UI
     # the nav + the four grouped panels, in the agreed classification
-    for needle in ('<nav id="tabnav" aria-label="sections"><div role="tablist"', "onclick=\"setTab('capacity')\"", "onclick=\"setTab('tenancy')\"",
-                   "onclick=\"setTab('images')\"", "onclick=\"setTab('security')\"",
+    for needle in ('<nav id="tabnav" aria-label="sections"><div role="tablist"', "data-act=\"setTab('capacity')\"", "data-act=\"setTab('tenancy')\"",
+                   "data-act=\"setTab('images')\"", "data-act=\"setTab('security')\"",
                    *(f'<div class="tabpanel" role="tabpanel" id="panel-{t}" aria-labelledby="tab-{t}" data-tab="{t}">'
                      for t in ("capacity", "tenancy", "images", "security")),
                    # setTab wired: defined, persisted to localStorage (a preference, NOT the token), init-called
@@ -456,7 +452,7 @@ def test_named_dashboard_operator_is_wired():
     """Named dashboard operators (0026) are wired at the SOURCE: the identity resolver methods, the audit
     ATTRIBUTION (the resolved actor + token_id passed to _action, NOT a hardcoded 'dashboard-operator'), the
     /api/operator/* actions + /api/operators + /api/whoami routes, and the management-panel + 'acting as' JS. A
-    source/PAGE-needle test (mirrors the _deny wiring scan) — the behavioral half is proven in test_auth /
+    source-needle test (mirrors the _deny wiring scan) — the behavioral half is proven in test_auth /
     test_admin (resolve + CRUD) and real Postgres (harness_auth: a named operator drives an action → the audit
     records its name). Guards a piece being dropped or wired to the wrong endpoint (no handler-level HTTP test
     in this file's toolchain)."""
@@ -470,9 +466,9 @@ def test_named_dashboard_operator_is_wired():
     actions_src = inspect.getsource(dashboard_actions)
     assert "admin.create_dashboard_operator" in actions_src and "admin.revoke_dashboard_operator" in actions_src
     assert "admin.list_dashboard_operators" in src
-    # GUI: the management panel + the 'acting as' indicator, wired into the render loop (the JS now lives in
-    # dashboard.PAGE — split into br0kr/dashboard_page.py — so the GUI needles scan the re-exported PAGE).
-    page = dashboard.PAGE
+    # GUI: the management panel + the 'acting as' indicator, wired into the render loop (the needles read _UI,
+    # the page shell plus its script).
+    page = _UI
     for needle in ('id="operators-sec"', 'id="whoami"', "function loadOperators(", "function renderOperators(",
                    "async function submitOperator(", "function revokeOperator(",   # revoke is now a modal opener
                    "async function checkToken(", "'/api/operator/create'", "'/api/operator/revoke'",
@@ -542,18 +538,18 @@ def test_page_has_the_ergonomics_js_and_endpoints():
     backtick-parity test (syntax only) wouldn't catch."""
     for needle in ("function renderLeases(", "function cancelSelected(", "function enterLeaseSelect(",
                    "function setTokenExpiry(", "/api/token/expiry", "Ledger schema:"):
-        assert needle in dashboard.PAGE, needle
+        assert needle in _UI, needle
 
 
 def test_force_fail_build_is_wired_end_to_end():
     """The operator force-fail hatch (S04/F4) is wired: the POST /api/template/build/force-fail route dispatches
     to admin.force_fail_build, and the build panel's client JS carries forceFailBuild + a per-row button that
     calls it via a DANGER confirmModal against that endpoint. Guards the route or the button being renamed away
-    from its handler (a dead button the backtick-parity syntax check wouldn't catch). Source/PAGE-needle."""
+    from its handler (a dead button the backtick-parity syntax check wouldn't catch). Source-needle."""
     assert "/api/template/build/force-fail" in dashboard._ACTIONS
-    for needle in ("function forceFailBuild(", 'onclick="forceFailBuild(',
+    for needle in ("function forceFailBuild(", 'data-act="forceFailBuild(',
                    "/api/template/build/force-fail", "confirmModal('Force build "):
-        assert needle in dashboard.PAGE, needle
+        assert needle in _UI, needle
 
 
 def test_template_source_dirty_route_is_allowlisted():
@@ -592,12 +588,12 @@ def test_template_instance_panel_is_wired():
     test_inventory."""
     for path in ("/api/instance/bind", "/api/instance/retire", "/api/instance/delete"):
         assert path in dashboard._ACTIONS   # write side allowlisted (PR-1) — the panel now DRIVES it from the GUI
-    page = dashboard.PAGE
+    page = _UI
     for needle in ('id="instances-sec"', 'id="instances"', "function renderInstances(", "renderInstances();",
                    "DATA.template_instances", "function openBindForm(", "async function submitBind(",
                    "function retireInstance(", "function deleteInstance(",
                    "'/api/instance/bind'", "'/api/instance/retire'", "'/api/instance/delete'",
-                   'onclick="openBindForm(', 'onclick="retireInstance(', 'onclick="deleteInstance(',
+                   'data-act="openBindForm(', 'data-act="retireInstance(', 'data-act="deleteInstance(',
                    "confirmModal('Delete instance ROW",   # a ledger-row delete: named, not red (UI-06)
                    # the §4.4 force-delete flow: on instance_in_use, offer a FORCE re-POST that severs terminal
                    # lease history (mirrors delItem's node/storage force flow).
@@ -625,16 +621,16 @@ def test_replication_panel_is_wired():
     # the act-as create is result-aware: audited only on a fresh request, refused-channel on a final refusal
     assert dashboard._RESULT_AUDIT["/api/replication/create"] is dashboard_actions.actas.audit_replicate
     assert dashboard._RESULT_REFUSED["/api/replication/create"] is dashboard_actions.actas.refused_replicate
-    page = dashboard.PAGE
+    page = _UI
     for needle in ('id="replications-sec"', 'id="replications"', "function renderReplications(",
                    "renderReplications();", "DATA.replications", "function openReplicateForm(",
                    "async function submitReplicate(", "function cancelReplication(",
                    "function openReplicatePrune(", "async function submitReplicatePrune(",
                    "'/api/replication/create'", "'/api/replication/cancel'", "'/api/replication/prune'",
-                   'onclick="openReplicateForm(', 'onclick="cancelReplication(', 'onclick="openReplicatePrune(',
+                   'data-act="openReplicateForm(', 'data-act="cancelReplication(', 'data-act="openReplicatePrune(',
                    # the replicate modal's cluster→storage re-filter (the one interactive control unique here):
                    # a rename of either half silently stops the storage <select> re-filtering on cluster change.
-                   "function replClusterChanged(", 'onchange="replClusterChanged()"'):
+                   "function replClusterChanged(", 'data-change="replClusterChanged()"'):
         assert needle in page, needle
     # cancel confirms first but is not red: a REQUESTED job has not started copying, so nothing is torn down;
     # pin it by function BODY so the label and the flag are both caught
@@ -650,7 +646,7 @@ def test_placement_health_tiles_are_wired():
     nodes_with_zero_reachable_storage). Guards a fleet-health count being dropped from the operator's at-a-glance
     surface. The counts' SQL is proven in test_inventory (fleet_stats placement counts) + the gui-parity
     harness."""
-    page = dashboard.PAGE
+    page = _UI
     for needle in ("Reachability quarantines", "f.quarantined_reachability_pairs", "f.held_leases",
                    "f.unverified_reachability_pairs", "f.unsized_instances",
                    "f.nodes_with_zero_reachable_storage"):
@@ -663,11 +659,11 @@ def test_cancel_migration_is_wired_end_to_end():
     (non-terminal, operator-only) cancel button behind a named confirmModal against that endpoint (not red: the
     guest stays on the source, untouched), surfacing
     the copy_in_flight refusal. Guards the route or the button being renamed away from its handler (a dead
-    button the backtick-parity syntax check wouldn't catch). Source/PAGE-needle."""
+    button the backtick-parity syntax check wouldn't catch). Source-needle."""
     assert "/api/migration/cancel" in dashboard._ACTIONS
-    for needle in ("function cancelMigration(", 'onclick="cancelMigration(',
+    for needle in ("function cancelMigration(", 'data-act="cancelMigration(',
                    "/api/migration/cancel", "confirmModal('Cancel migration ", "copy_in_flight"):
-        assert needle in dashboard.PAGE, needle
+        assert needle in _UI, needle
 
 
 def test_value_editors_are_modal_popouts_not_native_prompts():
@@ -677,21 +673,21 @@ def test_value_editors_are_modal_popouts_not_native_prompts():
     inline error WITHOUT clearing (the guard a bare prompt made too easy to fumble). Blank disables template
     downloads; a token's expiry clears only on an explicit Never expires box (review SEC-07), so blank is a typo.
     Regression guard: `prompt(` is gone from the page entirely, so a value editor can't quietly go back to a
-    blocking native dialog. Source/PAGE-needle (the JS lives in a Python string; the
-    syntax half is `node --check`)."""
-    page = dashboard.PAGE
-    js = _script_block(page)
+    blocking native dialog. A source-needle test over the page and its script (the syntax half is
+    `node --check`)."""
+    page = _UI
+    js = _SCRIPT
     assert js is not None
     # no native prompt() survives — the two data-entry prompts are the whole point of this change
     assert "prompt(" not in js, "a native prompt() is back — it should be a modal popout"
     for needle in (
         # template-disk quota: opener renders a modal, submit posts with the blank=disable + typo-guard semantics
         "function setTemplateDisk(", "async function submitTemplateDisk(", 'id="td-gb"',
-        'onclick="submitTemplateDisk(', "body.max_template_disk_gb = num",
+        'data-act="submitTemplateDisk(', "body.max_template_disk_gb = num",
         "or leave blank to disable downloads.",
         # token expiry: same shape
         "function setTokenExpiry(", "async function submitTokenExpiry(", 'id="te-days"',
-        'onclick="submitTokenExpiry(', "body.expires_in_days = num",
+        'data-act="submitTokenExpiry(', "body.expires_in_days = num",
         "or tick Never expires."):
         assert needle in page, needle
 
@@ -758,9 +754,9 @@ def test_destructive_confirmations_are_modal_dialogs_not_native_confirm():
     the not-started replication cancel are grey and the revokes and config deletes are red (behaviour in
     test_dashboard_client.py). Regression guard: at most ONE native `confirm(` survives — `revokeGrant`, which fires
     from inside the grant-management modal (a modal-over-modal would fight #form-slot) — so no NEW native confirm
-    can creep in. Source/PAGE-needle (the JS lives in a Python string; `node --check` is the syntax half)."""
-    page = dashboard.PAGE
-    js = _script_block(page)
+    can creep in. A source-needle test over the page and its script (`node --check` is the syntax half)."""
+    page = _UI
+    js = _SCRIPT
     assert js is not None
     # at most the ONE documented exception (revokeGrant, nested in the grant modal) stays native
     assert js.count("confirm(") <= 1, "a new native confirm() crept in — it should be a confirmModal"
@@ -783,9 +779,9 @@ def test_destructive_confirmations_are_modal_dialogs_not_native_confirm():
     # every call names its action: a fourth argument on each confirmModal(...) call, counted by a small scanner
     assert _confirm_calls_without_label(js) == [], "a confirmModal call without its button label"
     # red tracks consequence on the table buttons too
-    assert 'class="act ghost" onclick="deleteInstance(${i})">delete row</button>' in js
-    assert '<button class="act ghost" onclick="cancelReplication(' in js
-    assert '<button class="act danger" onclick="revokeToken(' in js and 'class="act danger" onclick="delItem(' in js
+    assert 'class="act ghost" data-act="deleteInstance(${i})">delete row</button>' in js
+    assert '<button class="act ghost" data-act="cancelReplication(' in js
+    assert '<button class="act danger" data-act="revokeToken(' in js and 'class="act danger" data-act="delItem(' in js
     assert "danger ghost" not in js            # one red: a ghost button is never red as well
 
 
@@ -889,14 +885,14 @@ def test_lease_status_route_resolves_to_its_special_tag():
 
 
 def test_create_vm_and_lease_lifecycle_ui_is_wired():
-    """The act-as-project provisioning + lease-lifecycle client is wired in dashboard.PAGE: the create-VM
+    """The act-as-project provisioning + lease-lifecycle client is wired in _UI: the create-VM
     button + modal (openCreateVM / submitCreateVM posting /api/lease/create), the live status poller
     (showLeaseStatus / pollLeaseStatus / renderLeaseStatus reading /api/lease/status), the detail + renew row
     actions (leaseDetail / renewLease posting /api/lease/renew), and the act-as banner naming the debited
-    project. A source/PAGE-needle test — the JS lives in a Python string, so node --check is the syntax half
-    and this is the wiring half; guards a control being dropped or wired to the wrong endpoint."""
-    page = dashboard.PAGE
-    for needle in ('onclick="openCreateVM()"', "function openCreateVM(", "async function submitCreateVM(",
+    project. A source-needle test over the page and its script: node --check is the syntax half and this is the
+    wiring half; guards a control being dropped or wired to the wrong endpoint."""
+    page = _UI
+    for needle in ('data-act="openCreateVM()"', "function openCreateVM(", "async function submitCreateVM(",
                    "'/api/lease/create'", "function showLeaseStatus(", "function pollLeaseStatus(",
                    "function renderLeaseStatus(", "'/api/lease/status?lease_id='", "function leaseDetail(",
                    "async function renewLease(", "'/api/lease/renew'",
@@ -918,7 +914,7 @@ def test_fleet_route_and_reader_and_page_strip(monkeypatch):
     monkeypatch.setattr(dashboard.inventory, "fleet_stats",
                         lambda c: {"queue_depth": 3, "window_minutes": 60})
     assert dashboard._API["fleet"](object()) == {"queue_depth": 3, "window_minutes": 60}
-    page = dashboard.PAGE
+    page = _UI
     for needle in ('id="fleet-sec"', 'id="fleet"', "function renderFleet(", "function renderStrips(",
                    "renderStrips(r.data)"):
         assert needle in page, needle
@@ -955,12 +951,12 @@ def test_tenant_download_action_is_act_as_with_result_aware_audit(monkeypatch):
 
 
 def test_tenant_download_ui_is_wired():
-    """The act-as tenant-download client is wired in dashboard.PAGE: the '+ tenant download' button + the
+    """The act-as tenant-download client is wired in _UI: the '+ tenant download' button + the
     openTenantDownload/submitTenantDownload modal posting /api/template/download, the project picker filtered to
-    opted-in tenants (tdProjectOptions), and no `public` toggle. Source/PAGE-needle (node --check is the syntax
+    opted-in tenants (tdProjectOptions), and no `public` toggle. Source-needle (node --check is the syntax
     half); guards a dead button the backtick-parity check wouldn't catch."""
-    page = dashboard.PAGE
-    for needle in ('onclick="openTenantDownload()"', "function openTenantDownload(",
+    page = _UI
+    for needle in ('data-act="openTenantDownload()"', "function openTenantDownload(",
                    "async function submitTenantDownload(", "function tdProjectOptions(",
                    "'/api/template/download'", 'id="tdf-project"', 'id="tdf-size"'):
         assert needle in page, needle
@@ -1105,9 +1101,10 @@ def test_authorize_handles_a_non_ascii_header_without_crashing():
 def test_write_emits_security_headers_and_404_carries_no_reflected_path():
     """Every response carries the S16 hardening headers (nosniff / X-Frame-Options:DENY / a restrictive CSP with
     default-src 'none' + connect-src 'self' / no-referrer) so a JSON body can't be MIME-sniffed into script and
-    the operator UI can't be framed; the 404 helper emits a bare {"error":"not_found"} with NO reflected request
-    path. Guards a browser executing a sniffed response, clickjacking the unlocked token, or the 404 echoing
-    attacker-controlled path text."""
+    the operator UI can't be framed; the CSP's script-src is 'self' alone, so an injected inline script or on*=
+    handler never runs (review UI-08); the 404 helper emits a bare {"error":"not_found"} with NO reflected request
+    path. Guards a browser executing a sniffed response or injected markup, clickjacking the unlocked token, or
+    the 404 echoing attacker-controlled path text."""
     import io
     import json
     handler = dashboard.make_handler(lambda: None)
@@ -1124,11 +1121,14 @@ def test_write_emits_security_headers_and_404_carries_no_reflected_path():
     assert "Referrer-Policy: no-referrer" in head
     csp = next(line for line in head.splitlines() if line.startswith("Content-Security-Policy:"))
     assert "default-src 'none'" in csp and "connect-src 'self'" in csp
-    # The load-bearing directives — the UI is one inline <script> + inline onclick handlers + inline
-    # <style> PLUS the same-origin vendored /assets/* files (br0kr/ui_assets.py), so dropping either
-    # 'unsafe-inline' or 'self' (a linter loves to flag both) would leave a green test + a dead or
-    # unthemed dashboard. Pin them so that regression is caught here, not by an operator on a blank page.
-    assert "script-src 'self' 'unsafe-inline'" in csp and "style-src 'self' 'unsafe-inline'" in csp
+    # The load-bearing directives. Scripts are same-origin files only (the client br0kr/static/dashboard.js and the
+    # vendored theme picker): 'self' without 'unsafe-inline'. Styles are an inline <style> block and style
+    # attributes plus the vendored sheets: 'self' and 'unsafe-inline'. Dropping 'self' from either would leave a
+    # green test and a dead or unthemed dashboard; re-adding 'unsafe-inline' to scripts would quietly reopen
+    # inline script injection. Pin both here, not on an operator's blank page.
+    script_src = re.search(r"script-src ([^;]*)", csp).group(1).split()
+    assert script_src == ["'self'"], script_src
+    assert "style-src 'self' 'unsafe-inline'" in csp
     assert json.loads(body) == {"error": "not_found"}                  # no reflected path in the body
     assert '"path": self.path' not in inspect.getsource(dashboard)     # the reflected-404 pattern is gone
 
@@ -1199,7 +1199,7 @@ def test_page_is_self_contained_and_polls_the_overview_endpoint():
     vendored /assets/* files (br0kr/ui_assets.py) — and its JS polls /api/overview, the single endpoint the
     dashboard refreshes from. Guards a page that silently depends on a CDN, or one wired to a renamed endpoint
     so it never updates."""
-    page = dashboard.PAGE
+    page = _UI
     assert page.startswith("<!doctype html>")
     assert "/api/overview" in page
     # No THIRD-PARTY asset / CDN: nothing OFF-origin is fetched at load — no src=/href= to an http(s) URL, no
@@ -1375,7 +1375,7 @@ def test_active_leases_panel_badges_pinned_leases_and_offers_the_pin_toggle():
     nothing to the reaper), offers pin/unpin from the row's Python-computed `pinnable` flag, treats a no-op toggle
     (no reason) as done rather than "failed", and the project card shows and sets the pin limit. Guards the badge
     the review asked for going missing, and the toggle's wiring (endpoint, body, success rule) drifting."""
-    js = _script_block(dashboard.PAGE)
+    js = _SCRIPT
     assert js is not None
     assert "${l.pinned ? pinTag : ttl(l.expires_in_seconds)}" in js
     assert "if(canEdit && l.pinnable)" in js and "'unpinLease' : 'pinLease'" in js
@@ -1431,7 +1431,7 @@ def test_every_write_route_has_a_page_control_except_the_named_ones():
     test_the_parity_controls_are_wired_into_the_page plus the node scenarios in test_dashboard_client.py. Guards an
     operator write verb shipping curl-only again (the whole discovery arc did: an operator pasted the bearer into
     shell history to clear a quarantine) and the exemption list turning into cover for a removed route."""
-    js = _script_block(dashboard.PAGE)
+    js = _SCRIPT
     assert js is not None
     code = "\n".join(line for line in js.splitlines() if not line.lstrip().startswith("//"))
     called = set(re.findall(r"['\"`](/api/[a-z0-9/_-]+)(?=['\"`?])", code))
@@ -1461,13 +1461,13 @@ def test_the_parity_controls_are_wired_into_the_page():
     operator-only dismissal roster loads with the operator panels for the Capacity tab. Source needles; what the
     controls POST is proven in node by the parity_* scenarios of tests/integration/test_dashboard_client.py.
     Guards a control dropped from render() while its route still exists."""
-    for needle in ('onclick="openPlacementForm(${i})"', 'onclick="openContentForm(${i})"',
-                   'onclick="openStorageNodeAdd(${i})"', 'onclick="openStoragePair(${i},${k})"',
-                   'onclick="openBridgesForm(${i})"', "<th>Bridges</th>", '<section id="networks-sec">',
-                   "networks:'logical networks'", 'onclick="openTemplateNetForm(${i})"',
-                   'onclick="toggleSourceDirty(${i})"', '<section id="discovery-sec" style="display:none">',
+    for needle in ('data-act="openPlacementForm(${i})"', 'data-act="openContentForm(${i})"',
+                   'data-act="openStorageNodeAdd(${i})"', 'data-act="openStoragePair(${i},${k})"',
+                   'data-act="openBridgesForm(${i})"', "<th>Bridges</th>", '<section id="networks-sec">',
+                   "networks:'logical networks'", 'data-act="openTemplateNetForm(${i})"',
+                   'data-act="toggleSourceDirty(${i})"', '<section id="discovery-sec" style="display:none">',
                    "loadDismissals(on('capacity'))", "opFetch('/api/discovery/dismissals')"):
-        assert needle in dashboard.PAGE, needle
+        assert needle in _UI, needle
 
 
 def test_network_bridge_delete_takes_a_strict_force_flag(monkeypatch):
@@ -1498,21 +1498,28 @@ def test_network_bridge_delete_takes_a_strict_force_flag(monkeypatch):
 # slot is fn, a handler name the page picks from literals.
 _HANDLER_CONSTS = {"e", "ename", "mode", "idem", "it.tab", "it.sec", "it.ack"}
 _HANDLER_INDEXES = {"i", "k", "gi"}
+# A handler attribute's text. HTML attribute names are case-insensitive and may have spaces around `=`, and the
+# dispatcher's getAttribute finds every spelling, so the scans that check handlers must too.
+_HANDLER_ATTR = re.compile(r'(?<![\w-])data-(?:act|change)\s*=\s*"([^"]*)"', re.IGNORECASE)
 
 
-def test_inline_handlers_hold_only_page_constants_and_numbers():
-    """Every inline event handler is a double-quoted `on*="…"` attribute (no single-quoted or unquoted one, no
-    `setAttribute('on…')`, no `javascript:` URL), its quoted slots hold only page constants, and its bare and joined
-    slots only indexes or `+`-coerced numbers, with nothing else dynamic left. The page's CSP must allow
-    `'unsafe-inline'` for these handlers, so it does not stop an injected one; what does is that server text never
-    reaches one and is passed through esc() everywhere else (SECURITY.md C15). Guards a new handler carrying a
-    project or template name, which esc() would not make safe inside a JavaScript string (it leaves the single
-    quote alone), in any of the forms a name-only check would miss."""
-    page = dashboard.PAGE
-    # an HTML attribute that is not double-quoted (a JS property such as el.onkeydown = … assigns a function)
-    assert not re.findall(r'(?<![\w.-])on[a-z]+\s*=\s*(?!["=])', page), "a handler that is not double-quoted"
+def test_handler_attributes_hold_only_page_constants_and_numbers():
+    """The page carries no inline event handler at all: no `on*=` attribute in any quoting, no `setAttribute('on…')`,
+    no `javascript:` URL, so the CSP's script-src 'self' breaks nothing (review UI-08). A control names its handler
+    in a double-quoted `data-act="…"` (click) or `data-change="…"` attribute instead, and the dispatcher only ever
+    calls a listed function with literal arguments. Those attributes keep the old inline-handler rule: their quoted
+    slots hold only page constants, and their bare and joined slots only indexes or `+`-coerced numbers, with
+    nothing else dynamic left. Guards a handler carrying a project or template name: esc() leaves the single quote
+    alone, so a name like `x'),deleteNode('y` would make one click call a different listed action (SECURITY.md
+    C15), in any of the forms a name-only check would miss."""
+    page = _UI
+    # an inline handler attribute in any quoting (a JS property such as el.onkeydown = … assigns a function)
+    assert not re.findall(r'(?<![\w.-])on[a-z]+\s*=\s*(?!=)', page, re.IGNORECASE), "an inline handler"
     assert not re.search(r"setAttribute\(\s*['\"]on", page) and "javascript:" not in page
-    attrs = re.findall(r'(?<![\w-])on[a-z]+="([^"]*)"', page)
+    assert not re.findall(r'(?<![\w-])data-(?:act|change)\s*=\s*(?!")', page, re.IGNORECASE), "not double-quoted"
+    # handler text set from code would skip the slot rule below: every handler is written into the markup
+    assert not re.search(r"setAttribute\(\s*['\"]data-(?:act|change)|dataset\.(?:act|change)\b", page, re.IGNORECASE)
+    attrs = _HANDLER_ATTR.findall(page)
     assert len(attrs) > 50, "the handler scan found nothing"
     bad = []
     for attr in attrs:
@@ -1529,7 +1536,55 @@ def test_inline_handlers_hold_only_page_constants_and_numbers():
         rest = re.sub(r"'\+.+?\+'", "0", rest)
         if any(c in rest for c in "+`$"):
             bad.append(f"dynamic text left in {attr}")
-    assert not bad, f"inline handlers that could carry server text: {bad}"
+    assert not bad, f"handler attributes that could carry server text: {bad}"
+
+
+_ACT_ARG = r"(?:-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|'[^'\\]*'|(?:true|false|null|undefined|NaN|this)(?![\w$]))"
+_ACT_CALL = rf"[A-Za-z_$][\w$]*\s*\(\s*(?:{_ACT_ARG}(?:\s*,\s*{_ACT_ARG})*)?\s*\)"
+_ACT_SPEC = re.compile(rf"\s*{_ACT_CALL}(?:\s*;\s*{_ACT_CALL})*\s*(?:;\s*)?")
+
+
+def test_every_handler_attribute_parses_as_the_dispatcher_reads_it():
+    """Every `data-act` / `data-change` attribute, with its template slots filled the way they render (a
+    constant into a quoted slot, a number into a bare or joined one), is what the dispatcher's parser accepts:
+    calls joined by ';', each a name and literal arguments only (a number, a 'string' with no quote or backslash,
+    true / false / null / undefined / NaN, or `this`). This mirrors parseActs in br0kr/static/dashboard.js and runs
+    where node is absent. Guards a handler such as `setTab(TAB)`: it worked as an inline handler (TAB is a global),
+    but the dispatcher refuses a name as an argument, so every click on it would throw (review UI-08)."""
+    bad = []
+    for attr in _HANDLER_ATTR.findall(_UI):
+        rest = attr.replace("${fn}(", "fn(", 1) if attr.startswith("${fn}(") else attr
+        rest = re.sub(r"'\$\{[^}]*\}'", "'x'", rest)
+        rest = re.sub(r"\$\{[^}]*\}", "0", rest)
+        rest = re.sub(r"'\+.+?\+'", "0", rest)
+        if not _ACT_SPEC.fullmatch(rest):
+            bad.append(attr)
+    assert not bad, f"handler attributes the dispatcher would refuse: {bad}"
+    # and the parser's grammar is the one this test reads: a probe of each rule, accepted and refused
+    assert all(_ACT_SPEC.fullmatch(s) for s in ("f()", "f(1, -2.5, 'a b', true, null, NaN, this)", "f(0);g()"))
+    assert not any(_ACT_SPEC.fullmatch(s) for s in ("f(x)", "f(1,)", "f(1)g", "f('a\\b')", "f(`a`)", "f(a.b)"))
+
+
+def test_the_dispatcher_can_call_exactly_the_functions_the_page_names():
+    """ACTS, the dispatcher's allow-list at the end of br0kr/static/dashboard.js, lists exactly the functions a
+    `data-act` / `data-change` attribute can name: the literal names, the names the leases table's `ab(...)` helper
+    passes, and the second call of a two-call handler. Each is a function the script defines. Guards a new control
+    whose action is missing from ACTS (a dead button that throws on every click) and a stale entry that widens
+    what injected markup could call (review UI-08)."""
+    acts = re.search(r"const ACTS = \{([^}]*)\};", _SCRIPT)
+    assert acts, "no ACTS block"
+    listed = set(re.findall(r"[A-Za-z_$][\w$]*", acts.group(1)))
+    named = set()
+    for attr in _HANDLER_ATTR.findall(_UI):   # each call's name: the first, and any after a ';'
+        named |= set(re.findall(r"(?:^|;)\s*([A-Za-z_$][\w$]*)\s*\(", attr))
+    for m in re.finditer(r"\bab\(([^,]+),", _SCRIPT):
+        named |= set(re.findall(r"'([A-Za-z_]\w*)'", m.group(1)))
+    named.discard("fn")   # the ab() helper's own template slot, resolved above
+    assert listed == named, (f"in ACTS but named nowhere: {sorted(listed - named)}; "
+                             f"named but not in ACTS: {sorted(named - listed)}")
+    undefined = [nm for nm in listed
+                 if not re.search(rf"(?:\bfunction\s+{nm}\s*\(|\b(?:const|let)\s+{nm}\s*=)", _SCRIPT)]
+    assert not undefined, f"ACTS names functions the script does not define: {undefined}"
 
 
 @pytest.mark.parametrize(("extra", "days"), [({}, 90), ({"expires_in_days": 30}, 30), ({"never_expires": True}, None)],
@@ -1578,11 +1633,11 @@ def test_the_token_table_flags_a_token_that_never_expires():
     rather than a dash (a revoked one keeps the dash). Ticking the box greys the days out, and the re-date dialog
     refuses both. Guards an eternal token being the silent default in the GUI, the form showing a lifetime it is
     not about to send, or an eternal token blending into the table (review SEC-07)."""
-    page = dashboard.PAGE
+    page = _UI
     assert 'id="tf-exp" type="number" step="1" min="1" value="90"' in page
     assert 'id="tf-never" type="checkbox"' in page and 'id="te-never" type="checkbox"' in page
     assert "if($('tf-never').checked) body.never_expires = true;" in page
     assert "if($('te-never').checked){" in page and "not both." in page
-    assert 'id="tf-never" type="checkbox" onchange="syncNever()"' in page and "d.disabled = b.checked" in page
+    assert 'id="tf-never" type="checkbox" data-change="syncNever()"' in page and "d.disabled = b.checked" in page
     render = page.partition("function renderTokens(")[2].partition("\nfunction ")[0]
     assert ": (t.active ? '<span style=\"color:var(--warn)\">never expires</span>' : '—')" in render

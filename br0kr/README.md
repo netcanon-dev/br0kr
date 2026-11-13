@@ -50,7 +50,7 @@ ledger or acts on Proxmox, and what proves it.
    on a bad one, and the `_ACTIONS` row `path: (parse, verb)`. If whether to audit depends on the result, add its
    predicate to `_RESULT_AUDIT` (and to `_RESULT_REFUSED` if it can refuse for capacity).
 3. Rerun `scripts/gen_api_reference.py` (`tests/unit/test_api_reference.py` fails until you do), and give each new
-   reason code a hint in the page (`dashboard_page.py`); `tests/unit/test_dashboard.py` fails on a `_Reject` code
+   reason code a hint in the page (`static/dashboard.js`); `tests/unit/test_dashboard.py` fails on a `_Reject` code
    or an `admin.py` validator code that has none.
 
 ## Adding a tick step

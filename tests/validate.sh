@@ -55,7 +55,7 @@ fi
 # Language-agnostic in spirit; this implementation is for python test files.
 if [ -n "$PY" ]; then step test-docs 0 "$PY" tests/check_test_docs.py; fi
 
-# js-syntax: the dashboard client JS lives in a Python string; `node --check` catches a syntax error
+# js-syntax: `node --check` on the dashboard client, br0kr/static/dashboard.js, catches a syntax error
 # ruff/py_compile can't see. The helper SELF-SKIPS green when node is absent, so it enforces wherever node
 # exists without failing the node-less --strict gate; the backtick-parity unit test is the dep-free backstop.
 # present=0 (the python helper, not node, is the gated tool) so --strict never fails it for a missing node.

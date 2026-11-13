@@ -5,8 +5,9 @@ default; an OPT-IN, token-gated set of operator actions (cancel/release a lease,
 The broker had no GUI: agents drive it over MCP, operators scrape Prometheus `/metrics`, and every
 capacity read was single-id. This module adds the human-facing surface — a tiny stdlib `http.server`
 (the SAME pattern as br0kr/observability.py, zero new dependencies) that serves one HTML page (its only
-sub-resources are the SAME-ORIGIN vendored spec files from br0kr/ui_assets.py — no third-party origin) plus
-JSON endpoints, all backed by br0kr/inventory.py's aggregate reads.
+sub-resources are SAME-ORIGIN files: its client script br0kr/static/dashboard.js and the vendored spec files
+from br0kr/ui_assets.py — no third-party origin) plus JSON endpoints, all backed by br0kr/inventory.py's
+aggregate reads.
 
 It is deliberately a SEPARATE process (`python -m br0kr.dashboard`), not bolted onto the agent gateway
 or the daemon's liveness server:
@@ -22,8 +23,8 @@ never the clusters' connection config (pve_host / token id / secret env are not 
 shared or less-trusted network, set `BR0KR_DASHBOARD_READ_TOKEN` to REQUIRE a bearer on the inventory reads
 too (OPT-IN — UNSET keeps the reads open, the backward-compatible default); the operator token below ALSO
 satisfies it (operator ⊇ viewer), so a read-only viewer gets the read token while an operator uses one
-credential. The page shell (`GET /`), its static assets (`GET /assets/…` — the vendored UI files in
-br0kr/ui_assets.py), `/healthz`, and `/api/meta` stay open regardless — the shell + assets hold no
+credential. The page shell (`GET /`), its static assets (`GET /assets/…` — the client script and the vendored
+UI files in br0kr/ui_assets.py), `/healthz`, and `/api/meta` stay open regardless — the shell + assets hold no
 data (everything comes from the gated `/api/*`) and the probe/meta expose only booleans, no secret.
 
 The WRITE actions are gated behind a shared operator token: set `BR0KR_DASHBOARD_TOKEN` to enable them
@@ -68,6 +69,7 @@ from br0kr import (
     audit,
     auth,
     build,
+    dashboard_page,
     db,
     gateway,
     inventory,
@@ -115,10 +117,12 @@ _ROUTES: dict[str, str] = {
     "/api/audit": "audit",
     "/api/audit/export": "audit_export",
 }
-# The vendored UI assets (br0kr/ui_assets.py): each version-pinned /assets/<tag>/ path routes to the
-# "asset" tag, served OPEN like the page shell (static chrome, no data) with immutable caching. Keyed
-# off ui_assets.ASSETS so the route table and the served bytes can never disagree.
-_ROUTES.update(dict.fromkeys(ui_assets.ASSETS, "asset"))
+# The page's static files, each routed to the "asset" tag and served OPEN like the page shell (static chrome, no
+# data) with immutable caching: the vendored UI-spec files (br0kr/ui_assets.py, at version-pinned /assets/<tag>/
+# paths) and the client script (br0kr/static/dashboard.js, at a content-hashed /assets/app-<hash>/ path, from
+# br0kr/dashboard_page.py). The routes and the served bytes come from this one dict, so they can never disagree.
+_ASSETS: dict[str, tuple[str, bytes]] = {**ui_assets.ASSETS, **dashboard_page.ASSETS}
+_ROUTES.update(dict.fromkeys(_ASSETS, "asset"))
 
 # Who may call each GET route, for the generated API reference (docs/api.md). "open" needs no token; "read" is open
 # unless BR0KR_DASHBOARD_READ_TOKEN is set, then needs the read token, the operator token or a named operator;
@@ -319,16 +323,18 @@ def _op_connect() -> psycopg.Connection[Any]:
 # page, JSON, the CSV/JSON export, AND the stdlib error pages (review S16). The dashboard is a trusted-net
 # operator surface whose blast radius is the unlocked operator token in sessionStorage, so we lock the browser
 # down: nosniff (no MIME sniffing of a JSON body into script), DENY framing (no clickjacking), a restrictive CSP
-# (default-src 'none'; inline script/style for the self-contained PAGE plus 'self' for the vendored
-# same-origin /assets/* files (br0kr/ui_assets.py) — no third-party origin can ever load — plus connect-src
-# 'self' for its fetch() to /api/*; img-src 'self' data: is defensive headroom, the page has no image today;
+# (default-src 'none'; script-src 'self' alone: the page's only scripts are same-origin /assets/* files, its
+# client br0kr/static/dashboard.js and the vendored theme picker, and it carries no inline script or handler
+# (review UI-08), so an injected inline script or on*= handler never runs; style-src 'self' plus 'unsafe-inline'
+# for the page's <style> block and style attributes; no third-party origin can ever load; connect-src 'self' for
+# its fetch() to /api/*; img-src 'self' data: is defensive headroom, the page has no image today;
 # base-uri/form-action 'none'), and no-referrer so the dashboard URL never leaks. Harmless on JSON responses.
 _SECURITY_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": (
-        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'"
     ),
 }
@@ -391,10 +397,10 @@ def make_handler(
             elif tag == "page":
                 self._write(200, "text/html; charset=utf-8", PAGE.encode())
             elif tag == "asset":
-                # A vendored static asset (CSS/JS chrome, no data — open like the page shell, above the
-                # read gate). The path is version-pinned (/assets/<tag>/…), so the year-long immutable
-                # cache can never serve a stale byte across an upgrade: the upgrade changes the URL.
-                ctype, body = ui_assets.ASSETS[self.path.split("?", 1)[0]]
+                # A static asset (CSS/JS chrome, no data — open like the page shell, above the read gate). Its
+                # path is version-pinned (/assets/<tag>/…) or content-hashed (/assets/app-<hash>/…), so the
+                # year-long immutable cache can never serve a stale byte: a changed file is a new URL.
+                ctype, body = _ASSETS[self.path.split("?", 1)[0]]
                 self._write(200, ctype, body,
                             extra_headers={"Cache-Control": "public, max-age=31536000, immutable"})
             elif tag == "health":

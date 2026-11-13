@@ -75,8 +75,8 @@ Step "test-docs" ([bool]$py) {
   & $py.Source tests/check_test_docs.py
 }
 
-# --- js-syntax --- the dashboard client JS lives inside a Python string, so ruff/py_compile cannot
-# see a JS syntax error in it; `node --check` is the real gate. The helper self-skips green when node
+# --- js-syntax --- ruff/py_compile do not read the dashboard client, br0kr/static/dashboard.js, so
+# `node --check` is the real gate. The helper self-skips green when node
 # is absent, so the gated tool is the python helper, not node.
 Step "js-syntax" ([bool]$py) {
   & $py.Source tests/check_dashboard_js.py

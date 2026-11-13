@@ -45,6 +45,9 @@ resolve in this repository.
   dialogs now take and return focus, tabs follow the ARIA pattern, filters are labelled (UI-05, docker-deploy.md).
 
 ### Changed
+- **The dashboard's script is a file, `br0kr/static/dashboard.js`, and its CSP is `script-src 'self'` alone.**
+  No inline script or handler is left: a control names an allow-listed action in `data-act`, so an injected
+  inline script or handler never runs (UI-08).
 - **The dashboard's POST actions moved to `br0kr/dashboard_actions.py`; `discover_reachability` runs as steps.**
   Same routes and report. A test keeps functions to at most 200 lines unless architecture.md says why (CODE-04).
 - **Every MCP tool is one row of `br0kr/verbs.py`: tier, verdict, shape, description.** A read-only tool was four

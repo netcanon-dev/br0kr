@@ -719,7 +719,7 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
     "/api/template/download": (_parse_template_download, lambda c, **k: actas.tenant_download(c, **k)),
     # Template instances (0032): bind a seed to a concrete (node, storage) placement, retire it (so a fresh
     # copy can replace it), or delete the row. Token-gated + audited; driven from the Images-tab "Template
-    # instances" panel (renderInstances → openBindForm/retireInstance/deleteInstance in dashboard_page.py).
+    # instances" panel (renderInstances → openBindForm/retireInstance/deleteInstance in static/dashboard.js).
     "/api/instance/bind": (lambda b: {"instance_id": _req_int(b, "instance_id"),
                                       "node_id": _req_str(b, "node_id"), "storage_id": _req_str(b, "storage_id"),
                                       "size_gb": _req_int(b, "size_gb")},
