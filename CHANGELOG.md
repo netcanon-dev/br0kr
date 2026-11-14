@@ -17,6 +17,30 @@ resolve in this repository.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-13
+
+The second release closes the November whole-project review: all 73 of its recommendations are in. What changed
+for each kind of user:
+
+- **Agents:** every MCP answer says `ok` and, when not, a `reason` from one documented vocabulary
+  (docs/reference/reason-codes.md). New tools: `wait_for_lease` (waits server-side), `project_usage`, and pinned
+  leases that a TTL never reaps. `whoami` lists the calls a token may make; `set_quota` changes only the limits
+  it is given.
+- **Operators:** the dashboard reaches every operator route, works by keyboard and screen reader, has a light
+  mode, fits a phone, shows disks in GiB and times in your own clock. `br0kr-admin token` mints tokens without
+  it; new tokens expire after 90 days unless asked not to. Alert rules ship in `docker/prometheus/`, and
+  docs/runbooks/day2-operations.md covers upgrades, rollbacks, backups, rotation and decommissioning.
+- **The ledger and the daemon:** the compose network is split in two and replication authenticates with scram;
+  a standby that lost its slot re-clones itself when that is provably safe; a leader re-checks its leadership at
+  every step; a live lease always has its vmid and cluster, enforced by the schema.
+- **Releases:** a version tag now publishes a signed, scanned image to GHCR with an SBOM and provenance, and the
+  wheel and sdist to the GitHub release. This is the first release made that way.
+
+**Upgrading from 0.1.0:** migrations 0049 to 0052 run on the first deploy; take a ledger dump first. The network
+split recreates every container once (tens of seconds without the gateway). Rolling back past 0049 needs every
+pinned lease unpinned first (day2-operations.md, the rollback table). Extract the release at umask 022:
+`deploy.sh` now refuses a tree whose files the containers could not read.
+
 ### Added
 - **Usage per project: lease-hours, cpu-hours and memory GiB-hours over a window.** `project_usage` (a tenant sees
   its own) and the Tenancy tab (operator) answer who used what; migration 0051 stamps `releasing_at` (FEAT-06).
@@ -2944,4 +2968,6 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `SECURITY.md` C6 + its residuals (vmid-reuse double-destroy needs per-VMID fencing; admission
   `idem_key` is inert while NULL). An adversarial multi-agent review of the lifecycle drove these.
 
-[Unreleased]: https://github.com/netcanon-dev/br0kr/commits/main
+[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/netcanon-dev/br0kr/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/netcanon-dev/br0kr/releases/tag/v0.1.0
