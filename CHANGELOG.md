@@ -17,6 +17,10 @@ resolve in this repository.
 
 ## [Unreleased]
 
+### Fixed
+- **A stuck cleanup is retried in minutes, backing off if it keeps failing.** RECLAIMING builds and replications
+  retry after stale/8 (450 s, 900 s), not hours, doubling per failure; a heartbeat holds the claim (race A).
+
 ## [0.2.0] — 2026-11-13
 
 The second release closes the November whole-project review: all 73 of its recommendations are in. What changed

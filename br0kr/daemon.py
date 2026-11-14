@@ -75,6 +75,7 @@ from br0kr import (
     observability,
     pve,
     reaper,
+    reclaim_beat,
     reconciler,
     remotes,
     replication,
@@ -210,8 +211,12 @@ class Daemon:
         # Step state that outlives one tick: the held leases' blocked re-check counts (tick_provision), the
         # discovery report's cadence stamp and last drift level (tick_upkeep), and the placement-refusal recorder: a
         # coalescing DenialLog stamping outcome='refused' with its OWN 100/window ceiling (the auth denial ceiling of
-        # 200 is untouched), which opens its own short-lived connection only when the throttle admits a write.
+        # 200 is untouched), which opens its own short-lived connection only when the throttle admits a write. Also
+        # the backoff of a RECLAIMING build or replication whose teardown keeps failing here (tick_builds,
+        # tick_copies; reclaim_beat.RetryBackoff), so a stuck guest cannot take the tick thread every retry.
         self._hold_checks: dict[int, int] = {}
+        self._build_backoff = reclaim_beat.RetryBackoff()
+        self._repl_backoff = reclaim_beat.RetryBackoff()
         self._last_discovery_at: float | None = None
         self._last_discovery_drift = 0
         self._refusals = audit.DenialLog(window_s=audit._REFUSAL_WINDOW_S,
@@ -572,7 +577,8 @@ def main() -> None:
                           a build blocks the tick for its download, so opt in with 1). Operator-only,
                           allowlist + checksum gated (phase A4.1; see docs/runbooks/vm-access.md).
       BR0KR_BUILD_STALE_SECONDS  reclaim a build with no progress for this long (a leader died mid-build;
-                          default 3600). BR0KR_BUILD_CORES / BR0KR_BUILD_MEMORY_MB size the built template
+                          default 3600); a build whose cleanup failed retries after an eighth of it, backing
+                          off per failure. BR0KR_BUILD_CORES / BR0KR_BUILD_MEMORY_MB size the built template
                           (default 2 / 2048).
       BR0KR_MIGRATE_LIMIT max cross-cluster MIGRATIONS to advance one saga step per tick (default 0 =
                           DISABLED; a migration blocks the tick for its cross-cluster copy, so opt in with 1).
@@ -583,8 +589,9 @@ def main() -> None:
                           saga step per tick (default 0 = DISABLED; a copy blocks the tick for its clone, so opt
                           in with 1). ENV-only (enabling the live-guest engine warrants a restart); the leader
                           publishes operator_setting.replication_enabled = (limit > 0) so the request surface is
-                          honest. BR0KR_REPL_STALE_SECONDS (default 7200) sizes the reclaim cutoff + the
-                          reservation TTL (2×). See docs/designs/template-sharing-cross-cluster.md §5.
+                          honest. BR0KR_REPL_STALE_SECONDS (default 7200) sizes the reclaim cutoff (a failed
+                          cleanup retries after an eighth of it) + the reservation TTL (2×). See
+                          docs/designs/template-sharing-cross-cluster.md §5.
       BR0KR_LOG_FILE      optional rotating log file (always logs to stderr too).
     Actuation config is data: seed `cluster` rows (pve_host/token_id/token_secret_env) and
     `node` rows (cluster_id + pve_node), then SIGHUP (or wait a cadence) to pick them up live.

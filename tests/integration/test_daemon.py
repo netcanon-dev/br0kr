@@ -26,6 +26,7 @@ from br0kr import (
     observability,
     placement,
     reaper,
+    reclaim_beat,
     reconciler,
     scheduler,
     settings,
@@ -1526,7 +1527,8 @@ def test_reclaim_builds_destroys_before_marking_a_build_terminal(monkeypatch):
     d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
     assert tick_builds.reclaim_builds(d, _FakeConn()) == 1                       # only the won build counts
     assert events == ["destroy:1", "mark:1", "destroy:2", "mark:2"]  # destroy precedes mark, EACH build
-    assert beats == [d._beat, d._beat]                               # heartbeat threaded into every destroy
+    # the daemon's heartbeat is threaded into every destroy, inside the claim's own (race A)
+    assert [type(b) for b in beats] == [reclaim_beat.Heartbeat] * 2 and all(b._beat == d._beat for b in beats)
 
 
 def test_reclaim_builds_reaps_the_stale_build_import_source(monkeypatch):
@@ -1558,7 +1560,8 @@ def test_reclaim_builds_reaps_the_stale_build_import_source(monkeypatch):
     assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     # _bjob defaults target_template_id="deb"/url="u"/storage_id="s" → download_filename → br0kr-deb.qcow2
     assert events == ["destroy:1", "free:s:br0kr-deb.qcow2", "mark:1"]
-    assert beats == [d._beat]   # the reap's task-wait is threaded the daemon's liveness heartbeat (S08/F3)
+    # the reap's task-wait is threaded the daemon's liveness heartbeat (S08/F3), inside the claim's (race A)
+    assert len(beats) == 1 and isinstance(beats[0], reclaim_beat.Heartbeat) and beats[0]._beat == d._beat
 
 
 # ── 0045: the download-stage reclaim reap (a guest-free DOWNLOADING build, vmid None, with a persisted task) ──
@@ -1569,8 +1572,10 @@ def test_reclaim_builds_reattaches_to_a_settled_download_and_reaps_its_source(mo
     the guest-free-DOWNLOADING orphan the #127 review named as the last residual. Asserts the re-attach polls the
     persisted upid with the BOUNDED poll budget (not the full download wait), the free targets
     <storage>:import/<download_filename> and runs BEFORE the terminal mark, and NO destroy is attempted (there is
-    no guest). Guards the reap being skipped, a reach-blind driver, or the persisted handle being ignored."""
+    no guest). Guards the reap being skipped, a reach-blind driver, or the persisted handle being ignored. Both
+    waits get the claim's heartbeat (race A), not the bare daemon beat."""
     events: list[str] = []
+    beats: list = []
 
     class _Drv:
         def __init__(self) -> None:
@@ -1579,12 +1584,14 @@ def test_reclaim_builds_reattaches_to_a_settled_download_and_reaps_its_source(mo
         def wait(self, upid, *, secs=None, on_progress=None):
             self.poll_secs = secs
             events.append(f"wait:{upid}")
+            beats.append(on_progress)
             if on_progress is not None:
                 on_progress()
             return "OK"   # the download SETTLED successfully → the source is present at its final volid
 
         def free_import_volume(self, storage, filename, *, on_progress=None):
             events.append(f"free:{storage}:{filename}")
+            beats.append(on_progress)
             return "freed"
 
         def destroy_build_vm(self, *a, **k):
@@ -1599,6 +1606,7 @@ def test_reclaim_builds_reattaches_to_a_settled_download_and_reaps_its_source(mo
     assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
     assert events == ["wait:UPID:n1:download:7:", "free:s:br0kr-deb.qcow2", "mark:1"]   # re-attach → reap → mark
     assert drv.poll_secs == tick_builds._DOWNLOAD_REATTACH_POLL_SECS   # a BOUNDED poll, never the full 1800s wait
+    assert len(beats) == 2 and all(isinstance(b, reclaim_beat.Heartbeat) and b._beat == d._beat for b in beats)
 
 
 def test_reclaim_builds_finalizes_a_still_running_download_without_reaping(monkeypatch):
@@ -2194,3 +2202,70 @@ def test_concurrent_scrapes_share_one_slow_read(wired, monkeypatch):
     assert len(opened) == 1 and len(got) == 4 and all(g[0] is True for g in got)
     d._snapshots.scrape(True)               # a scrape right after the slow read is served from it
     assert len(opened) == 1
+
+
+def test_reclaim_builds_holds_its_claim_through_a_long_destroy(monkeypatch):
+    """Race A: while a stale build's destroy runs (minutes of stop + DELETE polls), reclaim_builds re-stamps the
+    claimed RECLAIMING row about every 30 s through build.touch_reclaiming, and still beats the daemon on every
+    poll. Guards a second leader (a failover overlap) re-claiming a cleanup in progress once the shorter retry
+    cutoff passes, and a heartbeat stamping the wrong build or on every one-second poll."""
+    now = [0.0]
+    monkeypatch.setattr(reclaim_beat, "_now", lambda: now[0])
+    stamped: list[int] = []
+    monkeypatch.setattr(build, "touch_reclaiming", lambda c, bid: stamped.append(bid) or True)
+
+    class _Drv:
+        def destroy_build_vm(self, vmid, bid, on_progress=None):
+            for _ in range(60):     # three minutes of 3 s polls
+                now[0] += 3
+                on_progress()
+            return "destroyed"
+
+        def free_import_volume(self, storage, filename, *, on_progress=None):
+            return "freed"
+
+    _win_claim(monkeypatch)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=4, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: True)
+    d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
+    beats = []
+    monkeypatch.setattr(d, "_beat", lambda: beats.append(1))
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
+    assert stamped == [4] * 6                      # 180 s of destroy at one stamp per 30 s
+    assert len(beats) >= 60                        # the daemon's own beat on every poll, as before
+
+
+def test_reclaim_builds_backs_off_a_build_whose_destroy_keeps_failing(monkeypatch):
+    """Race A, the review's cost finding: a RECLAIMING build whose destroy raised is not re-claimed by this leader
+    until its backoff passes (450 s after the first failure, then 900 s), however often it shows up in the scan;
+    a successful teardown forgets it. Guards the shorter retry turning one stuck guest into a three-minute destroy
+    on the single tick thread every 450 s."""
+    now = [0.0]
+    monkeypatch.setattr(reclaim_beat, "_now", lambda: now[0])
+    monkeypatch.setattr(build, "touch_reclaiming", lambda c, bid: True)
+    attempts: list[float] = []
+    fail = [True]
+
+    class _Drv:
+        def destroy_build_vm(self, vmid, bid, on_progress=None):
+            attempts.append(now[0])
+            if fail[0]:
+                raise RuntimeError("storage wedged")
+            return "destroyed"
+
+        def free_import_volume(self, storage, filename, *, on_progress=None):
+            return "freed"
+
+    _win_claim(monkeypatch)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=6, vmid=9500)])
+    marked: list[int] = []
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: marked.append(bid) or True)
+    d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
+    for t in (0.0, 449.0, 450.0, 1000.0, 1349.0, 1350.0):   # one sweep pass at each time
+        now[0] = t
+        tick_builds.reclaim_builds(d, _FakeConn())
+    assert attempts == [0.0, 450.0, 1350.0]       # +450 after the first failure, +900 after the second
+    fail[0] = False
+    now[0] = 1350.0 + 1800.0
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1 and marked == [6]
+    assert d._build_backoff.due(6) and 6 not in d._build_backoff._next   # forgotten once finalized

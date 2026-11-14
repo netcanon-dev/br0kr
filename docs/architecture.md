@@ -159,6 +159,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `ratelimit.py` | In-process limits on pre-auth paths: a connection gate, per-client windows. | — | — | `unit/test_ratelimit.py`, `integration/test_oauth_handler.py` |
 | `reaper.py` | The teardown pass: expire, destroy through an injected callback, free once. | via lease | via the destroyer | `integration/test_reaper.py`, `harness_lease.py` |
 | `reasons.py` | Named constants for every agent-facing reason and error code. | — | — | `unit/test_reasons.py`, `unit/test_reason_codes_doc.py` |
+| `reclaim_beat.py` | A stale-job reclaim's retry cutoff, backoff and claim heartbeat. | via build, replication | — | `unit/test_reclaim_beat.py`, `unit/test_replication_dataplane.py`, `harness_imgbuild.py`, `harness_replicate_data.py` |
 | `reconciler.py` | The data plane: ADMITTED lease to fenced ACTIVE VM, template builds, teardown wiring. | via lease, build | via pve | `unit/test_reconciler.py`, `harness_reconcile.py` |
 | `remotes.py` | PDM registry: one PDM driver per configured cluster. | reads | — | `unit/test_remotes.py` |
 | `replication.py` | Template-replication jobs: eligibility, CAS transitions, the copy saga. | writes; via admission | via pve | `unit/test_replication.py`, `harness_replication.py` |

@@ -248,11 +248,15 @@ def test_stale_reclaim_gates_on_the_claimed_set_not_the_terminal_set():
     assert {"DOWNLOADING", "IMPORTING", "RECLAIMING"} == imgbuild.CLAIMED_STATES
     assert all(f"'{s}'" in build._CLAIMED_IN for s in imgbuild.CLAIMED_STATES)   # SQL derived from the set
     assert "'REQUESTED'" not in build._CLAIMED_IN and "'READY'" not in build._CLAIMED_IN
+    assert build._STARTED_IN == "('DOWNLOADING', 'IMPORTING')"   # the first-claim set: claimed minus RECLAIMING
     rc = _RecConn()
     build.stale_builds(rc, 60)
     build.claim_stale_for_reclaim(rc, 1, 60)
+    scan, retry, first = rc.sqls
+    assert f"state IN {build._CLAIMED_IN}" in scan                 # positive claimed-set gate (derived)
+    assert "state = 'RECLAIMING'" in retry                         # the retry claim names its one state
+    assert f"state IN {build._STARTED_IN}" in first                # the first claim: claimed minus RECLAIMING
     for sql in rc.sqls:
-        assert f"state IN {build._CLAIMED_IN}" in sql          # positive claimed-set gate (derived)
         assert "NOT IN ('READY','FAILED')" not in sql          # NOT the negative filter (would match REQUESTED)
 
 
@@ -266,12 +270,14 @@ def test_claim_stale_for_reclaim_cas_to_reclaiming_reading_back_the_guest_handle
     the claim. Guards a regression to the bare bump, a lost RETURNING, or the negative terminal filter."""
     rc = _RecConn()
     build.claim_stale_for_reclaim(rc, 7, 60)
-    sql = rc.sqls[0]
-    assert "UPDATE template_build SET state = 'RECLAIMING'" in sql   # the EXCLUSIVE claim (mark_ready loses)
-    assert "RETURNING vmid, node_id" in sql                          # reads the guest handle + its node
-    assert "download_upid" in sql and "download_node" in sql         # AND the download task handle (0045)
-    assert f"state IN {build._CLAIMED_IN}" in sql                    # still claimed (excludes REQUESTED+terminal)
-    assert "updated_at < now() - make_interval(secs => %s)" in sql   # AND still stale
+    assert len(rc.sqls) == 2                                         # the retry CAS, then (lost) the first claim
+    for sql in rc.sqls:
+        assert "UPDATE template_build SET state = 'RECLAIMING'" in sql   # the EXCLUSIVE claim (mark_ready loses)
+        assert "RETURNING vmid, node_id" in sql                          # reads the guest handle + its node
+        assert "download_upid" in sql and "download_node" in sql         # AND the download task handle (0045)
+        assert "updated_at < now() - make_interval(secs => %s)" in sql   # AND still stale
+    assert "state = 'RECLAIMING'" in rc.sqls[0]                      # a retry of an earlier reclaim ...
+    assert f"state IN {build._STARTED_IN}" in rc.sqls[1]             # ... else a first claim (excludes REQUESTED)
 
 
 def test_set_download_task_stamps_the_handle_guarded_to_downloading():
@@ -286,3 +292,49 @@ def test_set_download_task_stamps_the_handle_guarded_to_downloading():
     assert "UPDATE template_build SET download_upid = %s, download_node = %s" in sql
     assert "state = 'DOWNLOADING'" in sql   # ONLY a still-DOWNLOADING build (a claimed-for-reclaim row is skipped)
     assert "updated_at = now()" in sql      # progress: the handle write bumps the stale clock
+
+
+class _ParamConn(_RecConn):
+    """_RecConn that also records each statement's parameters, and answers fetchone with `row` (None by default)."""
+
+    def __init__(self, row: tuple | None = None) -> None:
+        super().__init__()
+        self.params: list[object] = []
+        self.row = row
+
+    def execute(self, sql: str, params: object = None) -> _ParamConn:
+        self.sqls.append(sql)
+        self.params.append(params)
+        return self
+
+    def fetchone(self) -> tuple | None:
+        return self.row
+
+
+def test_a_reclaiming_build_is_retried_on_the_shorter_cutoff_and_a_first_claim_on_the_full_one():
+    """stale_builds and claim_stale_for_reclaim give a RECLAIMING build (an earlier reclaim's destroy raised) the
+    retry cutoff, reclaim_beat.retry_seconds (450 s for the hour), and DOWNLOADING/IMPORTING the full one; a won
+    retry claim skips the first-claim CAS. Guards race A's first half: before it a RECLAIMING build waited the
+    whole hour for its retry, keeping its target blocked with build_in_progress all that time."""
+    rc = _ParamConn()
+    build.stale_builds(rc, 3600)
+    assert "CASE WHEN state = 'RECLAIMING' THEN %s ELSE %s END" in rc.sqls[0]
+    assert rc.params[0] == (450, 3600)
+    rc = _ParamConn()
+    build.claim_stale_for_reclaim(rc, 7, 3600)
+    assert rc.params == [(7, 450), (7, 3600)]
+    won = _ParamConn(row=(9700, "nB", None, None))
+    claim = build.claim_stale_for_reclaim(won, 7, 3600)
+    assert claim is not None and claim.vmid == 9700 and len(won.sqls) == 1   # the retry won: no second CAS
+
+
+def test_touch_reclaiming_stamps_only_a_reclaiming_build_and_says_whether_it_did():
+    """touch_reclaiming (the reclaim heartbeat's stamp) bumps updated_at only WHERE state = 'RECLAIMING', sets no
+    state, and returns whether a row matched. Guards the stamp reviving a build someone else finished (a FAILED or
+    READY row made fresh again) and the heartbeat not learning that its row is gone."""
+    rc = _ParamConn()
+    assert build.touch_reclaiming(rc, 7) is False
+    sql = rc.sqls[0]
+    assert "SET updated_at = now()" in sql and "state = 'RECLAIMING'" in sql and "SET state" not in sql
+    assert rc.params[0] == (7,)
+    assert build.touch_reclaiming(_ParamConn(row=(7,)), 7) is True

@@ -20,13 +20,14 @@ failure CASes → FAILED with an error and the partial vmid is destroyed by the 
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 import psycopg
 
-from br0kr import imgbuild, placement, reasons, statemachine
+from br0kr import imgbuild, placement, reasons, reclaim_beat, statemachine
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,9 @@ _REPL_TERMINAL_IN = statemachine.REPLICATION.sql_in(statemachine.REPLICATION.ter
 # definition) so stale_builds/claim_stale_for_reclaim can never drift from it — the same derive-don't-repeat
 # discipline admin.py uses for lease.TERMINAL_STATES. Sorted for a deterministic, readable statement.
 _CLAIMED_IN = "(" + ", ".join(f"'{s}'" for s in sorted(imgbuild.CLAIMED_STATES)) + ")"
+# The claimed states a FIRST reclaim takes over on the full cutoff; a RECLAIMING build is a retry, due on the
+# shorter `reclaim_beat.retry_seconds` (race A).
+_STARTED_IN = "(" + ", ".join(f"'{s}'" for s in sorted(imgbuild.CLAIMED_STATES - {"RECLAIMING"})) + ")"
 
 
 @dataclass(frozen=True)
@@ -417,13 +421,18 @@ def stale_builds(conn: psycopg.Connection[Any], older_than_seconds: int) -> list
     picks it up FIFO (a permanently-unbuildable cluster is marked FAILED at claim time, not here). Reclaiming a
     queued REQUESTED build would falsely FAIL a job whose only 'fault' is a backlog ahead of it — the exact
     false-reclaim S04/F5a fixes. RECLAIMING is in the set (via imgbuild.CLAIMED_STATES) precisely so a build
-    whose earlier destroy raised stays reclaimable and a later cutoff retries it. Only an IMPORTING/RECLAIMING
-    build carries a vmid — a DOWNLOADING one is guest-free, so a reclaim skips its destroy."""
+    whose earlier destroy raised stays reclaimable and a later cutoff retries it. That retry is due on a SHORTER
+    cutoff, `reclaim_beat.retry_seconds(older_than_seconds)` (450 s for the default hour): the full cutoff tells a
+    slow live build from a dead one, and a RECLAIMING build is already known dead, so waiting it out only kept
+    the target blocked (`build_in_progress`). A reclaim still working on one keeps it fresh (`touch_reclaiming`),
+    so the retry never lands on a cleanup in progress. Only an IMPORTING/RECLAIMING build carries a vmid — a
+    DOWNLOADING one is guest-free, so a reclaim skips its destroy."""
     rows = conn.execute(
         f"SELECT {_COLS} FROM template_build "
-        f"WHERE state IN {_CLAIMED_IN} AND updated_at < now() - make_interval(secs => %s) "
+        f"WHERE state IN {_CLAIMED_IN} "
+        "  AND updated_at < now() - make_interval(secs => CASE WHEN state = 'RECLAIMING' THEN %s ELSE %s END) "
         "ORDER BY updated_at",
-        (older_than_seconds,)).fetchall()
+        (reclaim_beat.retry_seconds(older_than_seconds), older_than_seconds)).fetchall()
     return [_job(r) for r in rows]
 
 
@@ -459,25 +468,53 @@ def claim_stale_for_reclaim(
     longer match — exactly one of {complete, reclaim} wins the row (the S01/S04 CAS-as-claim discipline). This
     CLOSES the one-round-trip window the pre-0029 `updated_at`-only bump left open (a build could finish AND be
     reclaimed). A LOST claim (None) means the build finished or is progressing (terminal, or a fresh
-    `updated_at`) → skip the destroy. A WON claim re-arms the stale window (the bumped `updated_at`), so a
-    destroy that later fails is not re-attempted until another cutoff elapses (throttling the retry) and
+    `updated_at`) → skip the destroy. A WON claim re-arms the window (the bumped `updated_at`), so a
+    destroy that later fails is not re-attempted until the retry cutoff elapses (throttling the retry) and
     concurrent reclaimers are de-duped to exactly one; the build stays non-terminal (RECLAIMING) so it remains
     reclaimable until a destroy is confirmed, then `mark_failed` finalizes it.
 
-    The eligible states match `stale_builds` exactly (imgbuild.CLAIMED_STATES): DOWNLOADING/IMPORTING claims a
-    freshly-abandoned build; RECLAIMING re-claims one whose prior destroy raised (a self-transition that just
-    re-bumps `updated_at`). A build that raced OUT of that set (finished → READY, failed → FAILED, or —
-    impossibly — reverted to REQUESTED) loses the claim, so a never-claimed queued build is never destroyed."""
+    The eligible states and cutoffs match `stale_builds` exactly (imgbuild.CLAIMED_STATES): DOWNLOADING/IMPORTING
+    claims a freshly-abandoned build on the full cutoff; RECLAIMING re-claims one whose prior destroy raised (a
+    self-transition that just re-bumps `updated_at`) on the shorter `reclaim_beat.retry_seconds` cutoff. They are
+    two CASes, the retry first, so each guard names its states plainly (a guard with the state inside an OR or a
+    CASE is one the state-machine scan cannot read); each is atomic, so a row moving between them is claimed by at
+    most one. A build that raced OUT of that set (finished → READY, failed → FAILED, or — impossibly — reverted to
+    REQUESTED) loses the claim, so a never-claimed queued build is never destroyed."""
     row = conn.execute(
-        f"UPDATE template_build SET state = 'RECLAIMING', updated_at = now() "
-        f"WHERE id = %s AND state IN {_CLAIMED_IN} "
+        "UPDATE template_build SET state = 'RECLAIMING', updated_at = now() "
+        "WHERE id = %s AND state = 'RECLAIMING' "
         "  AND updated_at < now() - make_interval(secs => %s) RETURNING vmid, node_id, download_upid, "
         "download_node",
-        (build_id, older_than_seconds)).fetchone()
+        (build_id, reclaim_beat.retry_seconds(older_than_seconds))).fetchone()
+    if row is None:
+        row = conn.execute(
+            f"UPDATE template_build SET state = 'RECLAIMING', updated_at = now() "
+            f"WHERE id = %s AND state IN {_STARTED_IN} "
+            "  AND updated_at < now() - make_interval(secs => %s) RETURNING vmid, node_id, download_upid, "
+            "download_node",
+            (build_id, older_than_seconds)).fetchone()
     if row is None:
         return None
     return ReclaimClaim(vmid=(int(row[0]) if row[0] is not None else None), node_id=row[1],
                         download_upid=row[2], download_node=row[3])
+
+
+def touch_reclaiming(conn: psycopg.Connection[Any], build_id: int) -> bool:
+    """Re-stamp a RECLAIMING build's `updated_at` while a reclaim is tearing it down (the `touch` of a
+    `reclaim_beat.Heartbeat`), so a second leader never sees that cleanup as stale and starts another on the same
+    guest. Guarded to RECLAIMING: a build finalized or force-failed meanwhile is left as it is, and the call
+    returns False. Sets no state. Commits (a no-op on the reclaim's autocommit connection; on any other it makes
+    the stamp visible to the other leader at once), and on an error rolls back before re-raising."""
+    try:
+        row = conn.execute(
+            "UPDATE template_build SET updated_at = now() WHERE id = %s AND state = 'RECLAIMING' RETURNING id",
+            (build_id,)).fetchone()
+        conn.commit()
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        raise
+    return row is not None
 
 
 def _row(row: tuple[Any, ...]) -> dict[str, Any]:

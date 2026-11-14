@@ -6,16 +6,18 @@ on the sweep cadence and finishes builds a leader abandoned mid-build, destroyin
 S04). Both run on the autocommit work connection. See tick_steps.py.
 
 Knobs: `build_stale_seconds` is the reclaim cutoff, longer than a real build's wall time so a live build is never
-reaped; `build_cores` / `build_memory` size the resulting template.
+reaped, and sets the shorter retry of a build already RECLAIMING (reclaim_beat.retry_seconds, stale / 8);
+`build_cores` / `build_memory` size the resulting template.
 """
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from br0kr import build, imgbuild, reconciler
+from br0kr import build, imgbuild, reclaim_beat, reconciler
 from br0kr.driver import Driver
 
 if TYPE_CHECKING:
@@ -166,8 +168,12 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
         bumped `updated_at`, leaving a one-round-trip window in which a build could finish AND be reclaimed
         (its catalogued template's guest destroyed). A LOST claim (None) → skip. The claim also re-reads the
         vmid/node UNDER the CAS, so a guest stamped between the `stale_builds` scan and here is still seen;
-        and the bump throttles a failing destroy's retry to once per cutoff and de-dupes concurrent
-        reclaimers.
+        and the bump throttles a failing destroy's retry to once per RETRY cutoff (`reclaim_beat.retry_seconds`,
+        shorter than the stale one) and de-dupes concurrent reclaimers; a destroy that keeps failing HERE backs
+        off further (`d._build_backoff`, doubling up to the stale cutoff), so one stuck guest cannot take the
+        tick thread every retry. While the destroy, the source reap or the download re-attach runs, a
+        `reclaim_beat.Heartbeat` re-stamps the row, so while those stamps land a second leader's reclaim does not
+        take over a cleanup in progress (race A).
       - PER-BUILD NODE (`claim.node_id`): the destroy targets the EXACT node the guest was created on
         (`registry.get(node_id)`), not an arbitrary node in the cluster. Before 0029 the row recorded only
         cluster_id, so a multi-node cluster whose served-node set drifted since build time could probe the
@@ -179,10 +185,14 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
         falls back to the cluster-any-node driver (`driver_for_cluster`), preserving the old best-effort
         behavior for rows in flight across the upgrade."""
     reclaimed = 0
+    backoff = d._build_backoff   # a RECLAIMING build whose teardown keeps failing HERE waits longer each time
+    backoff.prune(d.build_stale_seconds)
     for job in build.stale_builds(conn, d.build_stale_seconds):
         d._beat()   # progress: about to reclaim one stale build (its destroy is an up-to-~180s step)
         if d._halted():
             break
+        if not backoff.due(job.id):
+            continue   # RECLAIMING, and its last teardown here failed: reclaim_beat.RetryBackoff says not yet
         # Claim atomically right before acting (F1): CAS → RECLAIMING. A build that FINISHED (→READY) or made
         # progress (fresh updated_at) since the scan loses the claim → skip, so we never destroy a completed
         # template nor fail a live build; and once RECLAIMING, a concurrent mark_ready can no longer win. The
@@ -190,6 +200,10 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
         claim = build.claim_stale_for_reclaim(conn, job.id, d.build_stale_seconds)
         if claim is None:
             continue
+        # Hold the claim while working (race A): every wait below beats the daemon AND re-stamps this RECLAIMING
+        # row, so while the stamps land a second leader's reclaim does not take over a cleanup in progress.
+        beat = reclaim_beat.Heartbeat(d._beat, functools.partial(build.touch_reclaiming, conn, job.id),
+                                      reclaim_beat.beat_seconds(d.build_stale_seconds), what=f"stale build {job.id}")
         if claim.vmid is not None:
             # Target the EXACT node the guest was created on (F2). Guard against a stamped node that was
             # REPOINTED into another cluster mid-flight (the mutable-`node.cluster_id` class review S25/#84
@@ -205,6 +219,7 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                             "%s (unserved, or repointed to %s) — leaving RECLAIMING for a reclaim that can",
                             job.id, claim.node_id, job.cluster_id, d.registry.cluster_of(claim.node_id),
                             extra={"build_id": job.id, "node": claim.node_id, "cluster": job.cluster_id})
+                backoff.failed(job.id, d.build_stale_seconds)
                 continue
             driver = (d.registry.get(claim.node_id) if claim.node_id is not None
                       else driver_for_cluster(d, job.cluster_id))
@@ -217,15 +232,17 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                             job.cluster_id, claim.vmid,
                             extra={"build_id": job.id, "node": claim.node_id, "cluster": job.cluster_id,
                                    "vmid": claim.vmid})
+                backoff.failed(job.id, d.build_stale_seconds)
                 continue
             try:
                 # Heartbeat threaded through the ~180s stop+DELETE so the single tick thread stays alive.
-                driver.destroy_build_vm(claim.vmid, job.id, on_progress=d._beat)  # clean if gone/reused
+                driver.destroy_build_vm(claim.vmid, job.id, on_progress=beat)  # clean if gone/reused
             except Exception:
                 # The guest may still be running — leave the build NON-TERMINAL (RECLAIMING) so a later sweep
                 # retries. NEVER mark terminal with the guest still up.
+                wait = backoff.failed(job.id, d.build_stale_seconds)
                 log.warning("stale build %s: destroy_build_vm(vmid %s) failed — leaving RECLAIMING, "
-                            "will retry after the next stale cutoff", job.id, claim.vmid,
+                            "will retry in %ds", job.id, claim.vmid, wait,
                             extra={"build_id": job.id, "vmid": claim.vmid})
                 continue
             # The guest — and thus its create/import task copying FROM the source — is provably gone now, so
@@ -235,7 +252,7 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
             # no reach-blind guess. NEVER affects the reclaim outcome; idempotent.
             reconciler.free_build_import(
                 driver, job.storage_id, imgbuild.download_filename(job.target_template_id, job.url),
-                job.id, expect_present=False, on_progress=d._beat)
+                job.id, expect_present=False, on_progress=beat)
         elif claim.download_upid is not None and claim.download_node is not None:
             # A guest-free DOWNLOADING build (no vmid ever stamped) whose download outran build_template's
             # wait budget: RE-ATTACH to the persisted download task (migration 0045) on its EXACT node and, IF
@@ -264,7 +281,7 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                     # heartbeated. A stopped task returns its exitstatus; 'TIMEOUT' means still-running OR
                     # unqueryable (wait cannot tell them apart) — either way we cannot confirm it settled.
                     rc = driver.wait(claim.download_upid, secs=_DOWNLOAD_REATTACH_POLL_SECS,
-                                     on_progress=d._beat)
+                                     on_progress=beat)
                     settled = rc if rc != "TIMEOUT" else None
                 except Exception:
                     settled = None   # an inconclusive re-attach (poll raised) — finalize without a reap
@@ -276,7 +293,7 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                     # this free and mark_failed, or a failed download that landed nothing — never the
                     # wrong-volid anomaly. NEVER affects the finalize.
                     reconciler.free_build_import(driver, job.storage_id, filename, job.id,
-                                                 expect_present=False, on_progress=d._beat)
+                                                 expect_present=False, on_progress=beat)
                     reaped = True
             if not reaped:
                 # Could not confirm the download settled + reap (unserved/repointed node, still running or
@@ -290,6 +307,7 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                             extra={"build_id": job.id, "node": claim.download_node})
         # Guest gone on the build's node (or none was ever stamped; and any download source has been reaped
         # or left as the named best-effort residual) — NOW it is safe to finalize the build.
+        backoff.done(job.id)
         if build.mark_failed(conn, job.id, "stale_abandoned"):
             reclaimed += 1   # (False == another actor finalized it between the claim and here.)
     if reclaimed:

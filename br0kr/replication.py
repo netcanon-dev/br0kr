@@ -26,6 +26,7 @@ convention); replication_enabled + plan_replication are pure reads that neither 
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from typing import Any
 import psycopg
 import requests
 
-from br0kr import admission, imgbuild, lease, placement, pve, reasons, reconciler, statemachine
+from br0kr import admission, imgbuild, lease, placement, pve, reasons, reclaim_beat, reconciler, statemachine
 from br0kr.driver import FENCE_MISMATCH, GONE, Driver
 from br0kr.logging_setup import redact_text
 
@@ -861,7 +862,8 @@ def _touch(conn: psycopg.Connection[Any], job_id: int) -> None:
     a healthy copy that runs longer than the stale window is falsely idle-reclaimed by its OWN live leader — the
     clone destroyed mid-flight and the (template, pool) key never able to replicate (§5.3). Called
     on every poll pass that observes the clone/convert task still running (the TIMEOUT branch). Guarded on
-    COPYING/CONVERTING so it never resurrects a terminal/RECLAIMING row's timestamp. The wall-clock cap
+    COPYING/CONVERTING so it never resurrects a terminal/RECLAIMING row's timestamp (a RECLAIMING row is stamped
+    only by the reclaim working on it, `touch_reclaiming`). The wall-clock cap
     (`copy_started_at`) remains the backstop for a polling-but-never-progressing wedge. Commits."""
     conn.execute("UPDATE template_replication SET updated_at = now() "
                  f"WHERE id = %s AND job_state IN {_COPY_IN}", (job_id,))
@@ -1058,14 +1060,21 @@ def stale_replications(conn: psycopg.Connection[Any], stale_seconds: int, wall_c
     WALL-CAPPED (`copy_started_at` older than `wall_cap_seconds` — a job that keeps `updated_at` fresh by leader
     polling but never reaches READY, the wedge the idle check misses). The wall cap keys on `copy_started_at`
     (stamped at the COPYING claim, 0036), NOT `created_at`, so a job that sat REQUESTED for hours while the
-    engine was disabled is not reaped on its first copy attempt (§5.3). Read-only; the reclaim acts on each. A
-    still-REQUESTED job is NOT here (it holds no guest — the S04/F5a false-reclaim rule)."""
+    engine was disabled is not reaped on its first copy attempt (§5.3). A RECLAIMING job (an earlier reclaim's
+    teardown raised or was inconclusive) is due on its own, shorter cutoff, `reclaim_beat.retry_seconds(stale)`
+    (900 s for the default two hours), and NOT on the wall cap: the wall cap tells a wedged copy from a slow one,
+    and a RECLAIMING job is past that question, so the cap only made it re-claimable on every pass, even while
+    another reclaim was still tearing it down (race A). A reclaim at work keeps it fresh (`touch_reclaiming`).
+    Read-only; the reclaim acts on each. A still-REQUESTED job is NOT here (it holds no guest — the S04/F5a
+    false-reclaim rule)."""
     rows = conn.execute(
         f"SELECT {_JOB_COLS} FROM template_replication "
         f"WHERE job_state IN {_RECLAIM_IN} "
-        f"  AND (updated_at < now() - make_interval(secs => %s) "
-        f"       OR copy_started_at < now() - make_interval(secs => %s)) ORDER BY updated_at",
-        (stale_seconds, wall_cap_seconds)).fetchall()
+        "  AND ((job_state = 'RECLAIMING' AND updated_at < now() - make_interval(secs => %s)) "
+        "       OR (job_state <> 'RECLAIMING' AND (updated_at < now() - make_interval(secs => %s) "
+        "                                          OR copy_started_at < now() - make_interval(secs => %s)))) "
+        "ORDER BY updated_at",
+        (reclaim_beat.retry_seconds(stale_seconds), stale_seconds, wall_cap_seconds)).fetchall()
     return [_job(r) for r in rows]
 
 
@@ -1083,19 +1092,46 @@ def claim_stale_for_reclaim(conn: psycopg.Connection[Any], job_id: int, stale_se
     recheck the destroy-first reclaim needs (S04/F1). Moving to RECLAIMING makes the win EXCLUSIVE against a
     concurrent completion (a `_mark_ready` CASes CONVERTING→READY, so once RECLAIMING it can no longer match).
     Returns the claim (with `wall_capped` so the reclaim can label the reason), or None if the claim was lost
-    (the job progressed/completed → SKIP the destroy). Commits."""
+    (the job progressed/completed → SKIP the destroy). The cutoffs match `stale_replications`: a RECLAIMING job
+    is re-claimed on the retry cutoff alone, a COPYING/CONVERTING one on idle-or-wall-capped. Two CASes, the
+    retry first, so each guard names its states plainly for the state-machine scan; each is atomic, so a job
+    moving between them is claimed at most once. Commits."""
     row = conn.execute(
-        f"UPDATE template_replication SET job_state = 'RECLAIMING', updated_at = now() "
-        f"WHERE id = %s AND job_state IN {_RECLAIM_IN} "
-        f"  AND (updated_at < now() - make_interval(secs => %s) "
-        f"       OR copy_started_at < now() - make_interval(secs => %s)) "
-        f"RETURNING vmid, target_node_id, (copy_started_at < now() - make_interval(secs => %s))",
-        (job_id, stale_seconds, wall_cap_seconds, wall_cap_seconds)).fetchone()
+        "UPDATE template_replication SET job_state = 'RECLAIMING', updated_at = now() "
+        "WHERE id = %s AND job_state = 'RECLAIMING' "
+        "  AND updated_at < now() - make_interval(secs => %s) "
+        "RETURNING vmid, target_node_id, (copy_started_at < now() - make_interval(secs => %s))",
+        (job_id, reclaim_beat.retry_seconds(stale_seconds), wall_cap_seconds)).fetchone()
+    if row is None:
+        row = conn.execute(
+            f"UPDATE template_replication SET job_state = 'RECLAIMING', updated_at = now() "
+            f"WHERE id = %s AND job_state IN {_COPY_IN} "
+            f"  AND (updated_at < now() - make_interval(secs => %s) "
+            f"       OR copy_started_at < now() - make_interval(secs => %s)) "
+            f"RETURNING vmid, target_node_id, (copy_started_at < now() - make_interval(secs => %s))",
+            (job_id, stale_seconds, wall_cap_seconds, wall_cap_seconds)).fetchone()
     conn.commit()
     if row is None:
         return None
     return _ReclaimClaim(vmid=(int(row[0]) if row[0] is not None else None), node_id=row[1],
                          wall_capped=bool(row[2]))
+
+
+def touch_reclaiming(conn: psycopg.Connection[Any], job_id: int) -> bool:
+    """Re-stamp a RECLAIMING job's `updated_at` while a reclaim is tearing its guest down (the `touch` of a
+    `reclaim_beat.Heartbeat`), so a second leader never sees that cleanup as stale and starts another. Guarded to
+    RECLAIMING: a job finalized or force-failed meanwhile is left as it is, and the call returns False. Sets no
+    state. Commits; on an error it rolls back first, so the reclaim's NON-autocommit connection is not left in a
+    failed transaction, and re-raises for the heartbeat to log."""
+    try:
+        row = conn.execute("UPDATE template_replication SET updated_at = now() "
+                           "WHERE id = %s AND job_state = 'RECLAIMING' RETURNING id", (job_id,)).fetchone()
+        conn.commit()
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        raise
+    return row is not None
 
 
 def force_fail_replication(conn: psycopg.Connection[Any], replication_id: int, reason: str | None = None
@@ -1201,8 +1237,13 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
     vmid = int(claim[0]) if claim[0] is not None else None
     if vmid is not None:
         fresh = _require(_refresh(conn, job.id), job.id)   # RECLAIMING now — read the persisted upid + vmid
+        # Hold the claim while tearing down (race A). This path does not carry the stale cutoff, so it stamps on
+        # the heartbeat's 30 s ceiling: three stamps or more inside the retry window for any cutoff of two minutes
+        # or more (the default is two hours; only a test-sized cutoff gets fewer).
+        beat = reclaim_beat.Heartbeat(on_progress, functools.partial(touch_reclaiming, conn, job.id),
+                                      reclaim_beat.BEAT_CEILING_SECONDS, what=f"replication {job.id} reclaim")
         try:
-            result = _teardown_transient(fresh, driver, on_progress=on_progress)
+            result = _teardown_transient(fresh, driver, on_progress=beat)
         except Exception:
             log.warning("replication %s reclaim destroy raised — leaving RECLAIMING for the stale reclaim",
                         job.id, extra={"replication_id": job.id, "vmid": vmid}, exc_info=True)
@@ -1682,7 +1723,7 @@ def run_pending_replications(
 def reclaim_stale_replications(
     conn: psycopg.Connection[Any], driver_for: Callable[[str], Driver | None], *,
     stale_seconds: int = STALE_SECONDS_DEFAULT, on_progress: Callable[[], None] | None = None,
-    should_stop: Callable[[], bool] | None = None,
+    should_stop: Callable[[], bool] | None = None, backoff: reclaim_beat.RetryBackoff | None = None,
 ) -> int:
     """Reclaim stale/wedged COPYING/CONVERTING/RECLAIMING jobs (DESTROY-first on the STAMPED node, ADOPTING an
     unfenced landed clone, then FAIL + settle) + finalize-retry a READY job whose fence strip failed + reclaim a
@@ -1693,7 +1734,9 @@ def reclaim_stale_replications(
     the leaked-guest phase, guest_settled_at NULL) for the next cutoff, never settling while a guest may be live.
     Caller passes a NON-autocommit conn. ``should_stop`` (optional) is asked before each item; True ends the
     pass there, starting no new one (the daemon passes `_halted`: shutting down, or leadership lost mid-tick,
-    review REL-05). A job not reached is left for the next pass."""
+    review REL-05). A job not reached is left for the next pass. ``backoff`` (optional; the daemon passes its
+    `reclaim_beat.RetryBackoff`) holds back a RECLAIMING job whose teardown this leader failed on, doubling the wait
+    per failure up to `stale_seconds`, so one stuck guest cannot take the tick thread every retry (race A)."""
     wall_cap = WALL_CAP_FACTOR * stale_seconds
     reclaimed = 0
 
@@ -1775,10 +1818,19 @@ def reclaim_stale_replications(
         reclaimed += 1
         log.info("replication %s leaked-guest reclaim: guest settled + row now prunable (vmid %s)", rid,
                  fresh.vmid, extra={"replication_id": rid, "vmid": fresh.vmid})
-    # 2. stale / wedged reclaim.
+    # 2. stale / wedged reclaim. A job left RECLAIMING here (unserved node, a raising or unresolved teardown) waits
+    #    out `backoff` (the daemon's reclaim_beat.RetryBackoff) before this leader tries it again.
+    def left_reclaiming(job_id: int) -> None:
+        if backoff is not None:
+            backoff.failed(job_id, stale_seconds)
+
+    if backoff is not None:
+        backoff.prune(stale_seconds)
     for job in stale_replications(conn, stale_seconds, wall_cap):
         if stopping():
             return reclaimed
+        if backoff is not None and not backoff.due(job.id):
+            continue   # RECLAIMING, and its last teardown here failed: not yet
         claim = claim_stale_for_reclaim(conn, job.id, stale_seconds, wall_cap)
         if claim is None:
             continue   # lost — the job progressed/completed since the scan
@@ -1792,24 +1844,33 @@ def reclaim_stale_replications(
                 log.warning("replication %s reclaim: node %s unserved — leaving RECLAIMING (a guest may exist "
                             "at vmid %s)", job.id, claim.node_id, claim.vmid,
                             extra={"replication_id": job.id, "vmid": claim.vmid})
+                left_reclaiming(job.id)
                 continue
             # DESTROY-first, ADOPTING an unfenced landed clone (the RECLAIMING row carries its upid) so OUR
             # in-flight/landed copy is never orphaned + settled mid-materialise.
             fresh = _refresh(conn, job.id)   # RECLAIMING now — read the persisted upid alongside the vmid
             if fresh is None:
                 continue
+            # Hold the claim while tearing down (race A): beat the daemon AND re-stamp this RECLAIMING row.
+            beat = reclaim_beat.Heartbeat(on_progress, functools.partial(touch_reclaiming, conn, job.id),
+                                          reclaim_beat.beat_seconds(stale_seconds),
+                                          what=f"replication {job.id} reclaim")
             try:
-                result = _teardown_transient(fresh, driver, on_progress=on_progress)
+                result = _teardown_transient(fresh, driver, on_progress=beat)
             except Exception:
                 log.warning("replication %s reclaim destroy raised (vmid %s) — leaving RECLAIMING for the next "
                             "cutoff", job.id, claim.vmid, extra={"replication_id": job.id}, exc_info=True)
+                left_reclaiming(job.id)
                 continue   # non-terminal — retry next cutoff
             if result == "unresolved":
                 log.warning("replication %s reclaim: clone still materializing (vmid %s) — leaving RECLAIMING "
                             "for the next cutoff", job.id, claim.vmid, extra={"replication_id": job.id})
+                left_reclaiming(job.id)
                 continue
             log.info("replication %s reclaim: transient guest settled (vmid %s)", job.id, claim.vmid,
                      extra={"replication_id": job.id, "vmid": claim.vmid})
+        if backoff is not None:
+            backoff.done(job.id)
         _bump_attempts(conn, job.id)
         if not _mark_failed(conn, job.id, reason, settled=True):
             _stamp_settled(conn, job.id)   # force-fail won the CAS mid-teardown — guest proven gone, record it

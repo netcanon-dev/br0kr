@@ -35,6 +35,9 @@ the one-active-per-target rule, the stale reclaim, idempotency).
      guest-free (vmid None) build so the daemon re-attaches to a still-running download and reaps its transient
      source, and the stamp is a NO-OP once the row is RECLAIMING (guarded, so a torn-down leader can't overwrite
      a row the reclaim owns).
+  J. RETRY + HEARTBEAT (race A): a RECLAIMING build aged past the RETRY cutoff (450 s for the hour) but not the
+     full one is listed and re-claimed, while an IMPORTING build of the same age is neither; touch_reclaiming
+     keeps a RECLAIMING build fresh (not listed, the claim loses) and is a no-op returning False on a FAILED one.
 
 Env: PGCONN (the throwaway ledger).
 """
@@ -337,6 +340,52 @@ def main() -> int:
         after = c.execute("SELECT download_upid FROM template_build WHERE id=%s", (drid,)).fetchone()[0]
         c.commit()
     check("set_download_task_is_a_noop_on_a_reclaiming_row", after == "UPID:nB:download:deadbeef:", f"upid={after}")
+
+    # ── J: RETRY + HEARTBEAT (race A) — drid is RECLAIMING from section I. Ten minutes is past the retry cutoff
+    #      (reclaim_beat.retry_seconds(3600) = 450 s) and well inside the full hour. ──
+    with connect() as c:
+        b8 = request(c, target_template_id="first-claim-age")
+        c.execute("UPDATE template_build SET state='DOWNLOADING' WHERE id=%s", (b8["build_id"],))
+        c.commit()
+        build.set_build_vmid(c, b8["build_id"], 9701, "nB")
+        build.mark_importing(c, b8["build_id"])
+        c.execute("UPDATE template_build SET updated_at = now() - interval '10 minutes' WHERE id = ANY(%s)",
+                  ([drid, b8["build_id"]],))
+        c.commit()
+    with connect() as c:
+        listed = {j.id for j in build.stale_builds(c, 3600)}
+        first = build.claim_stale_for_reclaim(c, b8["build_id"], 3600)
+        retried = build.claim_stale_for_reclaim(c, drid, 3600)
+        states = dict(c.execute("SELECT id, state FROM template_build WHERE id = ANY(%s)",
+                                ([drid, b8["build_id"]],)).fetchall())
+        c.commit()
+    check("a_reclaiming_build_is_retried_on_the_shorter_cutoff",
+          drid in listed and retried is not None and states[drid] == "RECLAIMING",
+          f"listed={sorted(listed)} retried={retried} states={states}")
+    check("an_importing_build_of_the_same_age_waits_for_the_full_cutoff",
+          b8["build_id"] not in listed and first is None and states[b8["build_id"]] == "IMPORTING",
+          f"listed={sorted(listed)} first={first} states={states}")
+    with connect() as c:
+        c.execute("UPDATE template_build SET updated_at = now() - interval '10 minutes' WHERE id=%s", (drid,))
+        c.commit()
+        held = build.touch_reclaiming(c, drid)   # commits its own stamp
+        with connect() as other:                 # a second leader's session, while the first is still open
+            listed2 = {j.id for j in build.stale_builds(other, 3600)}
+            stolen = build.claim_stale_for_reclaim(other, drid, 3600)
+            other.commit()
+    check("a_heartbeat_keeps_a_reclaim_in_progress_from_being_taken_over",
+          held is True and drid not in listed2 and stolen is None,
+          f"held={held} listed={sorted(listed2)} stolen={stolen}")
+    with connect() as c:
+        build.mark_failed(c, drid, "stale_abandoned")
+        c.execute("UPDATE template_build SET updated_at = now() - interval '1 day' WHERE id=%s", (drid,))
+        c.commit()
+        revived = build.touch_reclaiming(c, drid)
+        age = c.execute("SELECT now() - updated_at > interval '23 hours' FROM template_build WHERE id=%s",
+                        (drid,)).fetchone()[0]
+        c.commit()
+    check("the_heartbeat_never_revives_a_finished_build", revived is False and age is True,
+          f"revived={revived} still_old={age}")
 
     n = len(results)
     allok = all(results)

@@ -38,7 +38,7 @@ _INSTANCE_STATES = ("READY", "REPLICATING", "FAILED", "RETIRED")
 _INSTANCE_EDGES = {("REPLICATING", "READY"), ("REPLICATING", "FAILED")}   # a replication's own catalog row
 # Every state-setting UPDATE each saga module holds today. Exact, so a step dropping out of the scan fails; add
 # one here when you add a step.
-_SITES = {"build": 6, "replication": 12, "migration": 3}
+_SITES = {"build": 7, "replication": 13, "migration": 3}   # race A: each reclaim claim is a retry CAS + a first
 _UPDATE = re.compile(r"\bUPDATE\s+(?:ONLY\s+)?(" + "|".join(_TABLES) + r")\b(?:\s+(?:AS\s+)?(?!SET\b)(\w+))?\s+SET\s+",
                      re.IGNORECASE)
 

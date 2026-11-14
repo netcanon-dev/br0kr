@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from br0kr import imgbuild, lease, placement, pve, replication
+from br0kr import imgbuild, lease, placement, pve, reclaim_beat, replication
 
 pytestmark = pytest.mark.unit
 
@@ -243,6 +243,10 @@ def test_stale_reclaim_query_covers_idle_and_wall_capped_on_copy_start():
     assert "updated_at < now() - make_interval(secs => %s)" in sql
     assert "copy_started_at < now() - make_interval(secs => %s)" in sql
     assert "created_at < now() - make_interval(secs => %s)" not in sql   # NOT the request time
+    # a RECLAIMING job is on the retry cutoff alone; the idle and wall-cap limbs are for a copy not yet claimed
+    assert "(job_state = 'RECLAIMING' AND updated_at < now() - make_interval(secs => %s))" in sql
+    assert "job_state <> 'RECLAIMING' AND (updated_at" in sql
+    assert rc.params[0] == (900, 7200, 28800)
 
 
 def test_touch_freshens_only_a_live_copy_jobs_updated_at():
@@ -707,3 +711,179 @@ def test_reclaim_stale_replications_stops_before_the_next_job(monkeypatch):
     monkeypatch.setattr(replication, "stale_replications", lambda *a, **k: touched.append("scan") or [])
     assert replication.reclaim_stale_replications(_Conn(), lambda _n: object(), should_stop=lambda: True) == 0
     assert touched == []
+
+
+class _ClaimConn:
+    """Records each statement + params; fetchone answers from `rows` in order (None once they run out)."""
+
+    def __init__(self, rows: list[tuple | None] | None = None) -> None:
+        self.sqls: list[str] = []
+        self.params: list[object] = []
+        self.rows = list(rows or [])
+        self.commits = 0
+        self.rollbacks = 0
+        self.fail = False
+
+    def execute(self, sql: str, params: object = None) -> _ClaimConn:
+        if self.fail:
+            raise RuntimeError("ledger blip")
+        self.sqls.append(" ".join(sql.split()))
+        self.params.append(params)
+        return self
+
+    def fetchone(self) -> tuple | None:
+        return self.rows.pop(0) if self.rows else None
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def test_a_reclaiming_job_is_reclaimed_on_the_retry_cutoff_only_never_on_the_wall_cap():
+    """claim_stale_for_reclaim tries the retry CAS first (job_state = 'RECLAIMING', updated_at past
+    reclaim_beat.retry_seconds, NO wall-cap limb), then the first claim (COPYING/CONVERTING, idle OR wall-capped).
+    Guards race A's quirk: the old single CAS let `copy_started_at < now() - wall_cap` match a RECLAIMING job, so
+    one past its wall cap was re-claimed on EVERY pass, even while another reclaim was still destroying its guest."""
+    rc = _ClaimConn()
+    assert replication.claim_stale_for_reclaim(rc, 5, 7200, 28800) is None
+    retry, first = rc.sqls
+    guard = "WHERE id = %s AND job_state = 'RECLAIMING' AND updated_at < now() - make_interval(secs => %s) RETURNING"
+    assert guard in retry                                                   # no copy_started_at limb in the guard
+    assert rc.params[0] == (5, 900, 28800)                                  # 28800 only labels wall_capped
+    assert f"job_state IN {replication._COPY_IN}" in first and "copy_started_at < now()" in first
+    assert rc.params[1] == (5, 7200, 28800, 28800)
+    assert rc.commits == 1
+    won = _ClaimConn(rows=[(9800, "nB", True)])
+    claim = replication.claim_stale_for_reclaim(won, 5, 7200, 28800)
+    assert claim is not None and claim.vmid == 9800 and claim.wall_capped and len(won.sqls) == 1
+
+
+class _NoRows:
+    """A NON-autocommit connection whose queries all come back empty (the reclaim's finalize and leaked-guest
+    phases find nothing, so only the stale phase acts)."""
+
+    autocommit = False
+
+    def execute(self, *a, **k):
+        return self
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return None
+
+    def commit(self):
+        pass
+
+
+def _a_long_teardown(monkeypatch, polls: int = 12, step: float = 10.0):
+    """Patch the heartbeat clock and replication.touch_reclaiming; return (stamped ids, a fake _teardown_transient
+    whose `polls` progress calls each advance the clock by `step` seconds)."""
+    now = [0.0]
+    monkeypatch.setattr(reclaim_beat, "_now", lambda: now[0])
+    stamped: list[int] = []
+    monkeypatch.setattr(replication, "touch_reclaiming", lambda conn, rid: stamped.append(rid) or True)
+
+    def teardown(fresh, driver, on_progress=None):
+        for _ in range(polls):
+            now[0] += step
+            on_progress()
+        return "settled"
+
+    return stamped, teardown
+
+
+@pytest.mark.parametrize(("stale", "stamps"), [(7200, 4), (60, 6)])
+def test_the_stale_reclaim_holds_its_claim_through_a_long_teardown(monkeypatch, stale, stamps):
+    """Race A: reclaim_stale_replications threads a heartbeat into the teardown that re-stamps the claimed
+    RECLAIMING job every beat_seconds(stale) (30 s at the default cutoff: 120 s of teardown -> 4 stamps; 15 s at
+    a 60 s cutoff, polled every 10 s -> 6) and still calls the daemon's beat on every poll. Guards the stale phase passing the bare
+    daemon beat, which left a cleanup in progress open to a second leader's reclaim once the retry cutoff passed,
+    and a fixed 30 s interval, which a short cutoff's retry window would outrun."""
+    stamped, teardown = _a_long_teardown(monkeypatch)
+    job = _job("COPYING", vmid=9800)
+    monkeypatch.setattr(replication, "stale_replications", lambda *a, **k: [job])
+    monkeypatch.setattr(replication, "claim_stale_for_reclaim",
+                        lambda *a, **k: replication._ReclaimClaim(vmid=9800, node_id="nA", wall_capped=False))
+    monkeypatch.setattr(replication, "_refresh", lambda conn, rid: job)
+    monkeypatch.setattr(replication, "_teardown_transient", teardown)
+    for name in ("_bump_attempts", "_settle_by_key", "_stamp_settled"):
+        monkeypatch.setattr(replication, name, lambda *a, **k: None)
+    monkeypatch.setattr(replication, "_mark_failed", lambda *a, **k: True)
+    beats: list[int] = []
+    n = replication.reclaim_stale_replications(_NoRows(), lambda _n: object(), stale_seconds=stale,
+                                               on_progress=lambda: beats.append(1))
+    assert n == 1 and stamped == [job.id] * stamps and len(beats) >= 12
+
+
+def test_the_advance_path_reclaim_holds_its_claim_through_a_long_teardown(monkeypatch):
+    """Race A, the other RECLAIMING path: _reclaim_and_fail (the advance path's fail-and-tear-down) also threads
+    the claim heartbeat into its teardown, at the heartbeat's 30 s ceiling (the advance path does not carry the
+    stale cutoff). Guards the one path a refactor could leave on the bare daemon beat."""
+    stamped, teardown = _a_long_teardown(monkeypatch)
+    job = _job("COPYING", vmid=9800)
+
+    class _Claimed(_NoRows):
+        def fetchone(self):
+            return (9800,)   # the CAS to RECLAIMING wins and reads back the vmid
+
+    monkeypatch.setattr(replication, "_refresh", lambda conn, rid: job)
+    monkeypatch.setattr(replication, "_teardown_transient", teardown)
+    monkeypatch.setattr(replication, "_settle_by_key", lambda *a, **k: None)
+    monkeypatch.setattr(replication, "_mark_failed", lambda *a, **k: True)
+    beats: list[int] = []
+    assert replication._reclaim_and_fail(_Claimed(), job, object(), "clone_failed:x",  # type: ignore[arg-type]
+                                         on_progress=lambda: beats.append(1)) is True
+    assert stamped == [job.id] * 4 and len(beats) == 12
+
+
+def test_touch_reclaiming_commits_and_rolls_back_a_failed_stamp():
+    """replication.touch_reclaiming stamps only a RECLAIMING job (no state set), commits, and on an error rolls
+    the NON-autocommit connection back before re-raising. Guards a failed stamp leaving the reclaim's connection
+    in an aborted transaction, which would fail every later statement of the reclaim pass."""
+    rc = _ClaimConn(rows=[(5,)])
+    assert replication.touch_reclaiming(rc, 5) is True
+    assert "SET updated_at = now() WHERE id = %s AND job_state = 'RECLAIMING'" in rc.sqls[0]
+    assert "SET job_state" not in rc.sqls[0] and rc.commits == 1
+    assert replication.touch_reclaiming(_ClaimConn(), 5) is False
+    bad = _ClaimConn()
+    bad.fail = True
+    try:
+        replication.touch_reclaiming(bad, 5)
+        raise AssertionError("expected the blip to propagate")
+    except RuntimeError:
+        pass
+    assert bad.rollbacks == 1 and bad.commits == 0
+
+
+def test_the_stale_reclaim_backs_off_a_job_whose_teardown_keeps_failing(monkeypatch):
+    """Race A, the review's cost finding: with the daemon's RetryBackoff, a RECLAIMING job whose teardown raised
+    is not claimed again by this leader until 900 s later, then 1800 s after the next failure, however often the
+    scan lists it; without a backoff (a harness, a one-off call) every pass may claim it. Guards one wedged copy
+    costing the tick thread a full teardown every 900 s."""
+    now = [0.0]
+    monkeypatch.setattr(reclaim_beat, "_now", lambda: now[0])
+    monkeypatch.setattr(replication, "touch_reclaiming", lambda conn, rid: True)
+    job = _job("RECLAIMING", vmid=9800)
+    monkeypatch.setattr(replication, "stale_replications", lambda *a, **k: [job])
+    claims: list[float] = []
+    monkeypatch.setattr(replication, "claim_stale_for_reclaim", lambda *a, **k: claims.append(now[0]) or
+                        replication._ReclaimClaim(vmid=9800, node_id="nA", wall_capped=False))
+    monkeypatch.setattr(replication, "_refresh", lambda conn, rid: job)
+
+    def teardown(fresh, driver, on_progress=None):
+        raise RuntimeError("DELETE refused")
+
+    monkeypatch.setattr(replication, "_teardown_transient", teardown)
+    backoff = reclaim_beat.RetryBackoff()
+    for t in (0.0, 899.0, 900.0, 2699.0, 2700.0):
+        now[0] = t
+        assert replication.reclaim_stale_replications(_NoRows(), lambda _n: object(), stale_seconds=7200,
+                                                      backoff=backoff) == 0
+    assert claims == [0.0, 900.0, 2700.0]
+    claims.clear()
+    replication.reclaim_stale_replications(_NoRows(), lambda _n: object(), stale_seconds=7200)
+    assert claims == [2700.0]                      # no backoff passed: claimed as before

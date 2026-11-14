@@ -208,6 +208,22 @@ guarded so a wrong/empty ledger can't turn it into a mass delete.
   (`lease.clone_orphan_reclaimable`, cluster-scoped): a clone whose lease is still LIVE is spared, an
   absent/empty ledger reclaims nothing, and the template itself is never touched — so a crashed clone can't
   leak a running VM the ledger thinks is gone.
+- **Stale-job reclaims: a prompt retry, one owner (`br0kr/reclaim_beat.py`, race A).** A build or replication
+  a leader abandoned is claimed (CAS to RECLAIMING), its guest destroyed, and only then marked FAILED. A destroy
+  that raises leaves the row RECLAIMING. That row is retried once `updated_at` is `retry_seconds(stale)` old
+  (stale / 8, at least 300 s or the full cutoff if shorter: 450 s for builds, 900 s for replications), not after
+  the full stale cutoff, and a RECLAIMING replication is no longer re-claimable through the wall cap. A teardown
+  runs on the single tick thread (a build's stop + DELETE can take three minutes), so one that keeps failing
+  HERE backs off (`RetryBackoff`, in memory per leader): its wait doubles per failure up to the full cutoff (450,
+  900, 1800, 3600 s for a build), so after its first hours a persistently stuck guest costs the tick one
+  attempt per cutoff, as before. A guest that never goes is still the operator's (`force_fail_build`,
+  `force_fail_replication`). While a reclaim's
+  destroy, source reap or download re-attach runs, its `Heartbeat` re-stamps the row (every 30 s, guarded to
+  RECLAIMING), so while those stamps land a second leader in a failover overlap does not take the cleanup over.
+  An old leader that lost the ledger too stops stamping; then only the retry cutoff protects it, and a takeover
+  is harmless: every destroy checks the guest's fence and treats a gone guest as done. The claim is two CASes
+  (retry, then first claim) so the state-machine scan reads each guard. Proven: `unit/test_reclaim_beat.py`,
+  `integration/test_daemon.py`, `harness_imgbuild.py` (J), `harness_replicate_data.py` (E3).
 
 ## 3. Dormant: cross-cluster migration
 

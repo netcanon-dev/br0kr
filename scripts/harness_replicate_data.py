@@ -17,7 +17,8 @@ calls are proven separately by the reconciler/pve tests + the live checklist).
   D. LANDED-WRONG-POOL — a FakePve that lands the disk on the WRONG pool -> the assertion FAILs the job
      landed_wrong_pool, destroys the guest, and QUARANTINES the (node, storage) pair.
   E. STALE RECLAIM — a COPYING job aged past the cutoff -> reclaim_stale_replications destroys its guest, FAILs
-     the job + twin, and settles the reservation.
+     the job + twin, and settles the reservation. E3 (race A): a RECLAIMING job is re-claimed on the retry cutoff
+     (900 s for two hours) and never on the wall cap; a heartbeat stamp keeps a reclaim in progress its own.
   F. WAITER COUPLING — a PENDING lease parked behind a job (awaiting_replication_id) is REJECTED the moment the
      job is FAILED (sweep_waiters), with released_reason replication_failed.
   G. COOLDOWN — after a FAILED job for a (template, target) key, request_replication refuses a fresh one with
@@ -353,6 +354,35 @@ def main() -> int:
     st5 = _scalar("SELECT job_state FROM template_replication WHERE id=%s", (rid5,))
     check("still_cloning_left_reclaiming_not_failed", st5 == "RECLAIMING", f"state={st5}")
     check("still_cloning_guest_not_destroyed", copy5 not in d5.destroyed, f"destroyed={d5.destroyed}")
+    # ── E3 (race A): rid5 is RECLAIMING with a fresh claim stamp. Its copy started 9 h ago, past the wall cap
+    #     (4 x 7200 s = 8 h): the cap must not make it re-claimable (it used to, on every pass). Twenty minutes
+    #     idle is past the retry cutoff (900 s) and far inside the full two hours: that is what makes it due. ──
+    with connect() as c:
+        c.execute("UPDATE template_replication SET copy_started_at=now() - interval '9 hours' WHERE id=%s", (rid5,))
+        c.commit()
+        listed = {j.id for j in replication.stale_replications(c, 7200, 28800)}
+        stolen = replication.claim_stale_for_reclaim(c, rid5, 7200, 28800)
+    check("a_fresh_reclaiming_job_is_not_reclaimed_on_the_wall_cap", rid5 not in listed and stolen is None,
+          f"listed={sorted(listed)} claim={stolen}")
+    with connect() as c:
+        c.execute("UPDATE template_replication SET updated_at=now() - interval '20 minutes' WHERE id=%s", (rid5,))
+        c.commit()
+        listed = {j.id for j in replication.stale_replications(c, 7200, 28800)}
+        retried = replication.claim_stale_for_reclaim(c, rid5, 7200, 28800)
+        st = _scalar("SELECT job_state FROM template_replication WHERE id=%s", (rid5,))
+    check("a_reclaiming_job_is_retried_on_the_shorter_cutoff",
+          rid5 in listed and retried is not None and retried.vmid == copy5 and retried.wall_capped
+          and st == "RECLAIMING",
+          f"listed={sorted(listed)} claim={retried} state={st}")
+    with connect() as c:
+        c.execute("UPDATE template_replication SET updated_at=now() - interval '20 minutes' WHERE id=%s", (rid5,))
+        c.commit()
+        held = replication.touch_reclaiming(c, rid5)   # commits its own stamp
+        with connect() as other:                       # a second leader's session, while the first is still open
+            listed = {j.id for j in replication.stale_replications(other, 7200, 28800)}
+            stolen = replication.claim_stale_for_reclaim(other, rid5, 7200, 28800)
+    check("a_heartbeat_keeps_a_reclaim_in_progress_from_being_taken_over",
+          held is True and rid5 not in listed and stolen is None, f"held={held} listed={sorted(listed)} claim={stolen}")
     # RESUME the RECLAIMING job at the NEXT cutoff: the clone has since finished, so re-aging updated_at (the
     # claim refreshed it) must let the reclaim DRAIN the upid → adopt → destroy → FAIL + settle. This is the
     # second half of the adopt contract — an 'unresolved' RECLAIMING job is EVENTUALLY drained.

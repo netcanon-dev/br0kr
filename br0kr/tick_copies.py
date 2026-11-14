@@ -58,7 +58,7 @@ def reclaim_replications(d: Daemon, rconn: psycopg.Connection[Any]) -> int:
     tick_builds.reclaim_builds on the sweep cadence. Returns the count reclaimed this tick."""
     return replication.reclaim_stale_replications(
         rconn, d.registry.get, stale_seconds=d.repl_stale_seconds, on_progress=d._beat,
-        should_stop=d._halted)
+        should_stop=d._halted, backoff=d._repl_backoff)
 
 
 def waiters_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:
