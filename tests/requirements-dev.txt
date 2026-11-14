@@ -2,7 +2,7 @@
 # Keep this TINY: the suite mocks every I/O boundary in its home module, so it
 # needs the libraries to IMPORT, not live services.
 pytest>=8
-pytest-cov>=5
+pytest-cov>=7.1.0
 # Parses the shipped Prometheus rules in tests/unit/test_alert_rules.py (promtool itself runs in
 # scripts/check_alert_rules.sh).
 pyyaml>=6
