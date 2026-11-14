@@ -18,7 +18,7 @@ pyyaml>=6
 -r ../requirements.txt
 
 # Type/lint tools the gate runs (so `tests/validate` finds them in a fresh venv):
-ruff>=0.17.3
+ruff>=0.17.4
 mypy>=2.4.1
 
 # e2e (opt-in, never in the hermetic default). Uncomment if the project has a UI
