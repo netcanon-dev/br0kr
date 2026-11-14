@@ -17,6 +17,11 @@ resolve in this repository.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-11-13
+
+A patch release with one fix: a cleanup that fails part-way is retried in minutes instead of hours, and backs off
+if it keeps failing. No migration and no new setting.
+
 ### Fixed
 - **A stuck cleanup is retried in minutes, backing off if it keeps failing.** RECLAIMING builds and replications
   retry after stale/8 (450 s, 900 s), not hours, doubling per failure; a heartbeat holds the claim (race A).
@@ -2972,6 +2977,7 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `SECURITY.md` C6 + its residuals (vmid-reuse double-destroy needs per-VMID fencing; admission
   `idem_key` is inert while NULL). An adversarial multi-agent review of the lifecycle drove these.
 
-[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/netcanon-dev/br0kr/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/netcanon-dev/br0kr/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/netcanon-dev/br0kr/releases/tag/v0.1.0
