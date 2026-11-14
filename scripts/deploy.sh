@@ -65,6 +65,21 @@ files="$(env_val COMPOSE_FILE)"
         profiles this deployment runs, e.g. COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml and
         COMPOSE_PROFILES=dashboard,oauth,tunnel (see .env.example). Refusing to guess."
 
+# 1b. The shipped files containers bind-mount read-only (docker/: the Caddyfile and the ledger entrypoints;
+#     scripts/: the backup job) must be readable by other users. Caddy drops its capabilities, so it reads its
+#     Caddyfile as a user that does not own it; a release extracted under a private umask (077) leaves the file
+#     0600, the running container keeps its copy, and its next start (a recreate, a restart, a reboot) crash-loops
+#     on "permission denied" (it took the HTTPS front down on 2026-11-13). Every mode checks, --no-build too: its
+#     `up -d` recreates. -L follows symlinks, as the bind mount does. Generated secrets (certs/) and the dump
+#     directory are not checked. Read into an array, not through `| head`: under pipefail a long list SIGPIPEs
+#     find, and an assignment whose command fails would end the script with no message.
+unreadable=()
+while IFS= read -r path; do unreadable+=("$path"); done \
+  < <(find -L docker scripts \( \( -type f ! -perm -o=r \) -o \( -type d ! -perm -o=rx \) \) -print 2>/dev/null || true)
+[ "${#unreadable[@]}" -eq 0 ] || die "${#unreadable[@]} path(s) under docker/ or scripts/ cannot be read by other users,
+        so a container that mounts them fails on its next start. The first: ${unreadable[*]:0:5}
+        Fix it now (any restart reads them): chmod -R o+rX docker scripts. Extract releases with umask 022."
+
 # 2. This script brings up EVERY service in the configured set, which is the bundled-ledger topology. A
 #    stretched-DR primary (docker-compose.primary-remote.yml) must not also start the bundled pg-standby,
 #    so that topology keeps the targeted commands in docker-deploy.md §9.

@@ -68,8 +68,10 @@ def _run(tmp_path: Path, args: list[str] | None = None, *, env_file: str | None,
          ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run a copy of deploy.sh (with tls-up.sh beside it) in a scratch repo root against the fake docker."""
     (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts").chmod(0o755)   # world-readable whatever the checkout's umask: deploy.sh checks that
     for name in ("deploy.sh", "tls-up.sh"):
         shutil.copy(_ROOT / "scripts" / name, tmp_path / "scripts" / name)
+        (tmp_path / "scripts" / name).chmod(0o755)
     if env_file is not None:
         (tmp_path / ".env").write_text(env_file, encoding="utf-8")
     bindir = tmp_path / "bin"
@@ -427,3 +429,72 @@ def test_with_a_published_image_another_stack_on_either_image_is_refused(tmp_pat
     proc, calls = _run(tmp_path, ["--pull"], env_file=env, **stray)
     assert proc.returncode != 0 and "old-stack" in proc.stderr
     assert _mutating(calls) == []
+
+
+def test_refuses_a_tree_whose_mounted_files_other_users_cannot_read(tmp_path):
+    """--check refuses, naming the file and the fix, when a shipped file a container bind-mounts (docker/Caddyfile)
+    is readable only by its owner, and runs no docker command; with the file world-readable it gets past that check.
+    Guards the 2026-11-13 outage: a release extracted under umask 077 left the Caddyfile 0600, and Caddy, which
+    drops its capabilities, crash-looped on its next recreate with "permission denied"."""
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker").chmod(0o755)   # the runner's umask must not decide the outcome
+    caddyfile = tmp_path / "docker" / "Caddyfile"
+    caddyfile.write_text(":443 {}\n", encoding="utf-8")
+    caddyfile.chmod(0o600)
+    proc, calls = _run(tmp_path, ["--check"], env_file=_TLS_ENV)
+    assert proc.returncode != 0
+    assert "docker/Caddyfile" in proc.stderr and "chmod -R o+rX docker scripts" in proc.stderr
+    assert calls == []   # refused before any docker call
+    caddyfile.chmod(0o644)
+    proc, _ = _run(tmp_path, ["--check"], env_file=_TLS_ENV)
+    assert proc.returncode == 0 and "preflight OK" in proc.stdout, proc.stderr
+
+
+def test_refuses_a_long_list_of_unreadable_files_with_its_message(tmp_path):
+    """With thousands of unreadable files (the outage had 403), --check still refuses WITH its message, the count
+    and the first names. Guards the check's own failure modes under `set -euo pipefail`: listing through `| head`
+    SIGPIPEs find on a long list, and a failing command in an assignment ends the script silently, exit 1 and
+    no word of why. The same silent exit hit every other test here when docker/ did not exist."""
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker").chmod(0o755)
+    for i in range(5000):
+        path = tmp_path / "docker" / f"entrypoint-{i:04d}.sh"
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o600)
+    proc, calls = _run(tmp_path, ["--check"], env_file=_TLS_ENV)
+    assert proc.returncode != 0
+    assert "5000 path(s) under docker/ or scripts/ cannot be read by other users" in proc.stderr, proc.stderr
+    assert "docker/entrypoint-" in proc.stderr and "umask 022" in proc.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("mode", [[], ["--no-build"], ["--check"]])
+@pytest.mark.parametrize("bad", ["script", "dir", "symlink"])
+def test_every_mode_refuses_any_unreadable_shipped_path(tmp_path, mode, bad):
+    """A full deploy, the --no-build recovery and --check each refuse before any docker call when a file under
+    scripts/ (the backup job's loop) is owner-only, when a directory under docker/ (prometheus/) is not searchable
+    by other users, or when a docker/ file is a symlink to an owner-only file (the bind mount follows the link).
+    Guards the check being narrowed to one directory, to files only, to one mode, or to the link itself: --no-build
+    runs `up -d` too, and any of those holes is a container that cannot read its mount on its next start."""
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker").chmod(0o755)
+    if bad == "script":
+        (tmp_path / "scripts").mkdir()
+        loop = tmp_path / "scripts" / "ledger_backup_loop.sh"
+        loop.write_text("#!/bin/sh\n", encoding="utf-8")
+        loop.chmod(0o600)
+        named = "scripts/ledger_backup_loop.sh"
+    elif bad == "dir":
+        (tmp_path / "docker" / "prometheus").mkdir()
+        (tmp_path / "docker" / "prometheus").chmod(0o700)
+        named = "docker/prometheus"
+    else:
+        target = tmp_path / "private-caddyfile"
+        target.write_text(":443 {}\n", encoding="utf-8")
+        target.chmod(0o600)
+        (tmp_path / "docker" / "Caddyfile").symlink_to(target)
+        named = "docker/Caddyfile"
+    proc, calls = _run(tmp_path, mode, env_file=_TLS_ENV)
+    assert proc.returncode != 0
+    assert named in proc.stderr and "cannot be read by other users" in proc.stderr, proc.stderr
+    assert calls == []

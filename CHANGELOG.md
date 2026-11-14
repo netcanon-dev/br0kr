@@ -118,6 +118,8 @@ resolve in this repository.
   more release, then goes (review UX-03).
 
 ### Fixed
+- **`deploy.sh` refuses a tree whose shipped files other users cannot read.** A release extracted under umask 077
+  left the Caddyfile 0600, and Caddy crash-looped on its next start. Extract at umask 022 (day2-operations.md).
 - **A node's cluster change can no longer race an admit onto that node.** `set_node` checks for leases and
   repoints under the node's admission lock, so an admit lands before the check or after the repoint (REL-07).
 - **On Windows the DR-guard tests skip instead of failing** when `bash` only launches WSL; CI never skips them.

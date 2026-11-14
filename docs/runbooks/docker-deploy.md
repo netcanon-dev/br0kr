@@ -24,8 +24,8 @@ live in [`docker-compose.yml`](../../docker-compose.yml) + [`.env.example`](../.
 - **Out of scope here:** standing up the Docker host itself (any Debian/Ubuntu box on the LAN that can reach
   the Proxmox API works — a VM, an LXC, or bare metal). A `git clone` on the host is the simplest way to get
   the source there; `git archive HEAD | ssh host 'tar -x'` from a working checkout also works (`.env` and the
-  secrets are `.gitignored`, so a source archive carries none, but mind its line endings: §13). This runbook
-  picks up once Docker and the source are on the host.
+  secrets are `.gitignored`, so a source archive carries none, but mind its line endings and the umask: §13).
+  This runbook picks up once Docker and the source are on the host.
 
 ## 2. Configure
 
@@ -886,7 +886,9 @@ git archive --format=tar HEAD -o /tmp/br0kr.tar && tar -tf /tmp/br0kr.tar >/dev/
   stale clone whose worktree still has the old one-file policy (under `core.autocrlf=true`) and every file CRLF-ifies
   again — on a commit that *contains* the fix. Trust the commit, not the checkout.
 - **`scp` the tar file — do not pipe it over ssh.** A binary stream through an interactive ssh pipe gets corrupted;
-  copy the file, then extract on the host (`tar -xf`, which leaves an existing `.env` in place).
+  copy the file, then extract on the host under a normal umask, `( umask 022; tar -xf ... )`, which leaves an
+  existing `.env` in place. A private umask (077) leaves the files containers mount unreadable to them, and
+  `deploy.sh` refuses such a tree.
 - **Preflight the artifact** before you ship it — one command, and it is the check that was missing:
 
 ```bash

@@ -32,10 +32,14 @@ git archive --format=tar v0.2.0 | ssh <deploy-host> 'cat > ~/br0kr-new.tar'
 tar -xOf ~/br0kr-new.tar docker/pg-standby-entrypoint.sh | grep -c $'\r'   # must print 0
 docker tag br0kr:local br0kr:rollback-<the version you are leaving>
 docker compose run --rm -e BACKUP_ONCE=1 ledger-backup                    # if the release adds a migration
-tar -xf ~/br0kr-new.tar -C ~/br0kr
+( umask 022; tar -xf ~/br0kr-new.tar -C ~/br0kr )                         # a normal umask: see below
 bash scripts/deploy.sh --check && bash scripts/deploy.sh                   # builds, migrates, waits for health
 ```
 
+- **Extract with a normal umask.** Containers read the files under `docker/` and `scripts/` as other users,
+  and every container start (a recreate, a restart, a reboot) reads them again. A release extracted under
+  `umask 077` leaves them 0600, and Caddy then crash-loops on "permission denied". `deploy.sh` and `--check`
+  refuse such a tree and name the first few paths; fix it at once with `chmod -R o+rX docker scripts`.
 - **The line-ending check** is there because a CRLF standby entrypoint once crash-looped the standby for 45 hours.
 - **The release that splits the compose network in two** (`ledger` and `edge`, review SEC-05; see its CHANGELOG
   entry) moves every container to the new networks, so its first deploy recreates all of them: both ledger nodes,
@@ -76,7 +80,7 @@ bash scripts/deploy.sh --check && bash scripts/deploy.sh                   # bui
     (`deploy.sh --check` checks it whenever it is set).
   - It needs a deployed release that has the service (this runbook's). Otherwise, run
     `docker compose exec -T pg-primary sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > <a file outside ~/br0kr>`
-    under `umask 077`.
+    in a subshell under `umask 077`, `( umask 077; ... )`, so the extract that follows keeps the default.
 - **If `migrate` fails on a lock timeout,** a scheduled dump was running: `pg_dump` holds a share lock on every
   table, and a migration waits only 10 s. Check `docker compose logs ledger-backup`, then run `deploy.sh` again.
 - **If `migrate` fails on CHECK `lease_live_has_vmid` (0052),** a PROVISIONING or ACTIVE lease lacks its vmid or
