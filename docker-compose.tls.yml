@@ -78,7 +78,7 @@ services:
   caddy:
     networks: [edge]   # no route to the ledger (review SEC-05): it reaches gateway, dashboard and oauth only
     # Pinned by digest (review SEC-02). Dependabot (docker-compose) proposes the bumps.
-    image: caddy:2.11.4@sha256:af5fdcd76f2db5e4e974ee92f96ee8c0fc3edb55bd4ba5032547cbf3f65e486d
+    image: caddy:2.11.7@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
     restart: unless-stopped
     # Caddy runs as root in its image to bind :443; that one capability is all it keeps (review SEC-02). Its
     # state is on the caddy-data / caddy-config volumes, which it owns.
