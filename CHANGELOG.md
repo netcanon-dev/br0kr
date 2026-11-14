@@ -118,6 +118,8 @@ resolve in this repository.
   more release, then goes (review UX-03).
 
 ### Fixed
+- **A node's cluster change can no longer race an admit onto that node.** `set_node` checks for leases and
+  repoints under the node's admission lock, so an admit lands before the check or after the repoint (REL-07).
 - **On Windows the DR-guard tests skip instead of failing** when `bash` only launches WSL; CI never skips them.
   Test-infra comments now match what runs, and the commented-out pre-commit hooks are gone (TEST-07).
 - **The OAuth shim drops a client that hung up mid-reply quietly.** A BrokenPipe while writing an error reply

@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import psycopg
 
-from br0kr import auth, build, db, imgbuild, lease, placement
+from br0kr import admission, auth, build, db, imgbuild, lease, placement
 from br0kr.logging_setup import canonicalize_url
 from br0kr.nodes import (
     valid_content_type,
@@ -419,11 +419,23 @@ def set_node(
     cluster binding would drift; see the inline note) — and while it holds an unfinished lease (queued, live or
     releasing) it is refused `node_has_live_leases` (review REL-07): the lease's guest and vmid belong to the old
     cluster, and a lease provisioned after the repoint would take the new one. Giving a cluster-less node its first
-    cluster is allowed (it holds no guest)."""
+    cluster is allowed (it holds no guest). The checks and the write run under the node's admission lock (the one
+    admit() takes for this node), so no admit can land between them; it needs a non-autocommit connection, as the
+    dashboard's action handler gives it (an autocommit one raises RuntimeError, as admit() does), the lock is held
+    until the caller commits, and waiting for it is bounded by a 10 s lock_timeout."""
     if pve_node is not None and not valid_pve_node(pve_node):
         return {"node_id": node_id, "updated": False, "reason": "invalid_pve_node"}
     if cluster_id is not None and not _exists(conn, "cluster", cluster_id):
         return {"node_id": node_id, "updated": False, "reason": "unknown_cluster"}
+    # Serialize with admission on this node: admit() and promote_pinned() take this same advisory lock before they
+    # debit the node, so an admit either commits before the lease check below (and is seen by it) or waits for this
+    # transaction and lands on the node as edited. The lock is taken by admission's own helper (the one place it
+    # locks), for the node scope alone, before any row lock, as admission orders its own.
+    if getattr(conn, "autocommit", False):
+        raise RuntimeError("set_node requires a NON-autocommit connection: the node's admission lock must span the "
+                           "lease check and the UPDATE, and an autocommit connection releases it at once")
+    conn.execute("SET LOCAL lock_timeout = '10s'")   # a stuck admit fails this edit instead of hanging it
+    admission._lock_scopes(conn.cursor(), node_id, None, None, ())
     # A cluster REPOINT while the node still hosts live template_instance rows would strand those instances'
     # cluster binding: their node_id points here, but the node would then belong to a DIFFERENT cluster. That is
     # the exact drift cross_node_clone's gate trusts is impossible — the placement pick would still admit a
@@ -441,8 +453,8 @@ def set_node(
     # pointing at the wrong one; and a queued or admitted lease on this node would be provisioned into the NEW
     # cluster after the fact. Refused for any unfinished lease, the predicate delete_node uses. Giving a
     # cluster-less node its FIRST cluster is allowed: a capacity-only node is never provisioned, so it holds no guest
-    # and its admitted leases simply become provisionable. (Check-then-update without a lock: an admit racing the
-    # repoint can land in the window; the CHECK still keeps every live lease's vmid and cluster present.)
+    # and its admitted leases simply become provisionable. The node's admission lock (above) closes the window an
+    # admit racing the repoint could otherwise land in.
     if cluster_id != noderow[0] and noderow[0] is not None and conn.execute(
             f"SELECT 1 FROM lease WHERE node_id = %s AND state NOT IN {_TERMINAL_IN} LIMIT 1",
             (node_id,)).fetchone() is not None:

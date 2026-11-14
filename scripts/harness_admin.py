@@ -19,7 +19,8 @@ unattended.
   E. INVENTORY CRUD: create/edit project/node/cluster/storage; duplicate + unknown-cluster refusals; and
      the cluster EDIT is read-modify-write (changing only pdm_endpoint keeps host/token via COALESCE).
   F. DELETE SEMANTICS: in-use refusal (node/storage referenced by a lease), a cluster delete and a node's
-     cluster repoint both refused while a live lease is on them (REL-07), demote-on-delete once it finished
+     cluster repoint both refused while a live lease is on them (REL-07), the repoint waiting on an admit that holds
+     the node's admission lock and then refusing on the lease it committed, demote-on-delete once it finished
      (cluster → nodes capacity-only, project → leases ungoverned), a node-capacity edit respected by the next admit,
      and the 0007 DB CHECK(>0) backstop on a non-positive node capacity.
 
@@ -29,6 +30,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import psycopg
@@ -205,9 +208,42 @@ def main() -> int:
     moved = _admin(lambda c: admin.set_node(c, "nX", cpu_total=16, mem_total_mb=8192, cluster_id="clZ"))
     check("set_node_repoint_refused_under_a_live_lease",
           moved["reason"] == "node_has_live_leases" and still == "clX", f"{moved} lease cluster={still}")
-    with connect() as c:   # the lease finishes; its history keeps the row
+    # The repoint takes the node's admission lock: an admit holding it (here: the lock, then an ADMITTED lease,
+    # committed after the repoint started) makes set_node WAIT, and on waking it sees that lease and refuses.
+    # Without the lock the repoint would read no lease and move the node under the admit.
+    with connect() as c:   # the live lease finishes first: no other unfinished lease on nX; its history keeps the row
         c.execute("UPDATE lease SET state = 'RELEASED' WHERE id = %s", (live,))
         c.commit()
+    admit = connect()
+    racer = None
+    out: dict = {}
+    try:
+        admit.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("node:nX",))
+        t = threading.Thread(daemon=True, target=lambda: out.update(_admin(
+            lambda c: admin.set_node(c, "nX", cpu_total=16, mem_total_mb=8192, cluster_id="clZ"))))
+        t.start()
+        waited = False   # proof the repoint is blocked: an ungranted advisory lock request shows up in pg_locks
+        with psycopg.connect(CONN, autocommit=True) as watch:
+            for _ in range(100):
+                if watch.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                                 ).fetchone()[0]:
+                    waited = True
+                    break
+                time.sleep(0.1)
+        racer = admit.execute("INSERT INTO lease(node_id,req_cpu,req_mem_mb,state) VALUES ('nX',1,512,'ADMITTED') "
+                              "RETURNING id").fetchone()[0]
+        admit.commit()
+        t.join(30)
+    finally:
+        admit.close()
+    with connect() as c:
+        node_cluster = c.execute("SELECT cluster_id FROM node WHERE id = 'nX'").fetchone()[0]
+        if racer is not None:
+            c.execute("UPDATE lease SET state = 'RELEASED' WHERE id = %s", (racer,))
+        c.commit()
+    check("set_node_repoint_waits_for_an_admit_and_sees_its_lease",
+          waited and out.get("reason") == "node_has_live_leases" and node_cluster == "clX",
+          f"waited={waited} out={out} node cluster={node_cluster}")
     _admin(lambda c: admin.delete_cluster(c, "clX"))   # deleting a cluster DEMOTES its nodes
     with connect() as c:
         demoted = c.execute("SELECT cluster_id FROM node WHERE id='nX'").fetchone()[0]

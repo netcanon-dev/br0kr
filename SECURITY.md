@@ -380,8 +380,9 @@ Name the residual, why it's accepted, and what would close it.
   colliding CREATE). The index is partial over rows with a vmid AND a cluster, so CHECK `lease_live_has_vmid`
   (migration `0052`, review REL-07) makes every PROVISIONING/ACTIVE lease carry both and the index cover every one
   (`scripts/harness_lease.py`, `live_lease_has_vmid`). While a lease on it is unfinished, `set_node` refuses to
-  repoint a node's cluster and `delete_cluster` to delete the cluster (`tests/unit/test_admin.py`,
-  `scripts/harness_admin.py`). Proven on real Postgres: `scripts/harness_vmid_race.py` (`run_harness.sh vmid_race`, GO
+  repoint a node's cluster, under the node's admission lock so an admit cannot slip in between, and
+  `delete_cluster` refuses to delete the cluster (`tests/unit/test_admin.py`, `scripts/harness_admin.py`).
+  Proven on real Postgres: `scripts/harness_vmid_race.py` (`run_harness.sh vmid_race`, GO
   14/14) — **8 concurrent provisions pinned to one vmid → exactly one ACTIVE, seven `vmid_contended`, one
   guest, zero double-allocation**; vmid reuse after a terminal lease; a RELEASING vmid is not reused;
   per-cluster scope (cross-node-same-cluster contends, cross-cluster reuses). Single-writer remains the

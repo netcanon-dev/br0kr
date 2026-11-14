@@ -234,6 +234,10 @@ class _Seq:
         """A RETURNING read: the queued result as a one-row list, or no rows."""
         return [] if self._cur is None else [self._cur]
 
+    def cursor(self) -> _Seq:
+        """A cursor on the same queued sequence (admission._lock_scopes takes one)."""
+        return self
+
 
 def test_create_node_refuses_unknown_cluster_without_writing():
     """A node create naming a cluster that doesn't exist is refused 'unknown_cluster' from the PRE-CHECK,
@@ -274,8 +278,8 @@ def test_set_node_coalesces_pve_node_and_rejects_a_bad_one():
     provisionable node into capacity-only — the edit-clears-a-field trap. It rejects a non-bare-hostname value
     `invalid_pve_node` too. Guards a node edit silently losing its driver, and the injection guard."""
     # current cluster None matches the requested None → no repoint, the node_has_instances guard is skipped; the
-    # noderow read pops first, then the UPDATE RETURNING id.
-    seq = _Seq((None,), ("nX",))
+    # lock_timeout and the node's admission lock pop first, then the noderow read, then the UPDATE RETURNING id.
+    seq = _Seq(None, None, (None,), ("nX",))
     out = admin.set_node(seq, "nX", cpu_total=8, mem_total_mb=4096, cluster_id=None, pve_node=None)
     assert out == {"node_id": "nX", "updated": True, "reason": None}
     assert any("COALESCE(%s, pve_node)" in s for s in seq.sqls)   # None = keep the existing in-cluster name
@@ -290,9 +294,10 @@ def test_set_node_refuses_a_cluster_repoint_while_the_node_hosts_instances():
     `node_has_instances` with NO UPDATE — else the instance's cluster binding drifts (node_id points here, but
     the node now belongs to a different cluster) and the cross_node_clone gate would admit a clone the daemon
     POSTs to the WRONG cluster's API (grant-then-kill). A capacity edit that leaves the cluster UNCHANGED skips
-    the guard (proven above). Query order: _exists(new cluster) → read current cluster → instance pre-check."""
-    # repoint c1 → c2 with an instance present: _exists(c2) truthy, current cluster c1, instance found → refuse.
-    repoint = _Seq(("c2",), ("c1",), (1,))
+    the guard (proven above). Query order: _exists(new cluster) → the node lock → read current cluster →
+    instance pre-check."""
+    # repoint c1 → c2 with an instance present: _exists(c2) truthy, the lock, current cluster c1, instance found.
+    repoint = _Seq(("c2",), None, None, ("c1",), (1,))
     out = admin.set_node(repoint, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
     assert out == {"node_id": "nX", "updated": False, "reason": "node_has_instances"}
     assert not any("UPDATE node" in s for s in repoint.sqls)   # the UPDATE never ran
@@ -1390,14 +1395,15 @@ def test_set_node_refuses_a_cluster_repoint_while_the_node_holds_unfinished_leas
     `node_has_live_leases` with NO UPDATE (review REL-07); with neither an instance nor such a lease the repoint
     goes through. Guards a live lease's guest, vmid and fence staying in the old cluster while the node moves (its
     teardown and the 0004 vmid uniqueness would then point at the wrong cluster), and a queued lease being
-    provisioned into the new one. Query order: _exists(new cluster) → current cluster → instances → leases."""
-    blocked = _Seq(("c2",), ("c1",), None, (1,))
+    provisioned into the new one. Query order: _exists(new cluster) → the node lock → current cluster → instances
+    → leases."""
+    blocked = _Seq(("c2",), None, None, ("c1",), None, (1,))
     out = admin.set_node(blocked, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
     assert out == {"node_id": "nX", "updated": False, "reason": "node_has_live_leases"}
     assert not any("UPDATE node" in s for s in blocked.sqls)
-    assert "FROM lease WHERE node_id = %s AND state NOT IN" in blocked.sqls[3]
-    assert all(f"'{s}'" in blocked.sqls[3] for s in ("RELEASED", "REJECTED", "RELEASE_FAILED"))
-    free = _Seq(("c2",), ("c1",), None, None, ("nX",))
+    assert "FROM lease WHERE node_id = %s AND state NOT IN" in blocked.sqls[5]
+    assert all(f"'{s}'" in blocked.sqls[5] for s in ("RELEASED", "REJECTED", "RELEASE_FAILED"))
+    free = _Seq(("c2",), None, None, ("c1",), None, None, ("nX",))
     assert admin.set_node(free, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")["updated"] is True
 
 
@@ -1405,7 +1411,7 @@ def test_set_node_gives_a_cluster_less_node_its_first_cluster_even_with_leases()
     """Assigning a cluster to a capacity-only node (current cluster NULL) skips the lease check: such a node is never
     provisioned, so it holds no guest whose cluster could drift, and its admitted leases simply become provisionable
     (review REL-07). Guards the new lease guard blocking the ordinary way a node is brought into service."""
-    seq = _Seq(("c2",), (None,), None, ("nX",))   # _exists(c2), current cluster NULL, no instances, the UPDATE
+    seq = _Seq(("c2",), None, None, (None,), None, ("nX",))   # _exists, timeout, lock, cluster NULL, none, UPDATE
     out = admin.set_node(seq, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
     assert out["updated"] is True
     assert not any("FROM lease" in s for s in seq.sqls)
@@ -1422,3 +1428,24 @@ def test_delete_cluster_refuses_while_unfinished_leases_are_on_it():
     assert not any("DELETE FROM cluster" in s for s in seq.sqls)
     assert "cluster_id = %s OR node_id IN (SELECT id FROM node WHERE cluster_id = %s)" in seq.sqls[2]
     assert "state NOT IN" in seq.sqls[2]
+
+
+def test_set_node_takes_the_nodes_admission_lock_before_reading_the_node():
+    """set_node takes the advisory lock admission takes for the node (`admission.scope_keys`, `node:<id>`), through
+    admission's own helper and under a lock_timeout, before it reads the node or checks for leases, and refuses an
+    autocommit connection (the lock would be released at once). Guards the check-then-repoint window the round-2
+    review of REL-07 named: an admit landing between the lease check and the UPDATE would be provisioned on a node
+    whose cluster just moved."""
+    from br0kr import admission
+    seq = _SeqP(("c2",), None, None, ("c1",), None, None, ("nX",))
+    admin.set_node(seq, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
+    sqls = [s for s, _ in seq.calls]
+    timeout = next(i for i, s in enumerate(sqls) if "lock_timeout" in s)
+    lock = next(i for i, s in enumerate(sqls) if "pg_advisory_xact_lock" in s)
+    first_read = next(i for i, s in enumerate(sqls) if "FROM node WHERE id" in s)
+    assert timeout < lock < first_read
+    assert seq.calls[lock][1] == (admission.scope_keys("nX", None)[0],) == ("node:nX",)
+    auto = _Seq(("c2",))
+    auto.autocommit = True
+    with pytest.raises(RuntimeError, match="NON-autocommit"):
+        admin.set_node(auto, "nX", cpu_total=8, mem_total_mb=4096, cluster_id="c2")
