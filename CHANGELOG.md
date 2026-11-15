@@ -17,6 +17,11 @@ resolve in this repository.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-14
+
+Fleet onboarding phase 2, part 2: an operator can move a live lease to another project's quota. No migration, so
+rolling back to 0.4.0 is an image swap; a lease already moved stays in its new project there.
+
 ### Added
 - **Move a lease to another project** (fleet onboarding phase 2): the dashboard hands a live lease to another
   project's quota under admission's locks, checked like a new request; usage follows it. `harness_records.py`.
@@ -3019,7 +3024,8 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `SECURITY.md` C6 + its residuals (vmid-reuse double-destroy needs per-VMID fencing; admission
   `idem_key` is inert while NULL). An adversarial multi-agent review of the lifecycle drove these.
 
-[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/netcanon-dev/br0kr/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/netcanon-dev/br0kr/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/netcanon-dev/br0kr/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/netcanon-dev/br0kr/compare/v0.2.1...v0.2.2
