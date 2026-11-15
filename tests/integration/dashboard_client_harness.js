@@ -1063,6 +1063,34 @@ const SCENARIOS = {
     await confirmYes();
     return { table, acts, form, held, created, ask, closed: posts(m) };
   },
+  async lease_move() {
+    const over = { ...OVERVIEW, leases: [LEASE(7, 'ACTIVE', 107, { movable: true, req_cpu: 2, req_mem_mb: 4096 }),
+      LEASE(8, 'RELEASING', 108, { movable: false, cancellable: false }),
+      LEASE(9, 'ACTIVE', 109, { project_id: null, movable: true })],
+      projects: [{ project_id: 'p1', cpu_available: 4, mem_mb_available: 8192 },
+        { project_id: 'p2', cpu_available: 8, mem_mb_available: 16384 },
+        { project_id: 'p3', cpu_available: 1, mem_mb_available: 2048 }] };
+    await boot({ token: 't', routes: { '/api/overview': ok(over),
+      '/api/lease/move': ok({ lease_id: 7, moved: false, reason: 'insufficient_project_mem', from_project_id: 'p1',
+        project_id: 'p3' }) } });
+    const acts = $('leases').querySelectorAll('button').map(b => b.getAttribute('data-act'));
+    await clickOn(buttonIn('leases', 'openMoveForm(7)'));
+    const form = $('form-slot').innerHTML;
+    run("document.getElementById('mv-project').value = 'p3'");
+    const n = calls.length;
+    await pressSave();
+    const refused = { posts: posts(n), err: $('form-err').textContent, open: $('form-slot').innerHTML !== '' };
+    routes['/api/lease/move'] = ok({ lease_id: 7, moved: true, reason: null, from_project_id: 'p1',
+      project_id: 'p2' });
+    run("document.getElementById('mv-project').value = 'p2'");
+    const m = calls.length;
+    await pressSave();
+    const moved = { posts: posts(m), slot: $('form-slot').innerHTML };
+    await clickOn(buttonIn('leases', 'openMoveForm(9)'));
+    const k = calls.length;
+    await pressSave();
+    return { acts, form, refused, moved, ungoverned: posts(k) };
+  },
   async toast_kinds_and_cap() {
     await boot({});
     run("for(let i = 0; i < 6; i++) notify('err ' + i, 'err'); notify('<b>done</b>', 'ok')");

@@ -251,6 +251,26 @@ def test_a_record_shows_what_it_stands_for_posts_a_hold_with_no_cpu_and_closes_b
     assert got["closed"] == [{"path": "/api/record/close", "body": {"lease_id": 30}}]
 
 
+def test_a_move_lists_the_other_projects_and_sends_the_project_the_page_saw(served_script: Path) -> None:
+    """Move is offered only on a lease the server marks movable (not one releasing). The form lists every project
+    but the lease's own and says what moves with it; a refusal keeps the form open with the server's reason in
+    words; a move posts the lease id, the project this page showed it in and the target, then closes. An
+    ungoverned lease posts from_project_id null. Guards a move offered on a lease that is ending, a page moving a
+    lease out of a project it no longer shows, and a refusal that silently closes the form."""
+    got = _run(served_script, "lease_move")
+    assert "openMoveForm(7)" in got["acts"] and "openMoveForm(9)" in got["acts"]
+    assert "openMoveForm(8)" not in got["acts"]
+    assert 'value="p2"' in got["form"] and 'value="p3"' in got["form"] and 'value="p1"' not in got["form"]
+    assert "A token of the old project can no longer see, renew or release it." in got["form"]
+    assert got["refused"]["posts"] == [{"path": "/api/lease/move", "body": {
+        "lease_id": 7, "from_project_id": "p1", "project_id": "p3"}}]
+    assert got["refused"]["open"] is True and "insufficient_project_mem" in got["refused"]["err"]
+    assert got["moved"]["posts"] == [{"path": "/api/lease/move", "body": {
+        "lease_id": 7, "from_project_id": "p1", "project_id": "p2"}}]
+    assert got["moved"]["slot"] == ""
+    assert [p["body"]["from_project_id"] for p in got["ungoverned"]] == [None]
+
+
 def test_the_status_region_is_text_only_capped_and_fades_successes(served_script: Path) -> None:
     """notify() writes textContent only (a server reason is never parsed as markup), keeps at most four
     messages (oldest dropped first), gives errors a close button, and schedules a success to fade. Guards an

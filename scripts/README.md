@@ -45,7 +45,7 @@ Each runs on a database of its own, so any of them can run at the same time as a
 |---------|--------|
 | `harness_admission.py` | Concurrent requests for the last slot: exactly one is admitted; retries are idempotent. |
 | `harness_project_quota.py` | Concurrent admits across many nodes race one tenant's budget and never exceed it. |
-| `harness_records.py` | Capacity-only records take admit's locks: records and admits racing one budget, or one guest recorded twice, get exactly one winner; a record is never expired, released or provisioned; closing frees it. |
+| `harness_records.py` | Capacity-only records and lease moves take admit's locks: records, moves and admits racing one budget, a move racing a pin for the last pin slot, or one guest recorded twice, get exactly one winner; a move survives a release or a project delete; a record is never expired, released or provisioned; closing frees it. |
 | `harness_schedule.py` | Concurrent cluster-wide placements fill a K-slot cluster with no double-book. |
 | `harness_queue.py` | Concurrent promoters drain a one-slot queue: exactly one admits, in FIFO order. |
 | `harness_vmid_race.py` | Reconcilers racing for one vmid never allocate it twice (fake PVE driver). |

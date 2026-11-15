@@ -36,8 +36,16 @@ from typing import Any
 
 import psycopg
 
-from br0kr import cloudinit, db, multidisk, placement, reasons, settings
-from br0kr.lease import CAPACITY_ONLY, LEASE, LIVE_STATES, data_disks_for, promote_to_admitted
+from br0kr import cloudinit, db, multidisk, pin, placement, reasons, settings
+from br0kr.lease import (
+    CAPACITY_ONLY,
+    LEASE,
+    LIVE_STATES,
+    PROVISIONED,
+    data_disks_for,
+    is_reserved_idem_key,
+    promote_to_admitted,
+)
 
 log = logging.getLogger(__name__)
 
@@ -294,6 +302,17 @@ class RecordResult:
     recorded: bool
     reason: str | None
     node_overcommitted: bool = False
+
+
+@dataclass(frozen=True)
+class MoveResult:
+    """Outcome of move_project(). `moved` True = the lease now belongs to the target project and counts against its
+    quota (and no longer against the source's). False with `reason` None: it was already in the target project, so
+    nothing changed (a retried move). False with a `reason`: refused, and the lease is where it was."""
+
+    lease_id: int
+    moved: bool
+    reason: str | None
 
 
 # ── Pure policy (no I/O; unit-tested in tests/unit/test_admission.py) ──────────
@@ -1148,6 +1167,87 @@ def record_existing(conn: psycopg.Connection[Any], *, node_id: str, project_id: 
         log.warning("record leaves node %s over its declared capacity: raise the node, or admits there wait",
                     node_id, extra={"lease_id": lease_id, "node": node_id})
     return RecordResult(lease_id, True, None, over)
+
+
+# ── Moves: a lease changes project (fleet onboarding, phase 2) ──────────────────────────────────────────────────
+_MOVE_PROJECT_ROW = "SELECT max_pinned FROM project WHERE id = %s FOR NO KEY UPDATE"
+_MOVE_LEASE_ROW = ("SELECT state, project_id, pinned, ownership, idem_key, req_cpu, req_mem_mb FROM lease "
+                   "WHERE id = %s FOR NO KEY UPDATE")
+_MOVE_UPDATE = "UPDATE lease SET project_id = %s WHERE id = %s"
+
+
+def move_project(conn: psycopg.Connection[Any], *, lease_id: int, from_project_id: str | None,
+                 project_id: str) -> MoveResult:
+    """Move a live lease to another project: from now on its memory, CPU and lease slot count against `project_id`'s
+    quota and no longer against its old project's, and its usage history is reported under the new project. Nothing
+    on the guest changes. `from_project_id` is the project the operator saw the lease in (None for an ungoverned
+    lease): a lease that has changed project since is refused, so a move is never applied on top of another one.
+
+    The target is a debit, so it takes the target's `project:` advisory lock (the scope admit() takes for it, so a
+    move and an admit race the target's last room with exactly one winner), then the target project's row and the
+    lease's row (FOR NO KEY UPDATE, in that order, the order pin.set_pinned and a project delete take). Under them:
+    unknown_project; unknown_lease; lease_queued (a queued request: cancel it and ask again under the new project);
+    lease_not_live; reserved_idem_key (a migration's or replication's reservation is internal); a lease already in
+    the target is answered moved False with no reason; lease_project_changed; the target's budget (project_shortfall,
+    the one rule admit() uses); and for a pinned lease br0kr built, a slot under the target's pin bound
+    (pin.room_reason). Records and adopted leases are pinned by schema and take no pin slot. The source needs no
+    lock: freeing a debit can only make a concurrent admit there see less room than there is, never more. Once it
+    has locked, it commits on every return, or rolls back and re-raises (a move with no target project returns
+    before any statement); REQUIRES a non-autocommit connection, like admit()."""
+    if getattr(conn, "autocommit", False):
+        raise RuntimeError(
+            "move_project requires a NON-autocommit connection: the target's advisory and row locks must span the "
+            "budget re-read + UPDATE."
+        )
+    if not isinstance(project_id, str) or not project_id:
+        log.info("move of lease %s refused (%s)", lease_id, reasons.MISSING_PROJECT_ID, extra={"lease_id": lease_id})
+        return MoveResult(lease_id, False, reasons.MISSING_PROJECT_ID)
+
+    def refuse(reason: str) -> MoveResult:
+        conn.commit()
+        log.info("move of lease %s refused (%s)", lease_id, reason,
+                 extra={"lease_id": lease_id, "project": project_id})
+        return MoveResult(lease_id, False, reason)
+
+    cur = conn.cursor()
+    try:
+        _lock_scopes(cur, None, None, project_id, ())
+        target = cur.execute(_MOVE_PROJECT_ROW, (project_id,)).fetchone()
+        if target is None:
+            return refuse(reasons.UNKNOWN_PROJECT)
+        row = cur.execute(_MOVE_LEASE_ROW, (lease_id,)).fetchone()
+        if row is None:
+            return refuse(reasons.UNKNOWN_LEASE)
+        state, now_in, pinned, ownership, idem_key, req_cpu, req_mem_mb = row
+        if state == "PENDING":
+            return refuse(reasons.LEASE_QUEUED)
+        if state not in LIVE_STATES:
+            return refuse(reasons.LEASE_NOT_LIVE)
+        if is_reserved_idem_key(idem_key):
+            return refuse(reasons.RESERVED_IDEM_KEY)
+        if now_in == project_id:
+            conn.commit()
+            return MoveResult(lease_id, False, None)
+        if now_in != from_project_id:
+            return refuse(reasons.LEASE_PROJECT_CHANGED)
+        budget = _project_avail(cur, project_id)
+        if budget is None:   # unreachable: the target's row is locked above
+            return refuse(reasons.UNKNOWN_PROJECT)
+        short = project_shortfall(float(req_cpu), int(req_mem_mb), *budget)
+        if short is not None:
+            return refuse(short)
+        if pinned and ownership == PROVISIONED:
+            no_room = pin.room_reason(conn, project_id, int(target[0]))
+            if no_room is not None:
+                return refuse(no_room)
+        cur.execute(_MOVE_UPDATE, (project_id, lease_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    log.info("lease %s moved from project %s to %s", lease_id, now_in, project_id,
+             extra={"lease_id": lease_id, "project": project_id, "from_project": now_in})
+    return MoveResult(lease_id, True, None)
 
 
 def headroom(conn: psycopg.Connection[Any], node_id: str) -> dict[str, Any] | None:

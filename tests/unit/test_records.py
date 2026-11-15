@@ -1,6 +1,8 @@
-"""Unit tests for capacity-only records (fleet onboarding, phase 2): admission.validate_record and
-admission.record_existing, the writer that holds capacity for a guest br0kr does not manage. The real-Postgres
-races (a record against an admit on the same project, two records of one guest) are in scripts/harness_records.py.
+"""Unit tests for capacity-only records and lease moves (fleet onboarding, phase 2): admission.validate_record,
+admission.record_existing (the writer that holds capacity for a guest br0kr does not manage), admission.move_project
+(the writer that hands a live lease to another project's quota) and the records verbs. The real-Postgres races (a
+record or a move against an admit on the same project, two records of one guest, a move against a pin) are in
+scripts/harness_records.py.
 """
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ import types
 import psycopg
 import pytest
 
-from br0kr import admission, lease, reasons
+from br0kr import admission, lease, pin, reasons
 
 pytestmark = pytest.mark.unit
 
@@ -299,3 +301,186 @@ def test_the_audit_predicates_record_what_changed_and_refuse_what_did_not():
     assert records.refused_record(refused) == (True, "record_exists")
     assert records.audit_close({"lease_id": 31, "closed": True, "reason": None}) == (True, "31")
     assert records.audit_close({"lease_id": 31, "closed": False, "reason": "not_a_record"})[0] is False
+
+
+# ── Moves ────────────────────────────────────────────────────────────────────────────────────────────────────────
+class _MoveConn:
+    """A fake NON-autocommit connection answering move_project's statements by SQL. `project_row` is the target's
+    locked row (max_pinned,), `lease_row` the lease's locked row (state, project, pinned, ownership, idem_key, cpu,
+    mem), `budget` the target's _PROJECT_AVAIL row and `live_pinned` the pin count; `update_raises` replaces the
+    UPDATE with an error."""
+
+    autocommit = False
+
+    def __init__(self, *, project_row=(2,), lease_row=("ACTIVE", "src", False, "provisioned", "k1", 2.0, 4096),
+                 budget=(8.0, 16384, 2, None, None, None), live_pinned=0, update_raises=None):
+        self.project_row, self.lease_row, self.budget = project_row, lease_row, budget
+        self.live_pinned, self.update_raises = live_pinned, update_raises
+        self.executed: list[tuple[str, tuple]] = []
+        self.commits = self.rollbacks = 0
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=()):
+        self.executed.append((sql, tuple(params)))
+        self._sql = sql
+        if sql == admission._MOVE_UPDATE and self.update_raises is not None:
+            raise self.update_raises
+        return self
+
+    def fetchone(self):
+        sql = self._sql
+        if "pg_advisory_xact_lock" in sql:
+            return (None,)
+        answers = {admission._MOVE_PROJECT_ROW: self.project_row, admission._MOVE_LEASE_ROW: self.lease_row,
+                   admission._PROJECT_AVAIL: self.budget, pin._LIVE_PINNED: (self.live_pinned,)}
+        if sql in answers:
+            return answers[sql]
+        raise AssertionError(f"unexpected statement: {sql.strip()[:70]}")
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def reads(self) -> list[str]:
+        named = {admission._MOVE_PROJECT_ROW: "project", admission._MOVE_LEASE_ROW: "lease",
+                 admission._PROJECT_AVAIL: "budget", pin._LIVE_PINNED: "pins", admission._MOVE_UPDATE: "update"}
+        return [("lock:" + p[0]) if "pg_advisory_xact_lock" in s else named[s] for s, p in self.executed]
+
+
+def _move(conn, **kw):
+    return admission.move_project(conn, **{"lease_id": 7, "from_project_id": "src", "project_id": "dst", **kw})
+
+
+def test_move_locks_only_the_target_then_its_row_then_the_lease_and_moves():
+    """move_project takes the target project's advisory lock (the scope an admit into it takes, so the two race its
+    last room with one winner), then the target's row and the lease's row, each FOR NO KEY UPDATE (the order a pin
+    and a project delete take), reads the target's budget, and moves the lease in one UPDATE and one commit. The
+    source takes no lock and no node is locked (a move changes no node). Guards a move debiting a project without
+    its lock, a lock order that could deadlock with a pin, and a FOR UPDATE that would block every admission's
+    foreign-key lock on the project."""
+    conn = _MoveConn()
+    assert _move(conn) == admission.MoveResult(7, True, None)
+    assert conn.reads() == ["lock:project:dst", "project", "lease", "budget", "update"]
+    assert next(p for s, p in conn.executed if s == admission._MOVE_UPDATE) == ("dst", 7)
+    assert "FOR NO KEY UPDATE" in admission._MOVE_PROJECT_ROW and "FOR NO KEY UPDATE" in admission._MOVE_LEASE_ROW
+    assert (conn.commits, conn.rollbacks) == (1, 0)
+
+
+@pytest.mark.parametrize("ownership,counted", [("provisioned", True), ("capacity_only", False), ("adopted", False)])
+def test_a_pinned_lease_needs_a_pin_slot_in_the_target_only_if_br0kr_built_it(ownership, counted):
+    """A pinned lease br0kr built takes a slot under the target's pin bound (pin.room_reason, read after the budget
+    under the target's row lock); a record or an adopted guest is pinned by schema, takes no slot and is not
+    counted. Guards a move that slips a pinned lease past the target's max_pinned, and one that refuses to move the
+    ledger VM's record because its pin is not the tenant's."""
+    conn = _MoveConn(lease_row=("ADMITTED", "src", True, ownership, None, 0.0, 6144), project_row=(0,))
+    res = _move(conn)
+    if counted:
+        assert res == admission.MoveResult(7, False, "pin_disabled")
+        assert "update" not in conn.reads()
+    else:
+        assert res == admission.MoveResult(7, True, None) and "pins" not in conn.reads()
+
+
+@pytest.mark.parametrize("max_pinned,live,reason", [(2, 2, "pinned_limit"), (2, 1, None)])
+def test_a_pinned_lease_moves_only_below_the_target_bound(max_pinned, live, reason):
+    """At the target's bound a pinned lease is refused pinned_limit and stays; below it, it moves. Guards the move
+    path reading a bound other than the one set_pinned enforces."""
+    conn = _MoveConn(lease_row=("ACTIVE", "src", True, "provisioned", "k1", 2.0, 4096), project_row=(max_pinned,),
+                     live_pinned=live)
+    assert _move(conn) == admission.MoveResult(7, reason is None, reason)
+    assert conn.reads()[-2:] == (["pins", "update"] if reason is None else ["budget", "pins"])
+
+
+@pytest.mark.parametrize("conn_kw,reason,last_read", [
+    ({"project_row": None}, "unknown_project", "project"),
+    ({"lease_row": None}, "unknown_lease", "lease"),
+    ({"lease_row": ("PENDING", "src", False, "provisioned", "k1", 2.0, 4096)}, "lease_queued", "lease"),
+    ({"lease_row": ("RELEASING", "src", False, "provisioned", "k1", 2.0, 4096)}, "lease_not_live", "lease"),
+    ({"lease_row": ("RELEASED", "src", False, "capacity_only", None, 2.0, 4096)}, "lease_not_live", "lease"),
+    ({"lease_row": ("ADMITTED", None, False, "provisioned", "br0kr-mig-3", 2.0, 4096)}, "reserved_idem_key",
+     "lease"),
+    ({"lease_row": ("ACTIVE", "other", False, "provisioned", "k1", 2.0, 4096)}, "lease_project_changed", "lease"),
+    ({"lease_row": ("ACTIVE", None, False, "provisioned", "k1", 2.0, 4096)}, "lease_project_changed", "lease"),
+    ({"budget": (1.0, 16384, 2, None, None, None)}, "insufficient_project_cpu", "budget"),
+    ({"budget": (8.0, 1024, 2, None, None, None)}, "insufficient_project_mem", "budget"),
+    ({"budget": (8.0, 16384, 0, None, None, None)}, "project_lease_limit", "budget"),
+])
+def test_move_refusals_name_their_reason_and_change_nothing(conn_kw, reason, last_read):
+    """Each refusal stops at the read that decides it, names its reason, updates nothing and commits once (ending
+    the transaction and its locks): an unknown target or lease, a queued request, a lease that has ended, an
+    internal reservation, a lease no longer in the project the operator saw (moved, or its project deleted), and a
+    target without the CPU, memory or lease slot it needs. Guards a move applied over another move, a reservation
+    handed to a tenant, and a move that overfills its target."""
+    conn = _MoveConn(**conn_kw)
+    assert _move(conn) == admission.MoveResult(7, False, reason)
+    assert conn.reads()[-1] == last_read and (conn.commits, conn.rollbacks) == (1, 0)
+
+
+def test_a_lease_already_in_the_target_is_not_moved_and_not_refused():
+    """A lease already in the target project (a retried move) is answered moved False with no reason, after the
+    locked read and before any budget read: nothing changes and nothing counts twice. Guards a retry being refused,
+    or the lease counted against its own project's room."""
+    conn = _MoveConn(lease_row=("ACTIVE", "dst", False, "provisioned", "k1", 2.0, 4096))
+    assert _move(conn) == admission.MoveResult(7, False, None)
+    assert conn.reads() == ["lock:project:dst", "project", "lease"] and conn.commits == 1
+
+
+def test_an_ungoverned_lease_moves_into_a_project():
+    """A lease with no project (from_project_id None) is moved into one, under that project's budget. Guards the
+    one way an operator brings an ungoverned lease under a quota."""
+    conn = _MoveConn(lease_row=("ACTIVE", None, False, "provisioned", "k1", 2.0, 4096))
+    assert _move(conn, from_project_id=None) == admission.MoveResult(7, True, None)
+
+
+@pytest.mark.parametrize("target", [None, ""])
+def test_a_move_without_a_target_project_reads_nothing(target):
+    """A move needs a target project (no lease is moved out of every quota): missing_project_id before any lock or
+    read. Guards a move that makes a governed lease ungoverned."""
+    conn = _MoveConn()
+    assert _move(conn, project_id=target) == admission.MoveResult(7, False, "missing_project_id")
+    assert conn.executed == [] and conn.commits == 0
+
+
+def test_move_refuses_an_autocommit_connection_and_rolls_back_an_error():
+    """On an autocommit connection every statement would commit and drop the target's locks before the UPDATE, so
+    the writer refuses it. A statement that raises is rolled back (freeing the locks) and re-raised. Guards a move
+    racing an admit for the target's last room with no lock held."""
+    conn = _MoveConn()
+    conn.autocommit = True
+    with pytest.raises(RuntimeError, match="NON-autocommit"):
+        _move(conn)
+    boom = _MoveConn(update_raises=psycopg.errors.QueryCanceled("cancelled"))
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        _move(boom)
+    assert (boom.commits, boom.rollbacks) == (0, 1)
+
+
+def test_move_verb_passes_the_ask_through_and_shapes_the_answer(monkeypatch):
+    """records.move calls admission.move_project with the operator's ask unchanged and answers {lease_id, moved,
+    reason, from_project_id, project_id}, the source kept so the audit row says where the lease was. Guards the verb
+    adding a gate of its own (the writer is the one authority)."""
+    seen = {}
+
+    def fake(conn, **kw):
+        seen.update(kw)
+        return admission.MoveResult(25, True, None)
+    monkeypatch.setattr(admission, "move_project", fake)
+    out = records.move(object(), lease_id=25, from_project_id="old", project_id="new")
+    assert seen == {"lease_id": 25, "from_project_id": "old", "project_id": "new"}
+    assert out == {"lease_id": 25, "moved": True, "reason": None, "from_project_id": "old", "project_id": "new"}
+
+
+def test_the_move_predicates_audit_a_move_and_refuse_only_a_refusal():
+    """A move is audited under its lease id and is not a refusal; a refused move is a refusal with its reason and
+    is not audited; a lease already in the target is neither. Guards a retried move flooding the refusal trail."""
+    moved = {"lease_id": 25, "moved": True, "reason": None}
+    refused = {"lease_id": 25, "moved": False, "reason": "insufficient_project_mem"}
+    already = {"lease_id": 25, "moved": False, "reason": None}
+    assert records.audit_move(moved) == (True, "25") and records.refused_move(moved) == (False, None)
+    assert records.audit_move(refused) == (False, None)
+    assert records.refused_move(refused) == (True, "insufficient_project_mem")
+    assert records.audit_move(already) == (False, None) and records.refused_move(already) == (False, None)

@@ -79,6 +79,7 @@ SURFACES: tuple[Surface, ...] = (
     Surface("a project's pinned-lease limit", None, "/api/project/max-pinned", SETUP),
     Surface("record a guest br0kr does not manage", None, "/api/record/create", SETUP),
     Surface("close a record", None, "/api/record/close", SETUP),
+    Surface("move a lease to another project", None, "/api/lease/move", SETUP),
     # the fleet
     Surface("the nodes", "list_nodes", "/api/nodes"),
     Surface("a node's capacity", "node_capacity", "/api/nodes"),

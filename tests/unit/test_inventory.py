@@ -350,6 +350,7 @@ def test_lease_row_shapes_active_lease_and_derives_action_flags():
     assert reservation["cancellable"] is False and reservation["renewable"] is False
     assert reservation["migratable"] is False
     assert reservation["pinnable"] is False
+    assert reservation["movable"] is False   # an internal reservation is never handed to a project
 
     # 0049: a pinned lease keeps cancel (release still ends it) and its pin toggle, but offers no renew.
     pinned = inventory._lease_row((16, "team-a", "n1", "clA", "ACTIVE", Decimal("2"), 2048, None, 0,
@@ -362,8 +363,10 @@ def test_lease_row_offers_a_record_only_close_and_says_what_it_stands_for():
     """A lease br0kr did not build (0055) offers none of the guest actions: a capacity-only record is not
     cancellable, renewable, pinnable or migratable, and is `closable` (dashboard Close record) while ADMITTED; an
     adopted ACTIVE guest is not closable either. The row carries ownership, guest kind, observed vmid and label, and
-    a provisioned lease says so and is never closable. Guards the dashboard offering cancel on the ledger VM's
-    record (lease.release would refuse it, lease_protected) or no way to close a record."""
+    a provisioned lease says so and is never closable. Every live lease that is not a reservation is `movable`
+    (dashboard Move), a RELEASING one is not. Guards the dashboard offering cancel on the ledger VM's record
+    (lease.release would refuse it, lease_protected), no way to close a record, or a Move on a lease that is
+    ending."""
     rec = inventory._lease_row((21, "infra", "peer", None, "ADMITTED", Decimal("0"), 6144, None, 0, None, None,
                                 None, 1.0, 900.0, False, True, "capacity_only", "qemu", 9950, "failover hold"))
     assert (rec["ownership"], rec["guest_kind"], rec["observed_vmid"], rec["label"]) == (
@@ -376,6 +379,12 @@ def test_lease_row_offers_a_record_only_close_and_says_what_it_stands_for():
     prov = inventory._lease_row((23, "t", "n1", "clA", "ADMITTED", Decimal("1"), 512, None, 0, None, None, None,
                                  1.0, 900.0, False, False, *_PROV))
     assert prov["ownership"] == "provisioned" and prov["closable"] is False and prov["cancellable"] is True
+    # Any live lease that is not a reservation moves between projects, whoever built its guest; a lease on its
+    # way out does not.
+    assert rec["movable"] is True and adopted["movable"] is True and prov["movable"] is True
+    leaving = inventory._lease_row((24, "t", "n1", "clA", "RELEASING", Decimal("1"), 512, None, 0, 1500, None,
+                                    None, 1.0, None, False, False, *_PROV))
+    assert leaving["movable"] is False
 
 
 def test_pinned_count_and_admit_wait_count_only_leases_br0kr_built():

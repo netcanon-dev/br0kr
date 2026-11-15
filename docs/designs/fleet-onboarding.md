@@ -4,7 +4,7 @@ br0kr was built to own every guest it knows about: it clones the guest, fences i
 it down when the lease ends. A real cluster also runs guests br0kr did not build and must never destroy: a storage
 server, a reverse proxy, a media container, br0kr's own ledger VM. To count them, br0kr needs to record them without
 ever being able to stop or delete them. This page is that design. Its first phase, the **never-destroy floor**, is
-built, and so are the records of phase 2 (section 3). The later phases are planned and not built yet.
+built, and so is phase 2, records and moves (section 3). The later phases are planned and not built yet.
 
 See also: [pinned leases](pinned-lease.md) (the pin every recorded guest carries), [runtime.md §2](runtime.md#2-provisioning-and-teardown)
 (teardown and the orphan sweep), [storage and network discovery](storage-network-discovery.md) (node-scoped pools,
@@ -85,7 +85,7 @@ before PDM migration is enabled.
 Protection on the host is required before an adoption (phase 5 refuses an unprotected guest), so every adopted guest
 has all three layers.
 
-## 3. Records (built, phase 2)
+## 3. Records and moves (built, phase 2)
 
 An operator records a guest br0kr does not manage with the dashboard's **+ record existing guest** (Active leases),
 `POST /api/record/create`: the node it runs on, the project that pays for it, its kind (VM or container), its
@@ -112,12 +112,42 @@ RELEASED edge, ledger-only, and stamps `releasing_at` so usage history counts th
 record when its guest is gone or moves; a node with an open record cannot be deleted. Both actions are audited.
 Proven on real Postgres by `scripts/harness_records.py`.
 
+### Moves (built, phase 2)
+
+An operator hands a live lease to another project with the dashboard's **move** (Active leases), `POST
+/api/lease/move`: the lease, the project the page shows it in, and the target. Any live lease moves, whoever built
+its guest (a record, an adopted guest, a lease br0kr provisioned); a queued request, a lease that has ended and an
+internal reservation do not. No agent tool moves one: a tenant never hands its lease to another tenant.
+
+`admission.move_project` is the second admission writer of this phase. It takes the target's `project:` advisory
+lock (the one an admit into that project takes), then the target's project row and the lease's row (FOR NO KEY
+UPDATE, the order a pin and a project delete take), and under them:
+
+- **The target's budget is checked like a new request** (`project_shortfall`, the rule `admit()` uses), so a move
+  and a request race the target's last room with exactly one winner. The source is freed without its lock: an
+  admit there can only see less room than there is for a moment, never more.
+- **A pinned lease br0kr built needs a pin slot in the target** (`pin.room_reason`, the bound `set_pinned` uses).
+  A record or an adopted guest is pinned by schema and takes none.
+- **The page's view is checked.** The request names the project the operator saw the lease in; a lease that has
+  moved since (or whose project was deleted) is refused `lease_project_changed`. A lease already in the target
+  answers `moved` false with no reason, so a retry changes nothing.
+- **What follows the lease:** its quota debit, its usage history (reported by the lease's current project,
+  decision: usage follows a moved lease), and access: a token of the old project can no longer see, renew or
+  release it, and a retry of the original request from there is an `idem_key_conflict`. What the move does not
+  take back: the guest keeps the SSH key and login it was built with, and the lease keeps its template even if the
+  target has no grant on it (an ADMITTED one still clones it). The move is audited with the source project in its
+  params (best-effort, like every audit row; the INFO log line names both projects too).
+- **A pin in flight.** A tenant's `request_lease` with pinned=true pins its new lease just after admission; an
+  operator who moves that lease in that gap makes the pin answer `lease_project_changed`, and the new lease is
+  released (`pin_refused`), the rule for a pin lost after admission.
+
+Proven on real Postgres by `scripts/harness_records.py` (the target's last slot, two-way moves under admits, the
+pin bound against a racing pin, a release and a project delete during a move, and usage after a move).
+
 ## 4. Later phases (planned, not built)
 
 Each is a few small PRs, in this order:
 
-2. **Moves.** Moving a lease between projects (`move_project`), a second admission writer under the scope locks:
-   the target project's budget is checked like a new request, and the lease's usage history moves with it.
 3. **See the real allocation.** Every 5 minutes the daemon reads every guest and node from Proxmox into report-only
    tables, with a metric and an alert for guests br0kr does not account for. It never writes capacity.
 4. **Same-name pools.** A pool that is not shared becomes one row per node (`pool@node`), each reached by exactly one

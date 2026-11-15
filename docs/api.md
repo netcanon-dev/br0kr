@@ -455,6 +455,7 @@ recorded in the audit log.
 | `/api/instance/delete` | Delete a template-instance ROW (never the physical guest). |
 | `/api/instance/retire` | Retire a READY/REPLICATING instance → RETIRED (excluded from uniqueness + 0033 usability, so a fresh copy can be materialised in its place — stale content is never immortal). |
 | `/api/lease/create` | Provision a VM on behalf of `project_id` (act-as), debiting THAT project's real quota through the proven admission path. |
+| `/api/lease/move` | Move a live lease to another project: its memory, CPU and lease slot count against `project_id`'s quota from now on, and its usage history is reported there. |
 | `/api/lease/pin` | Pin or unpin a live lease. |
 | `/api/lease/release` | Release a lease (normal completion). |
 | `/api/lease/renew` | Heartbeat a lease to push its TTL out — OR hold your place in the admission QUEUE (a PENDING lease's renewable spot, capped at its max-wait ceiling). |

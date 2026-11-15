@@ -277,6 +277,25 @@ new VMs are not placed into that memory ([designs/fleet-onboarding.md](../design
 A record is never destroyed, expired or migrated, and its guest is never stopped. Do not roll back past migration
 0055 once a record exists (the table above).
 
+## Move a lease to another project
+
+A lease counts in its project's quota. To hand it to another project (a guest that belongs to another team, or a
+record filed under the wrong project): Active leases, **move** on its row, pick the new project. Any live lease
+moves, a record or an adopted guest too. The guest is not touched.
+
+1. **Make room in the target.** The move is checked like a new request of the same size: raise the target's quota
+   first if it is refused `insufficient_project_*` or `project_lease_limit`. A pinned lease br0kr built also needs
+   a free pin slot there (`pinned_limit`, `pin_disabled`: raise its pin limit on the project card); a record or an
+   adopted guest does not.
+2. **Tell the old project's users.** Their token can no longer see, renew or release the lease. A lease that is not
+   pinned still needs renewing: from the new project's token, or **renew** on the dashboard. They keep any SSH
+   access the guest was built with: remove their key in the guest if they should lose it.
+3. **If it is refused `lease_project_changed`,** someone moved the lease (or deleted its project) since the page
+   loaded: wait for the refresh and check where it is before trying again.
+
+Its usage history moves with it (the Tenancy tab reports a lease under its current project). The audit trail keeps
+the project it came from.
+
 ## Re-clone a dead standby
 
 A standby whose WAL the primary has recycled cannot catch up (`Br0krLedgerSlotLost`), nor can one whose slot is gone.

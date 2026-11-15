@@ -362,8 +362,8 @@ def _lease_row(row: tuple[Any, ...]) -> dict[str, Any]:
     column → a JSON string, never a raw IPv4Address). `ownership` (0055) says who built the guest; a lease br0kr
     did not build (adopted, or a capacity-only record of a guest br0kr does not manage, with `guest_kind`,
     `observed_vmid` and `label` saying what it stands for) offers none of those actions, and a record is
-    `closable` (dashboard Close record) while it holds capacity. Pure, so the table render is testable without a
-    DB."""
+    `closable` (dashboard Close record) while it holds capacity. `movable` (dashboard Move, any ownership) = a live
+    lease that is not a reservation. Pure, so the table render is testable without a DB."""
     (lid, project_id, node_id, cluster_id, state, req_cpu, req_mem_mb, storage_id, req_disk_gb,
      vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned,
      ownership, guest_kind, observed_vmid, label) = row
@@ -388,6 +388,7 @@ def _lease_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "ownership": ownership, "guest_kind": guest_kind,
         "observed_vmid": None if observed_vmid is None else int(observed_vmid), "label": label,
         "closable": ownership == lease.CAPACITY_ONLY and state == "ADMITTED",
+        "movable": lease.is_releasable(state) and not reservation,
     }
 
 

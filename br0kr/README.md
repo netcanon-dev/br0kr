@@ -11,8 +11,9 @@ ledger or acts on Proxmox, and what proves it.
 
 - **The race-critical seam is `admission.py`.** Every capacity grant is made there, under the scope advisory locks;
   `admit()` and `promote_pinned()` share one locked core, and `record_existing()` (an operator's capacity-only record
-  of a guest br0kr does not manage, `records.py`) takes the same locks. Capacity is freed only by the guarded-CAS
-  transitions in `lease.py`; a record's only way out is `lease.close_record`.
+  of a guest br0kr does not manage, `records.py`) and `move_project()` (a lease handed to another project's quota)
+  take admit's locks for the scopes they debit. Capacity is freed only by the guarded-CAS transitions in `lease.py`; a record's only way out
+  is `lease.close_record`.
 - **The leader daemon is the only writer to Proxmox.** `daemon.py`, elected by `leader.py`, runs the tick: the step
   table in `tick_steps.py`, whose steps live in the `tick_*.py` modules and drive `reconciler.py`, `reaper.py`,
   `sweeper.py` and the job modules, all through `pve.py`'s fenced driver, which the engine is typed against
@@ -27,9 +28,8 @@ ledger or acts on Proxmox, and what proves it.
 1. Put the capability in a new file whose docstring opens with one line on what the file is.
 2. Wire it where inputs are dispatched: a row in `verbs.py` for an MCP tool (below), a route in `dashboard.py` or
    an `_ACTIONS` row in `dashboard_actions.py` (below), or a row in `tick_steps.STEPS` (below).
-3. If it grants capacity, it calls `admission.admit()`, `promote_pinned()` or `record_existing()` and adds no debit
-   of its own; if it
-   changes a lease's state, it calls a `lease.py` transition.
+3. If it grants capacity, it calls `admission.admit()`, `promote_pinned()`, `record_existing()` or
+   `move_project()` and adds no debit of its own; if it changes a lease's state, it calls a `lease.py` transition.
 4. Add its row to the module map; `tests/unit/test_architecture_doc.py` fails until you do.
 5. In the same commit: a unit test for the pure parts, and a real-Postgres harness (`scripts/harness_<name>.py`) for
    anything that locks or races.

@@ -234,6 +234,8 @@ const REASON_HINT = {
   invalid_observed_vmid: "enter the guest's Proxmox vmid (100 or more)",
   invalid_label: 'enter a one-line label of 1 to 200 characters',
   not_a_record: 'this lease is not a record: br0kr built or adopted its guest, so end it through its own action',
+  lease_project_changed: 'the lease is no longer in the project this page showed (it was moved, or its project '
+    + 'deleted); wait for the page to refresh and try again',
   already_terminal: 'it has already ended',
   already_revoked: 'it was already revoked',
   already_granted: 'that project already has access',
@@ -522,6 +524,38 @@ function closeRecord(id){
     if(r.ok && r.data && r.data.closed){ poll(); return; }
     notify('Close failed: ' + why(r), 'err');
   }, false, 'Close record');
+}
+// A move hands a live lease to another project's quota. The page sends the project it shows the lease in, so the
+// server refuses (lease_project_changed) if the lease moved since this page last refreshed.
+let moveCtx = null;
+function openMoveForm(id){
+  if(paused) return;
+  const l = ((DATA && DATA.leases) || []).find(x => x.lease_id === id);
+  if(!l) return;
+  const others = ((DATA && DATA.projects) || []).filter(p => p.project_id !== l.project_id);
+  if(!others.length){ notify('There is no other project to move it to: create one on the Tenancy tab first.', 'info');
+    return; }
+  paused = true;
+  moveCtx = {lease_id:id, from:l.project_id == null ? null : l.project_id};
+  const opts = others.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)} — `
+    + `${p.cpu_available != null ? p.cpu_available : '?'} cpu / `
+    + `${p.mem_mb_available != null ? gib(p.mem_mb_available) : '?'} GiB free</option>`).join('');
+  const what = l.label ? '“' + esc(l.label) + '”' : 'lease ' + (+id);
+  openDialog(`<div class="form" style="max-width:560px"><h3>Move ${what} to another project</h3>
+    <p class="banner">From <b>${l.project_id ? esc(l.project_id) : 'no project'}</b>: its ${+l.req_cpu} CPU and
+      ${gib(l.req_mem_mb)} GiB count against the new project's quota from now on, and its usage history moves with
+      it. The guest itself is not touched. A token of the old project can no longer see, renew or release it.</p>
+    <label class="ff"><span>New project</span><select id="mv-project">${opts}</select></label>
+    <div class="erow"><button class="act" data-act="submitMove()">move lease</button>
+    <button class="act ghost" data-act="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`);
+}
+async function submitMove(){
+  if(!moveCtx) return;
+  const r = await postJSON('/api/lease/move', {lease_id:moveCtx.lease_id, from_project_id:moveCtx.from,
+    project_id:$('mv-project').value});
+  if(r.ok && r.data && (r.data.moved || !r.data.reason)){ moveCtx = null; closeForm(); return; }
+  $('form-err').textContent = why(r);
 }
 function setTemplateDisk(i){
   // phase A4.2: open a modal to set/clear a project's template-disk ceiling (GiB). Blank = disable downloads.
@@ -2193,6 +2227,7 @@ function renderLeases(){
       if(canEdit && l.pinnable)    ops += ab(l.pinned ? 'unpinLease' : 'pinLease', l.pinned ? 'unpin' : 'pin');
       if(canEdit && l.cancellable) ops += ab('cancelLease', 'cancel', hasVm(l) || mayGetVm(l));   // a VM goes
       if(canEdit && l.migratable)  ops += ab('openMigrateForm', 'migrate');
+      if(canEdit && l.movable)     ops += ab('openMoveForm', 'move');
       if(canEdit && l.closable)    ops += ab('closeRecord', 'close record');   // re-recordable: not red
       opcell = ops;
     }
@@ -2861,11 +2896,12 @@ const ACTS = {
   deleteNetwork, editItem, enterLeaseSelect, exitLeaseSelect, exportAudit, forceFailBuild, forceFailReplication, goTo,
   leaseDetail, loadAudit, loadMoreAudit, loadOperators, loadTokens, loadUsage, lock, openBindForm, openBridgesForm,
   openContentForm, openCreateVM, openDismissForm, openDownloadForm, openForm, openGrantForm, openMigrateForm,
-  openNetworkForm, openOperatorForm, openPlacementForm, openRecordForm, openReplicateForm, openReplicatePrune, openSourceForm,
+  openMoveForm, openNetworkForm, openOperatorForm, openPlacementForm, openRecordForm, openReplicateForm,
+  openReplicatePrune, openSourceForm,
   openStorageNodeAdd, openStoragePair, openTemplateNetForm, openTenantDownload, openTokenForm, pinLease, reloadFleet,
   recordHoldChanged, renewLease, replClusterChanged, retireInstance, revokeGrant, revokeOperator, revokeToken, setMaxPinned, setTab,
   setTemplateDisk, setTokenExpiry, submitBind, submitContent, submitCreateVM, submitDismiss, submitDownload,
-  submitForm, submitGrant, submitMaxPinned, submitMigrate, submitNetwork, submitOperator, submitPlacement,
+  submitForm, submitGrant, submitMaxPinned, submitMigrate, submitMove, submitNetwork, submitOperator, submitPlacement,
   submitRecord, submitReplicate, submitReplicatePrune, submitSettings, submitSource, submitStorageNodeAdd, submitTemplateDisk,
   submitTemplateNet, submitTenantDownload, submitToken, submitTokenExpiry, syncNever, toggleCordon, toggleSourceDirty,
   unlock, unpinLease, selectText

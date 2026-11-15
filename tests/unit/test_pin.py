@@ -80,6 +80,33 @@ def test_set_pinned_refuses_what_it_cannot_pin(conn: _Conn, reason: str):
     assert not any(s.startswith("UPDATE") for s in conn.sql)
 
 
+@pytest.mark.parametrize(("locked_project", "reason"), [("q", "lease_project_changed"), (None, "pin_needs_project")])
+def test_a_pin_whose_lease_changed_project_under_it_names_why(locked_project: str | None, reason: str):
+    """The first read finds the lease in project p and the pin locks p's row; if the locked lease row then names
+    another project (a move landed in between), the pin is refused lease_project_changed, and if it names none (p
+    was deleted), pin_needs_project. Nothing is counted or updated. Guards a pin counted against the bound of a
+    project the lease has left, and a moved lease being told it has no project."""
+    c = _Conn({"SELECT project_id FROM lease": ("p",),
+               "FROM project WHERE id = %s FOR NO KEY UPDATE": (2,),
+               "SELECT state, pinned, project_id, ownership FROM lease": ("ACTIVE", False, locked_project,
+                                                                          lease.PROVISIONED)})
+    out = pin.set_pinned(c, 7, pinned=True)
+    assert out == {"lease_id": 7, "pinned": False, "updated": False, "reason": reason}
+    assert not any("AND pinned AND state IN" in s or s.startswith("UPDATE") for s in c.sql)
+
+
+@pytest.mark.parametrize(("max_pinned", "live_pinned", "reason", "counted"), [
+    (0, 0, "pin_disabled", False), (2, 2, "pinned_limit", True), (2, 1, None, True)])
+def test_room_reason_is_the_one_pin_bound_check(max_pinned: int, live_pinned: int, reason: str | None,
+                                                counted: bool):
+    """room_reason answers pin_disabled for a bound of 0 without counting, pinned_limit at the bound, and None
+    below it, counting only the project's live pins of leases br0kr built. set_pinned and admission.move_project
+    both call it under the project's row lock. Guards the two writers drifting to two different bounds."""
+    c = _Conn({"AND pinned AND state IN": (live_pinned,)})
+    assert pin.room_reason(c, "p", max_pinned) == reason
+    assert [s for s in c.sql if "AND pinned AND state IN" in s] == ([pin._LIVE_PINNED] if counted else [])
+
+
 def test_set_pinned_refuses_an_autocommit_connection():
     """set_pinned needs a transaction: on an autocommit connection every statement would commit and drop the
     project row lock before the count it guards, so it refuses instead. Guards a future caller silently losing

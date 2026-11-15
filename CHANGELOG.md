@@ -17,6 +17,10 @@ resolve in this repository.
 
 ## [Unreleased]
 
+### Added
+- **Move a lease to another project** (fleet onboarding phase 2): the dashboard hands a live lease to another
+  project's quota under admission's locks, checked like a new request; usage follows it. `harness_records.py`.
+
 ## [0.4.0] — 2026-11-14
 
 Fleet onboarding phase 2, part 1: an operator can record a guest br0kr does not manage, so admission counts its

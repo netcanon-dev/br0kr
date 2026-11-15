@@ -779,9 +779,10 @@ def test_the_lock_and_capacity_reads_live_only_in_the_shared_core():
     node, storage and project capacity reads, the governance read, placement and shortfall() each run from one
     function (_locked_fit); the raw advisory-lock statement appears only in _lock_scopes. admit() and
     promote_pinned() reference none of them directly. The only other capacity reads are the read-only headroom
-    APIs the gateway answers "what can I ask for?" with, and record_existing (a record debits a node and a project
-    and no pool, and reads its project through the same _project_avail). Guards a future edit inlining a lock, a capacity read or
-    a fit step back into one twin, which is how the two copies drifted before (review ARCH-01)."""
+    APIs the gateway answers "what can I ask for?" with, record_existing (a record debits a node and a project and
+    no pool) and move_project (a move debits only its target project); both read the project through the same
+    _project_avail. Guards a future edit inlining a lock, a capacity read or a fit step back into one twin, which
+    is how the two copies drifted before (review ARCH-01)."""
     import ast
     import inspect
     tree = ast.parse(inspect.getsource(admission))
@@ -802,7 +803,7 @@ def test_the_lock_and_capacity_reads_live_only_in_the_shared_core():
     assert users["_STORAGE_AVAIL"] == {"_locked_fit"}
     assert users["_NODE_AVAIL"] == {"_locked_fit", "headroom", "record_existing"}
     assert users["_PROJECT_AVAIL"] == {"_project_avail", "project_headroom"}
-    assert users["_project_avail"] == {"_locked_fit", "record_existing"}
+    assert users["_project_avail"] == {"_locked_fit", "record_existing", "move_project"}
     assert users["_TEMPLATE_GOVERNED"] == users["shortfall"] == users["resolve_placement"] == {"_locked_fit"}
 
 

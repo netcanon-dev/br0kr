@@ -235,10 +235,14 @@ Answered to an operator token; listed because they share the request path's modu
 | `node_unroutable` | operator `detect_template_bridge` (`reason`, plus `node_id`) | This gateway has no PVE driver for the instance's node, usually because its environment lacks the PVE token secret. | Ask the operator for the `gateway-operator` endpoint, the gateway that carries the PVE token, and call it there. | Serve operator tools from `gateway-operator` with `PVE_TOKEN_SECRET` set (operator-tier.md, "Which gateway serves the operator tools"). |
 | `no_bridge_on_net0` | operator `detect_template_bridge` (`reason`, plus `vmid`) | The READY instance's live PVE config has no net0 device, or its net0 carries no `bridge=` token. | Do not retry: the template has no bridged net0 to report. | Check `qm config <vmid>` on the node; give the template a bridged net0, or set its logical network directly (`POST /api/template/network`). |
 
-### Records (dashboard only)
+### Records and moves (dashboard only)
 
-Answered to an operator recording or closing a capacity-only record: memory and CPU held for a guest br0kr does not
-manage (docs/designs/fleet-onboarding.md). No agent tool records or closes one.
+Answered to an operator recording or closing a capacity-only record (memory and CPU held for a guest br0kr does
+not manage), or moving a lease to another project (docs/designs/fleet-onboarding.md). No agent tool records,
+closes or moves one. A move (`POST /api/lease/move`) also answers, with the meanings above, the target's quota
+codes (`insufficient_project_cpu`, `insufficient_project_mem`, `project_lease_limit`), `pin_disabled` and
+`pinned_limit` for a pinned lease br0kr built, `lease_queued`, `lease_not_live`, `reserved_idem_key`,
+`unknown_lease`, `unknown_project` and `missing_project_id`.
 
 | Code | Where | Meaning | Agent | Operator |
 |---|---|---|---|---|
@@ -248,6 +252,7 @@ manage (docs/designs/fleet-onboarding.md). No agent tool records or closes one.
 | `invalid_observed_vmid` | dashboard Record existing guest (`reason`) | `observed_vmid` is not a whole number from 100 to 999999999 (Proxmox's range). | Nothing: an operator-only code. | Enter the guest's Proxmox vmid. |
 | `invalid_label` | dashboard Record existing guest (`reason`) | The label is blank, longer than 200 characters once stripped, or holds a control character such as a newline. | Nothing: an operator-only code. | Enter a one-line label of 1 to 200 characters. |
 | `not_a_record` | dashboard Close record (`POST /api/record/close`, `reason`) | The lease is not a capacity-only record: br0kr built or adopted its guest, so closing it here would free capacity a running guest still uses. | Nothing: an operator-only code. | End it through its own verb: release a provisioned lease; an adopted guest leaves only by a detach. |
+| `lease_project_changed` | dashboard Move lease (`POST /api/lease/move`, `reason`); operator `pin_lease`, dashboard pin button (`reason`); `request_lease`, `schedule_lease` with pinned=true only if an operator moves the new lease mid-request | The lease is no longer in the project the caller named: it was moved since the page showed it (or, for a pin, between the pin's first read and its lock). | Nothing to fix: an operator moved your new lease to another project while it was being pinned, so it was released (pin_refused). Ask again with a new idem_key if you still need it. | Refresh, check which project the lease is in now, and ask again if the move or pin is still wanted. |
 
 ### Bookkeeping reasons
 

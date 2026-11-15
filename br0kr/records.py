@@ -1,4 +1,4 @@
-"""records.py — the operator verbs for capacity-only records (fleet onboarding, phase 2).
+"""records.py — the operator verbs for capacity-only records and lease moves (fleet onboarding, phase 2).
 
 A record is a lease (ownership ``capacity_only``, migration 0055) that holds memory and CPU on a node for a guest
 br0kr does not manage: a container, the ledger VM itself, a failover hold. It has no vmid, so nothing in br0kr can
@@ -6,9 +6,13 @@ name a guest from it, and it is pinned, so the TTL step never ends it. It is cre
 `admission.record_existing` (under the same scope locks as every other debit) and closed through
 `lease.close_record` (a guarded CAS, ADMITTED → RELEASED, which frees the capacity without a teardown).
 
-These are dashboard-only operator verbs (no MCP tool: an agent never records a guest it does not run). The HTTP
-marshalling lives in br0kr/dashboard_actions.py and the operator gate and audit row in br0kr/dashboard.py; this
-module shapes the answers and holds the predicates that decide which outcomes are audited or recorded as refused.
+A move hands any live lease (a record, an adopted guest or one br0kr built) to another project's quota, through
+`admission.move_project` (under the target project's lock, so a move and an admit race its last room fairly).
+
+These are dashboard-only operator verbs (no MCP tool: an agent never records a guest it does not run, and a
+tenant never hands its lease to another tenant). The HTTP marshalling lives in br0kr/dashboard_actions.py and
+the operator gate and audit row in br0kr/dashboard.py; this module shapes the answers and holds the predicates
+that decide which outcomes are audited or recorded as refused.
 Design: docs/designs/fleet-onboarding.md.
 """
 from __future__ import annotations
@@ -56,6 +60,18 @@ def close(conn: psycopg.Connection[Any], *, lease_id: int) -> dict[str, Any]:
     return {"lease_id": lease_id, "closed": False, "reason": reason}
 
 
+def move(conn: psycopg.Connection[Any], *, lease_id: int, from_project_id: str | None,
+         project_id: str) -> dict[str, Any]:
+    """Move a live lease to another project: its memory, CPU and lease slot count against `project_id`'s quota from
+    now on, and its usage history is reported there. `from_project_id` is the project the operator saw it in (None
+    for an ungoverned lease). Returns {lease_id, moved, reason, from_project_id, project_id}; `moved` False with no
+    reason: it was already there. A token of the old project can no longer see, renew or release the lease. The
+    writer commits its own transaction (admission.move_project)."""
+    res = admission.move_project(conn, lease_id=lease_id, from_project_id=from_project_id, project_id=project_id)
+    return {"lease_id": res.lease_id, "moved": res.moved, "reason": res.reason, "from_project_id": from_project_id,
+            "project_id": project_id}
+
+
 def audit_record(result: dict[str, Any], params: dict[str, Any] | None = None) -> tuple[bool, str | None]:
     """The result-aware audit predicate for `/api/record/create`: audit only a record that was made, keyed on the
     new lease id (a refusal is recorded by `refused_record` instead). Returns (should_audit, target)."""
@@ -74,3 +90,18 @@ def audit_close(result: dict[str, Any], params: dict[str, Any] | None = None) ->
     its lease id. A refused close changed nothing. Returns (should_audit, target)."""
     lid = result.get("lease_id")
     return bool(result.get("closed")), (str(lid) if lid is not None else None)
+
+
+def audit_move(result: dict[str, Any], params: dict[str, Any] | None = None) -> tuple[bool, str | None]:
+    """The result-aware audit predicate for `/api/lease/move`: audit only a move that happened, keyed on the lease
+    id. Its params keep `from_project_id`, the record of where the lease was (best-effort, like every audit row; the
+    writer's INFO log line names it too). Returns (should_audit, target)."""
+    lid = result.get("lease_id")
+    return bool(result.get("moved")), (str(lid) if result.get("moved") and lid is not None else None)
+
+
+def refused_move(result: dict[str, Any], params: dict[str, Any] | None = None) -> tuple[bool, str | None]:
+    """The refusal predicate for `/api/lease/move`: a move with a reason is a final refusal (the target's quota or
+    pin bound, a lease that changed project or ended), recorded as a throttled outcome='refused' row. A lease that
+    was already in the target is neither. Returns (is_refused, reason)."""
+    return (not result.get("moved") and result.get("reason") is not None), result.get("reason")

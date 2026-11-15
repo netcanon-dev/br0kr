@@ -565,6 +565,40 @@ def test_record_routes_need_the_operator_token_validate_and_audit_only_what_chan
         assert json.loads(text)["reason"] == "not_a_record" and len(rows) == 1
 
 
+def test_the_move_route_needs_the_operator_token_and_audits_only_a_move(monkeypatch):
+    """POST /api/lease/move over a real socket: no token is 401 and reaches no verb; a body without the source key
+    is a 400 before any verb runs; a move is a 200 audited under the lease id, its params keeping the project the
+    lease came from (the only durable record of it); a refused move and a lease already in the target are 200s with
+    no main-trail row. Guards a move made without the operator gate, a stale page moving a lease it no longer
+    shows, or a move missing from the trail."""
+    rows: list = []
+    seen: list = []
+
+    class _AuditConn(_FakeConn):
+        def execute(self, sql: str, params: object = None) -> _FakeConn:
+            if "INSERT INTO operator_audit" in sql:
+                rows.append(params)
+            return self
+
+    answer = {"lease_id": 25, "moved": True, "reason": None, "from_project_id": "old", "project_id": "new"}
+    monkeypatch.setattr(dashboard_actions.records, "move", lambda c, **k: seen.append(k) or dict(answer))
+    body = {"lease_id": 25, "from_project_id": "old", "project_id": "new"}
+    with _serving(lambda: _AuditConn(), token="sekret") as port:
+        assert _post(port, "/api/lease/move", body)[0] == 401
+        status, text = _post(port, "/api/lease/move", {"lease_id": 25, "project_id": "new"}, token="sekret")
+        assert status == 400 and "from_project_id_required" in text and seen == []
+        status, text = _post(port, "/api/lease/move", body, token="sekret")
+        assert status == 200 and json.loads(text)["moved"] is True and seen == [body]
+        assert len(rows) == 1 and "25" in rows[0]
+        assert next(v.obj for v in rows[0] if hasattr(v, "obj"))["from_project_id"] == "old"
+        rows.clear()
+        answer.update(moved=False, reason="insufficient_project_mem")
+        status, text = _post(port, "/api/lease/move", body, token="sekret")
+        assert status == 200 and json.loads(text)["reason"] == "insufficient_project_mem" and rows == []
+        answer.update(moved=False, reason=None)
+        assert _post(port, "/api/lease/move", body, token="sekret")[0] == 200 and rows == []
+
+
 def test_lease_create_and_renew_require_the_operator_token(monkeypatch):
     """The act-as create + the renew are token-gated writes: no bearer -> 401, wrong bearer -> 401, and with
     NO operator token configured -> 403 disabled. Guards the provisioning surface (which debits a project's

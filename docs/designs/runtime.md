@@ -31,7 +31,9 @@ See also: [../architecture.md](../architecture.md#module-map), [surfaces.md](sur
   is split out and unit-tested hermetically; the concurrency + idempotency are proven against real
   Postgres in `scripts/harness_admission.py`. `record_existing` (an operator's capacity-only record of a guest br0kr
   does not manage, fleet onboarding phase 2) takes the same node and project locks and budget read; the project
-  quota refuses it, the node's declared capacity does not (it reports `node_overcommitted`). Proven in
+  quota refuses it, the node's declared capacity does not (it reports `node_overcommitted`). `move_project` (a
+  live lease handed to another project) takes only the target's `project:` lock, then the target's row and the
+  lease's row, and reads the target's budget; the source is freed without a lock. Both are proven in
   `scripts/harness_records.py`.
 - **Reason vocabulary (`br0kr/reasons.py`)** — the refusal reasons and error codes the request path answers an
   agent's ask with, one `Final` constant per code, named after its value

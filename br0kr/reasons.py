@@ -170,13 +170,14 @@ NO_PLACED_INSTANCE: Final = "no_placed_instance"
 NODE_UNROUTABLE: Final = "node_unroutable"
 NO_BRIDGE_ON_NET0: Final = "no_bridge_on_net0"
 
-# ── Records (admission.record_existing, records.close: operator-only, the dashboard) ─────────────────────────────
+# ── Records and moves (admission.record_existing / move_project, records.close: operator-only, the dashboard) ──
 RECORD_EXISTS: Final = "record_exists"                        # an open record already counts this guest on the node
 VMID_LEASED: Final = "vmid_leased"                            # the guest is a live lease's: br0kr already counts it
 INVALID_GUEST_KIND: Final = "invalid_guest_kind"
 INVALID_OBSERVED_VMID: Final = "invalid_observed_vmid"
 INVALID_LABEL: Final = "invalid_label"
 NOT_A_RECORD: Final = "not_a_record"                          # close: the lease is not a capacity-only record
+LEASE_PROJECT_CHANGED: Final = "lease_project_changed"        # the lease is no longer in the project named
 
 # ── Bookkeeping reasons migration and replication write (read back by migration_status / lease_status) ──────────
 MIGRATED: Final = "migrated"                                  # a finished migration's migration.reason

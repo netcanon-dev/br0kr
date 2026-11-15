@@ -11,10 +11,11 @@ Pinning is bounded by project.max_pinned (0 = off, the default). The bound is en
 `set_pinned` takes the project's ROW lock (SELECT ... FOR NO KEY UPDATE), counts the project's live pinned leases
 and pins only below the bound, so concurrent pins for the last slot serialize on that lock and exactly one wins.
 The lock order is project row, then lease row, the order admin.delete_project takes (its ON DELETE SET NULL
-reaches the lease rows), so the two can't deadlock. NO KEY UPDATE, not UPDATE: it still serializes with every
-other pin, with set_project_max_pinned and with a project delete, but not with the KEY SHARE lock a lease INSERT
-takes on its project through the foreign key, so a pin never blocks an admission (which never locks the row
-otherwise).
+reaches the lease rows) and admission.move_project takes (the target project, then the lease; a pinned lease
+moved into a project needs a slot under that project's bound, read through `room_reason`), so none deadlock.
+NO KEY UPDATE, not UPDATE: it still serializes with every other pin, with set_project_max_pinned and with a
+project delete, but not with the KEY SHARE lock a lease INSERT takes on its project through the foreign key, so a
+pin never blocks an admission (which never locks the row otherwise).
 
 A request can ask for the pin up front (request_lease / schedule_lease ``pinned=True``). `refuse_before_admit`
 turns away what can't be pinned before any capacity is reserved, the request is admitted as usual, and `settle`
@@ -47,6 +48,18 @@ _LIVE_PINNED = (f"SELECT count(*) FROM lease WHERE project_id = %s AND pinned AN
                 f"AND ownership = '{lease.PROVISIONED}'")
 
 
+def room_reason(conn: psycopg.Connection[Any], project_id: str, max_pinned: int) -> str | None:
+    """Why `project_id` has no room for one more live pinned lease, or None: pin_disabled (its max_pinned is 0)
+    or pinned_limit (it already holds max_pinned). The caller holds the project's row lock (SELECT max_pinned ...
+    FOR NO KEY UPDATE) and passes the max_pinned it read, so the count cannot change before the caller's write.
+    The one bound check, shared by a pin (`set_pinned`) and a move of a pinned lease (admission.move_project)."""
+    if max_pinned == 0:
+        return reasons.PIN_DISABLED
+    counted = conn.execute(_LIVE_PINNED, (project_id,)).fetchone()
+    live_pinned = int(counted[0]) if counted is not None else 0   # count(*) always answers one row
+    return reasons.PINNED_LIMIT if live_pinned >= max_pinned else None
+
+
 def _answer(lease_id: int, *, pinned: bool, updated: bool, reason: str | None) -> dict[str, Any]:
     return {"lease_id": lease_id, "pinned": pinned, "updated": updated, "reason": reason}
 
@@ -59,9 +72,10 @@ def set_pinned(conn: psycopg.Connection[Any], lease_id: int, *, pinned: bool) ->
     pin_needs_project (an ungoverned lease has no max_pinned to bound it); pin_disabled (the project's max_pinned
     is 0); pinned_limit (the project already has max_pinned live pinned leases); pin_class_fixed (an unpin of a
     lease br0kr did not build, 0055: adopted and capacity-only leases are always pinned, and those pins are not
-    counted against max_pinned). A lease already in the asked
-    state is not a refusal (updated False, reason None). Unpinning gives the lease a fresh TTL from now (its own
-    ttl_seconds), or the reaper would take it on its next pass. Does NOT commit: the caller owns the transaction,
+    counted against max_pinned); lease_project_changed (a pin whose lease was moved to another project between
+    the first read and the lock: ask again). A lease already in the asked state is not a refusal (updated
+    False, reason None). Unpinning gives the lease a fresh TTL from now (its own ttl_seconds), or the reaper
+    would take it on its next pass. Does NOT commit: the caller owns the transaction,
     and the row locks are held until it ends, so an autocommit connection is refused (each statement would commit
     and drop the lock the bound depends on)."""
     if getattr(conn, "autocommit", False):
@@ -94,14 +108,12 @@ def set_pinned(conn: psycopg.Connection[Any], lease_id: int, *, pinned: bool) ->
     if is_pinned == pinned:
         return _answer(lease_id, pinned=is_pinned, updated=False, reason=None)
     if pinned:
-        if project_now != project_id:   # moved projects under us: only a project delete does that
-            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_NEEDS_PROJECT)
-        if max_pinned == 0:
-            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_DISABLED)
-        counted = conn.execute(_LIVE_PINNED, (project_id,)).fetchone()
-        live_pinned = int(counted[0]) if counted is not None else 0   # count(*) always answers one row
-        if live_pinned >= max_pinned:
-            return _answer(lease_id, pinned=False, updated=False, reason=reasons.PINNED_LIMIT)
+        if project_now != project_id:   # the lease changed project under us: a project delete or a move
+            changed = reasons.PIN_NEEDS_PROJECT if project_now is None else reasons.LEASE_PROJECT_CHANGED
+            return _answer(lease_id, pinned=False, updated=False, reason=changed)
+        no_room = room_reason(conn, project_now, max_pinned)   # the locked row's project (== project_id)
+        if no_room is not None:
+            return _answer(lease_id, pinned=False, updated=False, reason=no_room)
         conn.execute("UPDATE lease SET pinned = true WHERE id = %s", (lease_id,))
     else:
         conn.execute("UPDATE lease SET pinned = false, expires_at = now() + make_interval(secs => ttl_seconds) "

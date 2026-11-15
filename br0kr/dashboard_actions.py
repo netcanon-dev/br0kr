@@ -249,6 +249,19 @@ def _parse_record_create(body: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _parse_lease_move(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse "move a lease to another project": the lease id, the target `project_id`, and `from_project_id`, the
+    project the operator saw the lease in. That key is REQUIRED, and null names an ungoverned lease, so a stale
+    page can never move a lease out of a project it no longer shows. The writer re-reads the lease under the
+    target's locks and refuses lease_project_changed if it has moved since."""
+    if "from_project_id" not in body:
+        raise _Reject("from_project_id_required")
+    src = body["from_project_id"]
+    if src is not None:
+        src = _req_str(body, "from_project_id")
+    return {"lease_id": _req_int(body, "lease_id"), "from_project_id": src, "project_id": _req_str(body, "project_id")}
+
+
 def _parse_node(body: dict[str, Any]) -> dict[str, Any]:
     nid = _req_str(body, "node_id")
     cpu, mem = _num(body, "cpu_total", float), _num(body, "mem_total_mb", int)
@@ -614,6 +627,8 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
     "/api/record/create": (_parse_record_create, lambda c, **k: records.record(c, **k)),
     "/api/record/close": (lambda b: {"lease_id": _req_int(b, "lease_id")},
                           lambda c, **k: records.close(c, **k)),
+    # Move a live lease (any ownership) to another project's quota, under the target's locks (records.move).
+    "/api/lease/move": (_parse_lease_move, lambda c, **k: records.move(c, **k)),
     # /api/quota is the BASE-quota editor — preserves the *_max ceilings (set_base_quota). /api/project/edit
     # is the full project edit (set_project_quota, which also writes the ceilings).
     "/api/quota": (_parse_base_quota, lambda c, **k: admin.set_base_quota(c, **k)),
@@ -815,6 +830,7 @@ _RESULT_AUDIT: dict[str, Callable[[dict[str, Any], dict[str, Any]], tuple[bool, 
     "/api/replication/create": actas.audit_replicate,
     "/api/record/create": records.audit_record,
     "/api/record/close": records.audit_close,
+    "/api/lease/move": records.audit_move,
 }
 
 # The complement of _RESULT_AUDIT for the FINAL-refusal channel (0033/PR-3): path -> a predicate
@@ -828,4 +844,5 @@ _RESULT_REFUSED: dict[str, Callable[[dict[str, Any], dict[str, Any]], tuple[bool
     "/api/template/download": actas.refused_download,
     "/api/replication/create": actas.refused_replicate,
     "/api/record/create": records.refused_record,
+    "/api/lease/move": records.refused_move,
 }

@@ -769,6 +769,7 @@ def test_post_action_routes_are_an_explicit_allowlist():
         "/api/cancel", "/api/lease/create", "/api/lease/renew", "/api/lease/release",
         "/api/lease/pin",                                              # 0049
         "/api/record/create", "/api/record/close",                     # fleet onboarding phase 2
+        "/api/lease/move",                                             # fleet onboarding phase 2 (moves)
         "/api/quota", "/api/migrate", "/api/migration/cancel",
         "/api/project/create", "/api/project/edit", "/api/project/delete", "/api/project/template-disk",
         "/api/project/max-pinned",                                     # 0049
@@ -1389,15 +1390,50 @@ def test_parse_record_create_is_strict_and_validates_like_the_writer():
         close({"lease_id": "31"})
 
 
+def test_the_move_parser_requires_the_project_the_page_saw():
+    """/api/lease/move needs the lease id, the target project and the `from_project_id` key: null names an
+    ungoverned lease, a string is stripped, and a missing key, a blank or a non-string is a 400. Guards a client
+    that leaves the source out moving a lease out of whatever project it is in now."""
+    parse = dashboard._ACTIONS["/api/lease/move"][0]
+    assert parse({"lease_id": 25, "from_project_id": " old ", "project_id": "new"}) == {
+        "lease_id": 25, "from_project_id": "old", "project_id": "new"}
+    assert parse({"lease_id": 25, "from_project_id": None, "project_id": "new"})["from_project_id"] is None
+    for body, reason in (({"lease_id": 25, "project_id": "new"}, "from_project_id_required"),
+                         ({"lease_id": 25, "from_project_id": "", "project_id": "new"}, "from_project_id_required"),
+                         ({"lease_id": 25, "from_project_id": 3, "project_id": "new"}, "from_project_id_required"),
+                         ({"lease_id": "25", "from_project_id": "old", "project_id": "new"}, "lease_id_required"),
+                         ({"lease_id": 25, "from_project_id": "old", "project_id": " "}, "project_id_required")):
+        with pytest.raises(dashboard_actions._Reject) as err:
+            parse(body)
+        assert err.value.reason == reason, body
+
+
 def test_record_actions_audit_what_changed_and_record_refusals():
-    """A made record and a close that freed one are audited under the lease id (the result-aware predicates in
-    br0kr/records.py), and a refused record is recorded on the throttled refused channel. Guards a refused record
-    flooding the main trail or a made one going unrecorded."""
+    """A made record, a close that freed one and a move that happened are audited under the lease id (the
+    result-aware predicates in br0kr/records.py), and a refused record or move is recorded on the throttled refused
+    channel. Guards a refused record or move flooding the main trail, or a made one going unrecorded."""
     from br0kr import records
     assert dashboard_actions._RESULT_AUDIT["/api/record/create"] is records.audit_record
     assert dashboard_actions._RESULT_AUDIT["/api/record/close"] is records.audit_close
     assert dashboard_actions._RESULT_REFUSED["/api/record/create"] is records.refused_record
     assert "/api/record/close" not in dashboard_actions._RESULT_REFUSED
+    assert dashboard_actions._RESULT_AUDIT["/api/lease/move"] is records.audit_move
+    assert dashboard_actions._RESULT_REFUSED["/api/lease/move"] is records.refused_move
+
+
+def test_active_leases_panel_offers_move_and_sends_the_project_it_shows():
+    """A live lease that is not a reservation offers `move` from the Python `movable` flag; the form lists only
+    the other projects and says what moves with the lease (quota, usage history) and that the old project's token
+    loses it; submitting posts the lease id, the project this page shows it in (null for none) and the target.
+    Guards a move offered on a lease that is ending, and a page that moves a lease out of a project it no longer
+    shows (the server refuses that lease_project_changed only if the page sends what it saw)."""
+    js = _SCRIPT
+    assert js is not None
+    assert "if(canEdit && l.movable)     ops += ab('openMoveForm', 'move');" in js
+    assert "filter(p => p.project_id !== l.project_id)" in js
+    assert "moveCtx = {lease_id:id, from:l.project_id == null ? null : l.project_id};" in js
+    assert "postJSON('/api/lease/move', {lease_id:moveCtx.lease_id, from_project_id:moveCtx.from," in js
+    assert "A token of the old project can no longer see, renew or release it." in js
 
 
 def test_active_leases_panel_shows_records_and_offers_close_only():

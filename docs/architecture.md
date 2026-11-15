@@ -58,10 +58,10 @@ into every `connect()`) and asserted at daemon/gateway/dashboard boot (`db.asser
 serve on a mismatch; beside it, `migrate.assert_schema` refuses a ledger older than the build's newest migration), so
 the guarantee never silently depends on the ledger's `default_transaction_isolation` — a `repeatable read` default would
 otherwise reopen the last-slot race (the snapshot freezes before the lock wait). See SECURITY.md C14. **Built in
-`br0kr/admission.py`** (`admit()`; `promote_pinned` and `record_existing` share its locks), which also makes the grant
-**idempotent**: a required caller-supplied `idem_key` + `INSERT … ON CONFLICT DO NOTHING` means a retried request
-returns the SAME lease instead of allocating a second — the idempotency check runs *before* the capacity check so a
-replay isn't rejected as "node full" by the very lease it already created.
+`br0kr/admission.py`** (`admit()`; `promote_pinned`, `record_existing` and `move_project` share its locks), which also
+makes the grant **idempotent**: a required caller-supplied `idem_key` + `INSERT … ON CONFLICT DO NOTHING` means a
+retried request returns the SAME lease instead of allocating a second — the idempotency check runs *before* the capacity
+check so a replay isn't rejected as "node full" by the very lease it already created.
 
 > **Empirically established (see `scripts/harness*.py`), not assumed:**
 > - 50 concurrent requests at a 1-slot node → **exactly 1 admits**; a naive `READ COMMITTED` + no-lock path
@@ -121,7 +121,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `__init__.py` | Package marker; holds the version string. | — | — | `unit/test_repo_hygiene.py` |
 | `actas.py` | A dashboard operator acting for one project: leases, downloads, replications. | via gateway | — | `unit/test_actas.py`, `harness_dashboard_actas.py` |
 | `admin.py` | Operator config writes: clusters, nodes, storage, networks, projects, tokens, templates. | writes | — | `unit/test_admin.py`, `harness_admin.py` |
-| `admission.py` | The race-critical seam: scope-locked fit, idempotent insert, enqueue, promotion, records. | writes | — | `unit/test_admission.py`, `harness_admission.py` |
+| `admission.py` | The race-critical seam: scope-locked fit, idempotent insert, enqueue, promotion, records, moves. | writes | — | `unit/test_admission.py`, `harness_admission.py` |
 | `audit.py` | Append-only audit trail: record, query, export, retention prune. | writes | — | `unit/test_audit.py`, `harness_audit.py` |
 | `auth.py` | Bearer token to principal; tier, project and lease-ownership checks. | writes `last_used_at` | — | `unit/test_auth.py`, `harness_auth.py` |
 | `build.py` | Template-download build jobs: guarded-CAS transitions and reads. | writes | — | `unit/test_build.py`, `harness_imgbuild.py` |
@@ -163,7 +163,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `ratelimit.py` | In-process limits on pre-auth paths: a connection gate, per-client windows. | — | — | `unit/test_ratelimit.py`, `integration/test_oauth_handler.py` |
 | `reaper.py` | The teardown pass: expire, destroy through an injected callback, free once. | via lease | via the destroyer | `integration/test_reaper.py`, `harness_lease.py` |
 | `reasons.py` | Named constants for every agent-facing reason and error code. | — | — | `unit/test_reasons.py`, `unit/test_reason_codes_doc.py` |
-| `records.py` | Operator verbs for capacity-only records of guests br0kr does not manage: record, close. | via admission, lease | — | `unit/test_records.py`, `harness_records.py` |
+| `records.py` | Operator verbs for capacity-only records of guests br0kr does not manage (record, close) and for moving a lease to another project. | via admission, lease | — | `unit/test_records.py`, `harness_records.py` |
 | `reclaim_beat.py` | A stale-job reclaim's retry cutoff, backoff and claim heartbeat. | via build, replication | — | `unit/test_reclaim_beat.py`, `unit/test_replication_dataplane.py`, `harness_imgbuild.py`, `harness_replicate_data.py` |
 | `reconciler.py` | The data plane: ADMITTED lease to fenced ACTIVE VM, template builds, teardown wiring. | via lease, build | via pve | `unit/test_reconciler.py`, `harness_reconcile.py` |
 | `remotes.py` | PDM registry: one PDM driver per configured cluster. | reads | — | `unit/test_remotes.py` |

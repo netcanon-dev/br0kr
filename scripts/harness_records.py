@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Capacity-only records (fleet onboarding phase 2): admission.record_existing and records.close against a REAL
-Postgres, through the shipped modules ("proven, not assumed", cf. harness_project_quota.py).
+Capacity-only records and lease moves (fleet onboarding phase 2): admission.record_existing, records.close and
+admission.move_project against a REAL Postgres, through the shipped modules ("proven, not assumed", cf.
+harness_project_quota.py).
 
-A record holds memory and CPU for a guest br0kr does not manage. It is a debit, so it must take the same scope locks
-as admit() in the same order, or a record and an admit could both fit the last of a budget, or deadlock each other.
+A record holds memory and CPU for a guest br0kr does not manage, and a move hands a live lease to another project's
+quota. Both are debits, so they take the same scope locks as admit() in the same order, or one of them and an admit
+could both fit the last of a budget, or deadlock each other.
 
   record_shapes             a record is ADMITTED, capacity_only, pinned, with no vmid and its label stripped; it counts
                             against its node and project; a CPU-0 failover hold for the same guest fits on another node.
@@ -20,6 +22,21 @@ as admit() in the same order, or a record and an admit could both fit the last o
                             lease is not_a_record and untouched; a second close is lease_not_live; then the guest can be
                             recorded again.
   closed_record_measured    a closed record's hours are measured by project_usage (no unmeasured lease).
+  move_shapes               a move debits the target, frees the source and leaves the node; a retry changes nothing;
+                            a stale source is lease_project_changed; a record moves; a reservation never does.
+  move_vs_admit_target      25 moves and 25 admits race a target with room for one ask: EXACTLY one wins, no error.
+  move_cross_traffic        moves both ways between two projects while admits land in both, quotas tight: every
+                            racer answers, moves and admits both win, and a sampler reading committed usage all
+                            through the race never sees either project above its quota.
+  move_one_lease_two_targets  one lease moved to 10 targets at once: exactly one move lands, the other nine are
+                            lease_project_changed (none applied on top of another).
+  move_pin_bound            10 pinned leases move into a project with one free pin slot while a pin races them there:
+                            exactly one takes the slot; the target never holds more pins than its bound.
+  move_vs_release           a move and a release of one lease, 20 rounds: no error, and the move either landed before
+                            the release or was refused lease_not_live.
+  move_vs_delete_project    a move races a delete of its target, then of its source, 20 rounds each: no error or
+                            deadlock, and the lease ends in a consistent project.
+  moved_usage               a moved lease's hours are reported under its new project (usage follows the lease).
 
 A threading.Barrier starts the racers together. Exit 0 + GO iff every invariant holds. Env: PGCONN.
 """
@@ -35,7 +52,7 @@ from typing import Any
 import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import admission, inventory, lease, migrate, records
+from br0kr import admin, admission, inventory, lease, migrate, pin, records
 from br0kr.admission import AdmissionRequest
 
 CONN = os.environ["PGCONN"]
@@ -61,10 +78,27 @@ def seed_node(node: str, cpu: float, mem: int, *, cordoned: bool = False) -> Non
                   "(%s,%s,%s,'cl',%s,%s)", (node, cpu, mem, node, cordoned))
 
 
-def seed_project(pid: str, cpu: float, mem: int, max_leases: int) -> None:
+def seed_project(pid: str, cpu: float, mem: int, max_leases: int, max_pinned: int = 0) -> None:
     with psycopg.connect(CONN, autocommit=True) as c:
-        c.execute("INSERT INTO project(id,cpu_limit,mem_limit_mb,max_leases) VALUES (%s,%s,%s,%s)",
-                  (pid, cpu, mem, max_leases))
+        c.execute("INSERT INTO project(id,cpu_limit,mem_limit_mb,max_leases,max_pinned) VALUES (%s,%s,%s,%s,%s)",
+                  (pid, cpu, mem, max_leases, max_pinned))
+
+
+def project_of(lease_id: int) -> str | None:
+    with psycopg.connect(CONN, autocommit=True) as c:
+        return c.execute("SELECT project_id FROM lease WHERE id=%s", (lease_id,)).fetchone()[0]
+
+
+def move(lease_id: int, src: str | None, dst: str) -> dict[str, Any]:
+    with connect() as c:
+        return records.move(c, lease_id=lease_id, from_project_id=src, project_id=dst)
+
+
+def pin_lease(lease_id: int) -> dict[str, Any]:
+    with connect() as c:
+        out = pin.set_pinned(c, lease_id, pinned=True)
+        c.commit()
+    return out
 
 
 def row(lease_id: int) -> tuple[Any, ...]:
@@ -275,13 +309,237 @@ def check_closed_record_measured() -> bool:
     return _verdict("closed_record_measured", ok, f"usage entry={entry}")
 
 
+def check_move_shapes() -> bool:
+    reset()
+    seed_node("n1", 100, 100000)
+    seed_project("a", 100, 100000, 99)
+    seed_project("b", 100, 100000, 99)
+    a = admit("vm", project="a", mem=4096)
+    before_node = node_mem("n1")
+    m = move(a.lease_id, "a", "b")
+    again = move(a.lease_id, "a", "b")
+    stale = move(a.lease_id, "a", "a")   # the page still shows it in a: it is in b now
+    rec = record(project_id="a", req_mem_mb=2048)
+    mrec = move(rec["lease_id"], "a", "b")
+    with connect() as c:   # a migration's reservation (no project, reserved key) is never handed to a tenant
+        res = admission.admit(c, AdmissionRequest(idem_key=lease.MIGRATION_IDEM_PREFIX + "1", node_id="n1",
+                                                  req_cpu=1, req_mem_mb=512))
+    mres = move(res.lease_id, None, "b")
+    ok = (m["moved"] and project_of(a.lease_id) == "b" and again == {**m, "moved": False}
+          and stale["reason"] == "lease_project_changed" and project_of(a.lease_id) == "b"
+          and mrec["moved"] and project_of(rec["lease_id"]) == "b"
+          and mres["reason"] == "reserved_idem_key" and project_of(res.lease_id) is None
+          and project_mem("a") == 100000 and project_mem("b") == 100000 - 4096 - 2048
+          and node_mem("n1") == before_node - 2048 - 512)
+    return _verdict("move_shapes", ok, f"move={m['moved']} retry={again['moved']}/{again['reason']} "
+                                       f"stale={stale['reason']} record={mrec['moved']} reservation={mres['reason']}")
+
+
+def check_move_vs_admit_target() -> bool:
+    reset()
+    for i in range(5):
+        seed_node(f"n{i}", 1000, 1_000_000)
+    seed_project("a", 1000, 1_000_000, 999)
+    seed_project("b", 1000, 4096, 999)   # room for exactly one 4 GiB ask
+    ids = [admit(f"src{i}", node=f"n{i % 5}", cpu=1, mem=4096, project="a").lease_id for i in range(25)]
+    calls: list[Callable[[psycopg.Connection], Any]] = []
+    for i in range(25):
+        calls.append(lambda c, i=i: records.move(c, lease_id=ids[i], from_project_id="a", project_id="b"))
+        calls.append(lambda c, i=i: admission.admit(c, AdmissionRequest(
+            idem_key=f"b{i}", node_id=f"n{(i + 2) % 5}", req_cpu=1, req_mem_mb=4096, project_id="b")))
+    out = _fire(calls)
+    errors = [o for o in out if isinstance(o, Exception)]
+    wins = sum(1 for o in out if isinstance(o, dict) and o["moved"]) + \
+        sum(1 for o in out if isinstance(o, admission.AdmissionResult) and o.admitted)
+    with connect() as c:
+        in_b = c.execute("SELECT count(*) FROM lease WHERE project_id='b' AND state='ADMITTED'").fetchone()[0]
+    ok = not errors and wins == 1 and in_b == 1 and project_mem("b") == 0
+    return _verdict("move_vs_admit_target", ok, f"50 racers, one slot: wins={wins} in_b={in_b} errors={errors[:2]}")
+
+
+_USED_MEM = ("SELECT p.id, COALESCE(SUM(l.req_mem_mb), 0) FROM project p LEFT JOIN lease l ON l.project_id = p.id "
+             f"AND l.state IN {admission.CAPACITY_SQL} GROUP BY p.id")
+
+
+def check_move_cross_traffic() -> bool:
+    reset()
+    for i in range(4):
+        seed_node(f"n{i}", 1000, 1_000_000)
+    quota = 15 * 2048   # 10 leases each to start: room for 5 more 2 GiB asks in each project
+    seed_project("a", 1000, quota, 999)
+    seed_project("b", 1000, quota, 999)
+    a_ids = [admit(f"a{i}", node=f"n{i % 4}", cpu=1, mem=2048, project="a").lease_id for i in range(10)]
+    b_ids = [admit(f"b{i}", node=f"n{i % 4}", cpu=1, mem=2048, project="b").lease_id for i in range(10)]
+    stop = threading.Event()
+    peak = {"a": 0, "b": 0}
+
+    def sample(c: psycopg.Connection) -> int:
+        """Read both projects' committed usage until the racers are done; the peak must never pass the quota."""
+        reads = 0
+        while not stop.is_set():
+            for pid, used in c.execute(_USED_MEM).fetchall():
+                peak[pid] = max(peak[pid], int(used))
+            c.commit()
+            reads += 1
+        return reads
+    calls: list[Callable[[psycopg.Connection], Any]] = []
+    for i in range(10):
+        calls.append(lambda c, i=i: records.move(c, lease_id=a_ids[i], from_project_id="a", project_id="b"))
+        calls.append(lambda c, i=i: records.move(c, lease_id=b_ids[i], from_project_id="b", project_id="a"))
+        calls.append(lambda c, i=i: admission.admit(c, AdmissionRequest(
+            idem_key=f"xa{i}", node_id=f"n{i % 4}", req_cpu=1, req_mem_mb=2048, project_id="a")))
+        calls.append(lambda c, i=i: admission.admit(c, AdmissionRequest(
+            idem_key=f"xb{i}", node_id=f"n{(i + 1) % 4}", req_cpu=1, req_mem_mb=2048, project_id="b")))
+    sampler: list[Any] = [None]
+    watcher = threading.Thread(target=lambda: sampler.__setitem__(0, _run_on_own_conn(sample)))
+    watcher.start()
+    out = _fire(calls)
+    stop.set()
+    watcher.join(60)
+    errors = [o for o in out if isinstance(o, Exception)]
+    unanswered = sum(1 for o in out if o is None)
+    moves = sum(1 for o in out if isinstance(o, dict) and o["moved"])
+    admits = sum(1 for o in out if isinstance(o, admission.AdmissionResult) and o.admitted)
+    with connect() as c:
+        final = {pid: int(used) for pid, used in c.execute(_USED_MEM).fetchall()}
+    ok = (not errors and unanswered == 0 and moves >= 1 and admits >= 1 and isinstance(sampler[0], int)
+          and sampler[0] > 0 and max(peak.values()) <= quota and max(final.values()) <= quota)
+    return _verdict("move_cross_traffic", ok, f"40 racers: moves={moves} admits={admits} unanswered={unanswered} "
+                                              f"peak={peak} final={final} quota={quota} samples={sampler[0]} "
+                                              f"errors={errors[:2]}")
+
+
+def _run_on_own_conn(fn: Callable[[psycopg.Connection], Any]) -> Any:
+    try:
+        with connect() as c:
+            return fn(c)
+    except Exception as exc:   # reported in the verdict, never a hang
+        return exc
+
+
+def check_move_one_lease_two_targets() -> bool:
+    reset()
+    seed_node("n1", 1000, 1_000_000)
+    seed_project("a", 1000, 1_000_000, 999)
+    for i in range(10):
+        seed_project(f"t{i}", 1000, 1_000_000, 999)
+    lid = admit("one", project="a", mem=1024).lease_id
+    out = _fire([lambda c, i=i: records.move(c, lease_id=lid, from_project_id="a", project_id=f"t{i}")
+                 for i in range(10)])
+    errors = [o for o in out if isinstance(o, Exception) or o is None]
+    won = [o for o in out if isinstance(o, dict) and o["moved"]]
+    changed = sum(1 for o in out if isinstance(o, dict) and o["reason"] == "lease_project_changed")
+    ok = not errors and len(won) == 1 and changed == 9 and project_of(lid) == won[0]["project_id"]
+    return _verdict("move_one_lease_two_targets", ok, f"10 targets: moved={len(won)} lease_project_changed={changed} "
+                                                      f"now_in={project_of(lid)} errors={errors[:2]}")
+
+
+def check_move_pin_bound() -> bool:
+    reset()
+    seed_node("n1", 1000, 1_000_000)
+    seed_project("a", 1000, 1_000_000, 999, max_pinned=20)
+    seed_project("b", 1000, 1_000_000, 999, max_pinned=2)
+    held = admit("b-held", project="b", mem=512).lease_id
+    pin_lease(held)                                        # b: one of its two pin slots used
+    racer = admit("b-racer", project="b", mem=512).lease_id   # unpinned, in b: its pin races the moves
+    ids = [admit(f"p{i}", project="a", mem=512).lease_id for i in range(10)]
+    for lid in ids:
+        pin_lease(lid)
+
+    def pin_it(c: psycopg.Connection) -> dict[str, Any]:
+        out = pin.set_pinned(c, racer, pinned=True)
+        c.commit()
+        return out
+    calls: list[Callable[[psycopg.Connection], Any]] = [
+        lambda c, i=i: records.move(c, lease_id=ids[i], from_project_id="a", project_id="b") for i in range(10)]
+    calls.append(pin_it)
+    out = _fire(calls)
+    errors = [o for o in out if isinstance(o, Exception)]
+    moved = sum(1 for o in out[:10] if isinstance(o, dict) and o["moved"])
+    pinned_won = isinstance(out[10], dict) and out[10]["updated"]
+    limited = sum(1 for o in out[:10] if isinstance(o, dict) and o["reason"] == "pinned_limit")
+    with connect() as c:
+        pins_b = c.execute("SELECT count(*) FROM lease WHERE project_id='b' AND pinned AND state='ADMITTED' "
+                           "AND ownership='provisioned'").fetchone()[0]
+    ok = not errors and moved + int(pinned_won) == 1 and limited == 10 - moved and pins_b == 2
+    return _verdict("move_pin_bound", ok, f"11 racers, one slot: moved={moved} pinned={pinned_won} "
+                                          f"pinned_limit={limited} pins_in_b={pins_b} errors={errors[:2]}")
+
+
+def check_move_vs_release() -> bool:
+    bad = 0
+    for rnd in range(20):
+        reset()
+        seed_node("n1", 100, 100000)
+        seed_project("a", 100, 100000, 99)
+        seed_project("b", 100, 100000, 99)
+        lid = admit(f"r{rnd}", project="a", mem=1024).lease_id
+        mv, rel = _fire([lambda c, lid=lid: records.move(c, lease_id=lid, from_project_id="a", project_id="b"),
+                         lambda c, lid=lid: lease.release(c, lid)])
+        if isinstance(mv, Exception) or isinstance(rel, Exception) or rel is not True:
+            bad += 1
+            continue
+        where = project_of(lid)
+        if not ((mv["moved"] and where == "b") or (mv["reason"] == "lease_not_live" and where == "a")):
+            bad += 1
+    return _verdict("move_vs_release", bad == 0, f"20 rounds, inconsistent={bad}")
+
+
+def check_move_vs_delete_project() -> bool:
+    bad = 0
+
+    def delete(pid: str) -> Callable[[psycopg.Connection], Any]:
+        def run(c: psycopg.Connection) -> dict[str, Any]:
+            out = admin.delete_project(c, pid)
+            c.commit()
+            return out
+        return run
+    for rnd in range(40):
+        reset()
+        seed_node("n1", 100, 100000)
+        seed_project("a", 100, 100000, 99)
+        seed_project("b", 100, 100000, 99)
+        lid = admit(f"d{rnd}", project="a", mem=1024).lease_id
+        gone = "b" if rnd < 20 else "a"   # first the target, then the source
+        mv, dl = _fire([lambda c, lid=lid: records.move(c, lease_id=lid, from_project_id="a", project_id="b"),
+                        delete(gone)])
+        if isinstance(mv, Exception) or isinstance(dl, Exception) or not dl["deleted"]:
+            bad += 1
+            continue
+        where = project_of(lid)
+        if gone == "b":    # moved then demoted (no project), or the target was gone first (still in a)
+            fine = (mv["moved"] and where is None) or (mv["reason"] == "unknown_project" and where == "a")
+        else:              # moved before the source went (in b), or the source's delete demoted it first
+            fine = (mv["moved"] and where == "b") or (mv["reason"] == "lease_project_changed" and where is None)
+        bad += 0 if fine else 1
+    return _verdict("move_vs_delete_project", bad == 0, f"40 rounds, inconsistent={bad}")
+
+
+def check_moved_usage() -> bool:
+    reset()
+    seed_node("n1", 100, 100000)
+    seed_project("a", 100, 100000, 99)
+    seed_project("b", 100, 100000, 99)
+    lid = admit("u", project="a", cpu=2, mem=2048).lease_id
+    m = move(lid, "a", "b")
+    with connect() as c:
+        lease.release(c, lid)
+        rep = inventory.project_usage(c)
+    by = {e["project_id"]: e for e in rep.get("projects", [])}
+    ok = m["moved"] and by.get("b", {}).get("leases") == 1 and by.get("a", {}).get("leases", 0) == 0
+    return _verdict("moved_usage", ok, f"b={by.get('b')} a={by.get('a')}")
+
+
 def main() -> int:
     with psycopg.connect(CONN) as c:
         migrate.apply_pending(c)
-    print("=== capacity-only records (fleet onboarding phase 2) ===\n")
+    print("=== capacity-only records and lease moves (fleet onboarding phase 2) ===\n")
     checks = [check_record_shapes, check_record_vs_admit_project, check_record_vs_admit_node,
               check_record_duplicate_race, check_record_overcommit, check_vmid_leased, check_record_untouchable,
-              check_close_only_records, check_closed_record_measured]
+              check_close_only_records, check_closed_record_measured, check_move_shapes,
+              check_move_vs_admit_target, check_move_cross_traffic, check_move_one_lease_two_targets,
+              check_move_pin_bound, check_move_vs_release,
+              check_move_vs_delete_project, check_moved_usage]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))
     return 0 if all(results) else 1
