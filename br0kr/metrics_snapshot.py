@@ -27,9 +27,11 @@ log = logging.getLogger(__name__)
 # rule notices (theirs are minutes).
 METRICS_SNAPSHOT_TTL_S = 10.0
 
-# The /metrics scrape's count of live PINNED leases (0049) — the ones the TTL reaper skips.
+# The /metrics scrape's count of live PINNED leases (0049) that br0kr built — the ones the TTL reaper skips and a
+# project's max_pinned counts. A lease br0kr did not build (0055) is pinned by schema, so it is left out, as in
+# pin._LIVE_PINNED and the dashboard's pinned_count.
 _LIVE_PINNED_COUNT = ("SELECT count(*) FROM lease WHERE pinned AND state IN ("
-                      + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")")
+                      + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + f") AND ownership = '{lease.PROVISIONED}'")
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,9 @@ import pytest
 
 from br0kr import admission, inventory, lease, placement
 
+# The 0055 columns of a lease br0kr built: ownership, guest_kind, observed_vmid, label.
+_PROV = ("provisioned", "qemu", None, None)
+
 pytestmark = pytest.mark.unit
 
 
@@ -313,9 +316,10 @@ def test_lease_row_shapes_active_lease_and_derives_action_flags():
     RELEASING lease, a migrate on a disk-backed / reservation lease, a renew on a pinned one, or crashing on a
     null ip/ttl/ci_user."""
     # (id, project_id, node_id, cluster_id, state, req_cpu, req_mem_mb, storage_id, req_disk_gb,
-    #  vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned)
+    #  vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned,
+    #  ownership, guest_kind, observed_vmid, label)
     active = inventory._lease_row((11, "team-a", "n1", "clA", "ACTIVE", Decimal("4"), 8192, None, 0,
-                                   1234, "192.168.1.31", "runner", 61.44, 3500.2, False, False))
+                                   1234, "192.168.1.31", "runner", 61.44, 3500.2, False, False, *_PROV))
     assert active["lease_id"] == 11 and active["state"] == "ACTIVE" and active["vmid"] == 1234
     assert active["ip_address"] == "192.168.1.31" and active["req_cpu"] == 4.0 and active["age_seconds"] == 61.4
     assert active["expires_in_seconds"] == 3500.2 and active["is_reservation"] is False
@@ -324,24 +328,24 @@ def test_lease_row_shapes_active_lease_and_derives_action_flags():
     assert active["pinned"] is False and active["pinnable"] is True
 
     releasing = inventory._lease_row((12, "team-a", "n1", "clA", "RELEASING", Decimal("1"), 1024, None, 0,
-                                      1235, None, None, 5.0, None, False, False))
+                                      1235, None, None, 5.0, None, False, False, *_PROV))
     assert releasing["cancellable"] is False and releasing["renewable"] is False
     assert releasing["migratable"] is False
     assert releasing["ip_address"] is None and releasing["ci_user"] is None
     assert releasing["expires_in_seconds"] is None
 
     admitted = inventory._lease_row((13, "team-b", "n2", "clA", "ADMITTED", Decimal("2"), 2048, None, 0,
-                                     None, None, None, 2.0, 10.0, False, False))
+                                     None, None, None, 2.0, 10.0, False, False, *_PROV))
     assert admitted["cancellable"] is True and admitted["renewable"] is True
     assert admitted["migratable"] is False and admitted["vmid"] is None
 
     disk = inventory._lease_row((14, "team-b", "n3", "clB", "ACTIVE", Decimal("1"), 512, "ceph", 100,
-                                 1300, "10.0.0.9", "admin", 9.0, 20.0, False, False))
+                                 1300, "10.0.0.9", "admin", 9.0, 20.0, False, False, *_PROV))
     assert disk["cancellable"] is True and disk["renewable"] is True and disk["migratable"] is False
     assert disk["storage_id"] == "ceph"
 
     reservation = inventory._lease_row((15, None, "n3", "clB", "ACTIVE", Decimal("2"), 4096, None, 0,
-                                        None, None, None, 3.0, 30.0, True, False))
+                                        None, None, None, 3.0, 30.0, True, False, *_PROV))
     assert reservation["is_reservation"] is True
     assert reservation["cancellable"] is False and reservation["renewable"] is False
     assert reservation["migratable"] is False
@@ -349,9 +353,39 @@ def test_lease_row_shapes_active_lease_and_derives_action_flags():
 
     # 0049: a pinned lease keeps cancel (release still ends it) and its pin toggle, but offers no renew.
     pinned = inventory._lease_row((16, "team-a", "n1", "clA", "ACTIVE", Decimal("2"), 2048, None, 0,
-                                   1400, None, None, 7.0, -50.0, False, True))
+                                   1400, None, None, 7.0, -50.0, False, True, *_PROV))
     assert pinned["pinned"] is True and pinned["pinnable"] is True
     assert pinned["renewable"] is False and pinned["cancellable"] is True
+
+
+def test_lease_row_offers_a_record_only_close_and_says_what_it_stands_for():
+    """A lease br0kr did not build (0055) offers none of the guest actions: a capacity-only record is not
+    cancellable, renewable, pinnable or migratable, and is `closable` (dashboard Close record) while ADMITTED; an
+    adopted ACTIVE guest is not closable either. The row carries ownership, guest kind, observed vmid and label, and
+    a provisioned lease says so and is never closable. Guards the dashboard offering cancel on the ledger VM's
+    record (lease.release would refuse it, lease_protected) or no way to close a record."""
+    rec = inventory._lease_row((21, "infra", "peer", None, "ADMITTED", Decimal("0"), 6144, None, 0, None, None,
+                                None, 1.0, 900.0, False, True, "capacity_only", "qemu", 9950, "failover hold"))
+    assert (rec["ownership"], rec["guest_kind"], rec["observed_vmid"], rec["label"]) == (
+        "capacity_only", "qemu", 9950, "failover hold")
+    assert rec["closable"] is True
+    assert not (rec["cancellable"] or rec["renewable"] or rec["pinnable"] or rec["migratable"])
+    adopted = inventory._lease_row((22, "infra", "peer", "clA", "ACTIVE", Decimal("2"), 2048, None, 0, 104, None,
+                                    None, 1.0, 900.0, False, True, "adopted", "qemu", None, None))
+    assert adopted["closable"] is False and not (adopted["cancellable"] or adopted["migratable"])
+    prov = inventory._lease_row((23, "t", "n1", "clA", "ADMITTED", Decimal("1"), 512, None, 0, None, None, None,
+                                 1.0, 900.0, False, False, *_PROV))
+    assert prov["ownership"] == "provisioned" and prov["closable"] is False and prov["cancellable"] is True
+
+
+def test_pinned_count_and_admit_wait_count_only_leases_br0kr_built():
+    """The project list's pinned_count counts only provisioned pins, as pin.set_pinned's bound does (a record is
+    pinned by schema and uses no pin slot), and the fleet admit-wait percentiles read only provisioned leases (a
+    record is admitted the moment it is made, so it would pull the queue-wait figures toward zero). Guards the
+    dashboard showing a project over its pin bound, or a queue that looks faster than it is."""
+    assert "AND l.ownership = 'provisioned')" in " ".join(inventory._LIST_PROJECTS.split())
+    aw = inventory._FLEET_STATS.split(") AS aw,")[0].rsplit("FROM lease", 1)[1]
+    assert "ownership = 'provisioned'" in aw
 
 
 class _CapConn:

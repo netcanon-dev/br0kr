@@ -133,7 +133,8 @@ _LIST_PROJECTS_TMPL = f"""
                      JOIN template_replication tr ON tr.id = ti.replication_id
                      WHERE tr.project_id = p.id AND ti.instance_state = 'READY'), 0) AS template_disk_used,
          p.max_pinned,
-         COUNT(*) FILTER (WHERE l.pinned AND l.state IN {_LIVE_SQL})            AS pinned_count
+         COUNT(*) FILTER (WHERE l.pinned AND l.state IN {_LIVE_SQL}
+                          AND l.ownership = '{lease.PROVISIONED}')               AS pinned_count
   FROM project p LEFT JOIN lease l ON l.project_id = p.id AND l.state IN {CAPACITY_SQL}
   {{where}}
   GROUP BY p.id ORDER BY p.id
@@ -219,7 +220,7 @@ _LEASE_LIST_TMPL = f"""
          EXTRACT(EPOCH FROM (now() - l.created_at))::float8     AS age_seconds,
          EXTRACT(EPOCH FROM (l.expires_at - now()))::float8     AS expires_in_seconds,
          {_RES_FLAG_SQL}                                        AS is_reservation,
-         l.pinned
+         l.pinned, l.ownership, l.guest_kind, l.observed_vmid, l.label
   FROM lease l
   WHERE l.state IN {CAPACITY_SQL} {{extra}}
   ORDER BY l.created_at, l.id
@@ -358,11 +359,18 @@ def _lease_row(row: tuple[Any, ...]) -> dict[str, Any]:
     storage — the migrate form's own contract, since PDM can't move a disk in this pre-wire) lease that is
     not a reservation; `pinnable` = a live lease that is not a reservation (pin or unpin it, 0049), and a
     `pinned` one is not `renewable`, since the TTL reaper skips it. ip_address is coerced to str (a text/inet
-    column → a JSON string, never a raw IPv4Address). Pure, so the table render is testable without a DB."""
+    column → a JSON string, never a raw IPv4Address). `ownership` (0055) says who built the guest; a lease br0kr
+    did not build (adopted, or a capacity-only record of a guest br0kr does not manage, with `guest_kind`,
+    `observed_vmid` and `label` saying what it stands for) offers none of those actions, and a record is
+    `closable` (dashboard Close record) while it holds capacity. Pure, so the table render is testable without a
+    DB."""
     (lid, project_id, node_id, cluster_id, state, req_cpu, req_mem_mb, storage_id, req_disk_gb,
-     vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned) = row
+     vmid, ip_address, ci_user, age_seconds, expires_in_seconds, is_reservation, pinned,
+     ownership, guest_kind, observed_vmid, label) = row
     reservation = bool(is_reservation)
-    live = lease.is_releasable(state) and not reservation   # cancel drops/releases it; renew pushes its TTL
+    provisioned = ownership == lease.PROVISIONED
+    # cancel drops/releases it; renew pushes its TTL. Never a guest br0kr did not build (lease.release refuses it).
+    live = lease.is_releasable(state) and not reservation and provisioned
     return {
         "lease_id": int(lid), "project_id": project_id, "node_id": node_id, "cluster_id": cluster_id,
         "state": state, "req_cpu": float(req_cpu), "req_mem_mb": int(req_mem_mb),
@@ -376,7 +384,10 @@ def _lease_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "cancellable": live,
         "renewable": live and not pinned,   # a pinned lease (0049) needs no heartbeat
         "pinned": bool(pinned), "pinnable": live,
-        "migratable": state == "ACTIVE" and storage_id is None and not reservation,
+        "migratable": state == "ACTIVE" and storage_id is None and not reservation and provisioned,
+        "ownership": ownership, "guest_kind": guest_kind,
+        "observed_vmid": None if observed_vmid is None else int(observed_vmid), "label": label,
+        "closable": ownership == lease.CAPACITY_ONLY and state == "ADMITTED",
     }
 
 
@@ -674,7 +685,8 @@ _FLEET_STATS = f"""
   FROM (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at))) AS p50,
                percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (admitted_at - created_at))) AS p95
           FROM lease
-         WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s)) AS aw,
+         WHERE admitted_at IS NOT NULL AND admitted_at >= now() - make_interval(mins => %(win)s)
+           AND ownership = 'provisioned') AS aw,
        (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at))) AS p50,
                percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (active_at - admitted_at))) AS p95
           FROM lease

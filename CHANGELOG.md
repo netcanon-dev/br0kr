@@ -17,6 +17,13 @@ resolve in this repository.
 
 ## [Unreleased]
 
+### Added
+- **Record a guest br0kr does not manage** (fleet onboarding phase 2): the dashboard holds its memory and CPU in a
+  project under admission's locks, a failover hold is memory only, and Close record frees it. No migration.
+
+### Changed
+- **The dashboard refuses to start on a ledger session that is not READ COMMITTED**, as the daemon and gateway do.
+
 ## [0.3.0] — 2026-11-14
 
 The first step of fleet onboarding: a lease can now stand for a guest br0kr did not build, and br0kr never

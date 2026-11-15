@@ -37,7 +37,7 @@ from typing import Any
 import psycopg
 
 from br0kr import cloudinit, db, multidisk, placement, reasons, settings
-from br0kr.lease import LIVE_STATES, data_disks_for, promote_to_admitted
+from br0kr.lease import CAPACITY_ONLY, LEASE, LIVE_STATES, data_disks_for, promote_to_admitted
 
 log = logging.getLogger(__name__)
 
@@ -282,8 +282,22 @@ class PromoteResult:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class RecordResult:
+    """Outcome of record_existing(). `recorded` True = a new capacity-only lease (`lease_id`) now holds the guest's
+    memory and CPU; False with `reason` otherwise (`record_exists` and `vmid_leased` name the lease that already
+    counts the guest in `lease_id`). `node_overcommitted` True = the node's declared capacity is now below what its
+    leases hold, so new admits there are refused until the operator raises the node. The record is still kept: it
+    describes a guest that is running, and a refusal would leave the ledger counting less than the node carries."""
+
+    lease_id: int | None
+    recorded: bool
+    reason: str | None
+    node_overcommitted: bool = False
+
+
 # ── Pure policy (no I/O; unit-tested in tests/unit/test_admission.py) ──────────
-def scope_keys(node_id: str, storage_id: str | None, project_id: str | None = None,
+def scope_keys(node_id: str | None, storage_id: str | None, project_id: str | None = None,
                data_storage_ids: tuple[str, ...] = ()) -> list[str]:
     """The advisory-lock keys for the scopes a request debits, in CANONICAL (sorted)
     order. Locking every contender on the same scopes in the same order is what makes
@@ -296,8 +310,10 @@ def scope_keys(node_id: str, storage_id: str | None, project_id: str | None = No
     they join the SAME sorted set, and a pool named more than once (a data pool == the boot pool, or two data
     disks on one pool) DEDUPES via `set` to a SINGLE lock — so the per-pool debit reads that pool exactly once
     and the aggregated double-book guard holds. Deadlock-freedom is unchanged: more keys, the identical single
-    global sort order (the whole proof rests on the sort, not the count)."""
-    keys = [f"node:{node_id}"]
+    global sort order (the whole proof rests on the sort, not the count).
+
+    `node_id` None takes no node key (for a writer that debits no node); the rest keep the same sort."""
+    keys = [f"node:{node_id}"] if node_id is not None else []
     if storage_id is not None:
         keys.append(f"storage:{storage_id}")
     for sid in data_storage_ids:
@@ -451,6 +467,45 @@ def shortfall(
     return None
 
 
+# What a capacity-only record may say (0055): the guest kinds lease_guest_kind_known allows, Proxmox's vmid range, and
+# lease_label_bounded's length.
+GUEST_KINDS: tuple[str, ...] = ("qemu", "lxc")
+OBSERVED_VMID_RANGE: tuple[int, int] = (100, 999_999_999)
+LABEL_MAX = 200
+
+
+def validate_record(*, project_id: str | None, req_cpu: float, req_mem_mb: int, guest_kind: str,
+                    observed_vmid: int, label: str) -> str | None:
+    """Return a refusal reason if a record_existing() ask is malformed, else None. Pure. A record needs a project
+    (it counts against that tenant's quota), memory above zero and CPU of zero or more (a failover hold reserves
+    memory only), a known guest kind, the Proxmox vmid it stands for, and a printable label of 1 to LABEL_MAX
+    characters once stripped. The amounts get admit()'s guards: a JSON `true` is refused, not read as 1, and a
+    non-finite or over-range value is refused before it reaches the INSERT. Whether the node and project exist is
+    read under the locks."""
+    if not project_id:
+        return reasons.MISSING_PROJECT_ID
+    if isinstance(req_cpu, bool) or isinstance(req_mem_mb, bool):
+        return reasons.BOOLEAN_RESOURCES
+    try:
+        finite = math.isfinite(req_cpu) and math.isfinite(req_mem_mb)
+    except (OverflowError, TypeError):
+        return reasons.NON_FINITE_RESOURCES
+    if not finite:
+        return reasons.NON_FINITE_RESOURCES
+    if req_cpu < 0 or req_mem_mb <= 0:
+        return reasons.NON_POSITIVE_RESOURCES
+    if req_mem_mb > db.INT8_MAX:
+        return reasons.RESOURCE_TOO_LARGE
+    if guest_kind not in GUEST_KINDS:
+        return reasons.INVALID_GUEST_KIND
+    low, high = OBSERVED_VMID_RANGE
+    if isinstance(observed_vmid, bool) or not isinstance(observed_vmid, int) or not low <= observed_vmid <= high:
+        return reasons.INVALID_OBSERVED_VMID
+    if not isinstance(label, str) or not label.strip() or len(label.strip()) > LABEL_MAX or not label.isprintable():
+        return reasons.INVALID_LABEL
+    return None
+
+
 def project_shortfall(req_cpu: float, req_mem_mb: int, cpu_avail: float | None, mem_avail: int | None,
                       slots_avail: int | None) -> str | None:
     """The tenant-budget reason an ask runs into, or None if the project has room: cpu, then memory, then a lease
@@ -558,7 +613,7 @@ def _fk_reason(exc: psycopg.errors.ForeignKeyViolation) -> str:
 # landed in one twin and not the other was a silent double-allocation path. It now lives ONCE, in the two helpers
 # below. admit() and promote_pinned() differ only in what comes between the locks and the fit (admit's idempotency
 # lookup) and in how a fit is committed (admit's INSERT vs promote's CAS).
-def _lock_scopes(cur: psycopg.Cursor[Any], node_id: str, storage_id: str | None, project_id: str | None,
+def _lock_scopes(cur: psycopg.Cursor[Any], node_id: str | None, storage_id: str | None, project_id: str | None,
                  data_disks: tuple[multidisk.DataDisk, ...]) -> None:
     """Take the advisory lock of every scope the ask debits, in canonical order (scope_keys): the node, the boot
     pool, every DISTINCT data pool (a pool named twice dedupes to one lock, so its debit is read once), and the
@@ -574,6 +629,13 @@ def _lock_scopes(cur: psycopg.Cursor[Any], node_id: str, storage_id: str | None,
     allocation. Astronomically improbable, and DETECTED — so the floor is never weakened."""
     for key in scope_keys(node_id, storage_id, project_id, tuple(d.storage_id for d in data_disks)):
         cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+
+
+def _project_avail(cur: psycopg.Cursor[Any], project_id: str) -> tuple[float, int, int] | None:
+    """The project's remaining (cpu, memory MiB, live-lease slots), read under the caller's `project:` lock, or None
+    when the project is unknown. The one locked read of the tenant budget, shared by every admission writer."""
+    row = cur.execute(_PROJECT_AVAIL, (project_id,)).fetchone()
+    return None if row is None else (float(row[0]), int(row[1]), int(row[2]))
 
 
 @dataclass(frozen=True)
@@ -646,10 +708,10 @@ def _locked_fit(conn: psycopg.Connection[Any], cur: psycopg.Cursor[Any], ask: Ad
     proj_mem: int | None = None
     proj_slots: int | None = None
     if ask.project_id is not None:
-        prow = cur.execute(_PROJECT_AVAIL, (ask.project_id,)).fetchone()
-        if prow is None:
+        budget = _project_avail(cur, ask.project_id)
+        if budget is None:
             return _Fit(reasons.UNKNOWN_PROJECT)
-        proj_cpu, proj_mem, proj_slots = float(prow[0]), int(prow[1]), int(prow[2])
+        proj_cpu, proj_mem, proj_slots = budget
 
     reason = shortfall(ask, node_cpu, node_mem,
                        project_cpu_avail=proj_cpu, project_mem_avail=proj_mem, project_slots_avail=proj_slots,
@@ -988,6 +1050,104 @@ def promote_pinned(
         # then sees a clean connection it can reuse.
         conn.rollback()
         raise
+
+
+# ── Records: capacity held for a guest br0kr does not manage (fleet onboarding, phase 2) ────────────────────────
+# The unique index (0055) that keeps one open record per (node, observed vmid).
+RECORD_UNIQUE = "lease_capacity_only_observed_uniq"
+_RECORD_OPEN = ("SELECT id FROM lease WHERE node_id = %s AND observed_vmid = %s AND ownership = %s "
+                "AND state = 'ADMITTED'")
+# A live lease whose guest has this vmid on the node's cluster: br0kr already counts that guest (vmids are unique
+# per cluster). The states that own a vmid; ADMITTED has none yet.
+_VMID_LEASED = ("SELECT id FROM lease WHERE cluster_id = %s AND vmid = %s "
+                f"AND state IN {LEASE.sql_in(('PROVISIONING', 'ACTIVE', 'RELEASING'))} ORDER BY id LIMIT 1")
+_RECORD_INSERT = """
+  INSERT INTO lease (node_id, req_cpu, req_mem_mb, project_id, state, ttl_seconds, admitted_at, pinned,
+                     ownership, guest_kind, observed_vmid, label)
+  VALUES (%s, %s, %s, %s, 'ADMITTED', 900, now(), true, %s, %s, %s, %s)
+  RETURNING id
+"""
+
+
+def record_existing(conn: psycopg.Connection[Any], *, node_id: str, project_id: str, req_cpu: float,
+                    req_mem_mb: int, observed_vmid: int, label: str, guest_kind: str = "qemu") -> RecordResult:
+    """Record a guest br0kr does not manage: a capacity-only lease (0055) that holds its memory and CPU on
+    `node_id` against `project_id`'s quota, so admission stops offering that room to anyone else. No guest is
+    created, touched or ever destroyed from the row (it has no vmid; `observed_vmid` and `label` only say what it
+    stands for). A second record on another node with CPU 0 is a failover hold: memory kept free for the guest to
+    restart there.
+
+    The same locks admit() takes for the scopes it debits, in the same canonical order (`node:` and `project:`),
+    then, under them: the node (unknown_node; a cordon is ignored, since the guest already runs there), a live lease
+    already counting that vmid on the node's cluster (vmid_leased), an open record for it on this node
+    (record_exists), and the project's budget (unknown_project, or project_shortfall's reason: the quota is a policy
+    the operator raises first). The node's capacity is NOT a refusal: the record is a fact, so it is kept and
+    `node_overcommitted` reports a node now holding more than it declares (logged WARNING; new admits there wait
+    until the node is raised). Commits on every return, or rolls back and re-raises; REQUIRES a non-autocommit
+    connection, like admit()."""
+    if getattr(conn, "autocommit", False):
+        raise RuntimeError(
+            "record_existing requires a NON-autocommit connection: the scope advisory locks must span the "
+            "capacity re-read + INSERT."
+        )
+    bad = validate_record(project_id=project_id, req_cpu=req_cpu, req_mem_mb=req_mem_mb, guest_kind=guest_kind,
+                          observed_vmid=observed_vmid, label=label)
+    if bad is not None:
+        log.info("record refused (%s)", bad, extra={"node": node_id, "project": project_id})
+        return RecordResult(None, False, bad)
+    cpu, mem = float(req_cpu), int(req_mem_mb)
+
+    def refuse(reason: str, lease_id: int | None = None) -> RecordResult:
+        conn.commit()
+        log.info("record refused (%s)", reason, extra={"node": node_id, "project": project_id})
+        return RecordResult(lease_id, False, reason)
+
+    cur = conn.cursor()
+    try:
+        _lock_scopes(cur, node_id, None, project_id, ())
+        node = cur.execute(_NODE_AVAIL, (node_id,)).fetchone()
+        if node is None:
+            return refuse(reasons.UNKNOWN_NODE)
+        if node[3] is not None:
+            leased = cur.execute(_VMID_LEASED, (node[3], observed_vmid)).fetchone()
+            if leased is not None:
+                return refuse(reasons.VMID_LEASED, int(leased[0]))
+        open_row = cur.execute(_RECORD_OPEN, (node_id, observed_vmid, CAPACITY_ONLY)).fetchone()
+        if open_row is not None:
+            return refuse(reasons.RECORD_EXISTS, int(open_row[0]))
+        budget = _project_avail(cur, project_id)
+        if budget is None:
+            return refuse(reasons.UNKNOWN_PROJECT)
+        short = project_shortfall(cpu, mem, *budget)
+        if short is not None:
+            return refuse(short)
+        row = cur.execute(_RECORD_INSERT, (node_id, cpu, mem, project_id, CAPACITY_ONLY, guest_kind,
+                                           observed_vmid, label.strip())).fetchone()
+        if row is None:   # an INSERT ... RETURNING with no conflict clause always returns its row
+            raise RuntimeError("record INSERT returned no row")
+        conn.commit()
+    except psycopg.errors.UniqueViolation as exc:   # unreachable under the node lock; kept a clean reason anyway
+        conn.rollback()
+        if getattr(exc.diag, "constraint_name", None) != RECORD_UNIQUE:
+            raise
+        log.info("record refused (%s)", reasons.RECORD_EXISTS, extra={"node": node_id, "project": project_id})
+        return RecordResult(None, False, reasons.RECORD_EXISTS)
+    except psycopg.errors.ForeignKeyViolation as exc:   # the node or project deleted between the read and here
+        conn.rollback()
+        reason = _fk_reason(exc)
+        log.info("record refused (%s)", reason, extra={"node": node_id, "project": project_id})
+        return RecordResult(None, False, reason)
+    except Exception:
+        conn.rollback()
+        raise
+    lease_id = int(row[0])
+    over = float(node[0]) < cpu or int(node[1]) < mem
+    log.info("recorded existing guest -> lease %s on %s (%s vmid %s, project %s)", lease_id, node_id, guest_kind,
+             observed_vmid, project_id, extra={"lease_id": lease_id, "node": node_id, "project": project_id})
+    if over:
+        log.warning("record leaves node %s over its declared capacity: raise the node, or admits there wait",
+                    node_id, extra={"lease_id": lease_id, "node": node_id})
+    return RecordResult(lease_id, True, None, over)
 
 
 def headroom(conn: psycopg.Connection[Any], node_id: str) -> dict[str, Any] | None:

@@ -223,6 +223,34 @@ def test_a_form_error_explains_the_code(served_script: Path) -> None:
     assert got["formErr"] == "node_exists — a node with that id already exists"
 
 
+def test_a_record_shows_what_it_stands_for_posts_a_hold_with_no_cpu_and_closes_by_lease_id(
+        served_script: Path) -> None:
+    """A record (fleet onboarding phase 2, capacity_only) is listed with the guest it stands for (the observed vmid
+    in brackets, its label escaped, "container" for an LXC), and the table offers only Close record on it, while
+    the provisioned lease keeps its own actions. The record form, as a failover hold, sends CPU 0 and keeps the
+    vmid a JSON integer and the label trimmed. An overcommitting record says the node needs raising. Close record
+    asks with a plain (not red) "Close record" button and posts just the lease id. Guards a record offering cancel,
+    renew or detail (lease.release refuses those, so they would only ever fail), a hold debiting CPU it never uses,
+    a label written into the page as markup, and the confirmation turning red for an edit that can be redone."""
+    got = _run(served_script, "record_hold_and_close")
+    assert "(104)" in got["table"] and "record · container" in got["table"]
+    assert "&lt;b&gt;media&lt;/b&gt; box" in got["table"] and "<b>media</b>" not in got["table"]
+    assert [a for a in got["acts"] if a.endswith("(30)")] == ["closeRecord(30)"]
+    assert "leaseDetail(7)" in got["acts"] and "closeRecord(7)" not in got["acts"]
+    assert 'id="rc-hold"' in got["form"]
+    assert got["held"] == {"cpu": "0", "disabled": True}
+    assert got["created"]["posts"] == [{"path": "/api/record/create", "body": {
+        "node_id": "n1", "project_id": "p1", "guest_kind": "qemu", "observed_vmid": 9950,
+        "label": "ledger failover hold", "req_cpu": 0, "req_mem_mb": 6144}}]
+    assert got["created"]["slot"] == ""
+    assert [t["text"] for t in got["created"]["toasts"]] == [
+        "Recorded as lease 31. Node n1 now holds more than it declares: raise its capacity, or new VMs there wait."]
+    assert got["ask"]["label"] == "Close record" and got["ask"]["red"] is False
+    assert got["ask"]["says"].startswith("Close “<b>media</b> box” (vmid 104 on n1)?")
+    assert "<b>" not in got["ask"]["markup"]
+    assert got["closed"] == [{"path": "/api/record/close", "body": {"lease_id": 30}}]
+
+
 def test_the_status_region_is_text_only_capped_and_fades_successes(served_script: Path) -> None:
     """notify() writes textContent only (a server reason is never parsed as markup), keeps at most four
     messages (oldest dropped first), gives errors a close button, and schedules a success to fade. Guards an

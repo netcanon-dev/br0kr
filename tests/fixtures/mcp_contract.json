@@ -496,7 +496,7 @@
   },
   "list_leases": {
    "tier": "read",
-   "sha256": "e3b43ef5d6fe619daccdfc5a49c585c3c0689f8779f2cdea4ec9cc400f87e9c3",
+   "sha256": "21bf9344cfe4e86076531a27d3ac9b7c3566faf1c71e11f0951a4f039dd7c056",
    "row": {
     "kind": "lookup",
     "call": "inventory.list_leases",

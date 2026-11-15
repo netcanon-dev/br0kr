@@ -132,6 +132,15 @@ def test_scope_keys_node_only():
     assert admission.scope_keys("n1", None) == ["node:n1"]
 
 
+def test_scope_keys_without_a_node_take_no_node_key():
+    """A project move debits no node: scope_keys(None, ...) emits no `node:` key, and the keys it does emit keep the
+    one canonical sort, so a move's lock set is a sorted subset of an admit's on the same project."""
+    assert admission.scope_keys(None, None, "team-a") == ["project:team-a"]
+    assert admission.scope_keys(None, None, None) == []
+    assert admission.scope_keys(None, "ceph", "team-a") == ["project:team-a", "storage:ceph"]
+    assert "node:None" not in admission.scope_keys(None, None, "team-a")
+
+
 def test_scope_keys_are_canonically_sorted():
     """Multi-scope keys are returned in sorted order — the deadlock-free invariant:
     every contender acquires shared scopes in the IDENTICAL sequence, so none can
@@ -770,13 +779,14 @@ def test_the_lock_and_capacity_reads_live_only_in_the_shared_core():
     node, storage and project capacity reads, the governance read, placement and shortfall() each run from one
     function (_locked_fit); the raw advisory-lock statement appears only in _lock_scopes. admit() and
     promote_pinned() reference none of them directly. The only other capacity reads are the read-only headroom
-    APIs the gateway answers "what can I ask for?" with. Guards a future edit inlining a lock, a capacity read or
+    APIs the gateway answers "what can I ask for?" with, and record_existing (a record debits a node and a project
+    and no pool, and reads its project through the same _project_avail). Guards a future edit inlining a lock, a capacity read or
     a fit step back into one twin, which is how the two copies drifted before (review ARCH-01)."""
     import ast
     import inspect
     tree = ast.parse(inspect.getsource(admission))
-    watched = {"scope_keys", "_NODE_AVAIL", "_STORAGE_AVAIL", "_PROJECT_AVAIL", "_TEMPLATE_GOVERNED", "shortfall",
-               "resolve_placement", "pg_advisory_xact_lock"}
+    watched = {"scope_keys", "_NODE_AVAIL", "_STORAGE_AVAIL", "_PROJECT_AVAIL", "_project_avail", "_TEMPLATE_GOVERNED",
+               "shortfall", "resolve_placement", "pg_advisory_xact_lock"}
     users: dict[str, set[str]] = {}
     for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef)):
         for node in ast.walk(fn):
@@ -790,8 +800,9 @@ def test_the_lock_and_capacity_reads_live_only_in_the_shared_core():
     assert users["scope_keys"] == {"_lock_scopes"}
     assert users["pg_advisory_xact_lock"] == {"_lock_scopes"}
     assert users["_STORAGE_AVAIL"] == {"_locked_fit"}
-    assert users["_NODE_AVAIL"] == {"_locked_fit", "headroom"}
-    assert users["_PROJECT_AVAIL"] == {"_locked_fit", "project_headroom"}
+    assert users["_NODE_AVAIL"] == {"_locked_fit", "headroom", "record_existing"}
+    assert users["_PROJECT_AVAIL"] == {"_project_avail", "project_headroom"}
+    assert users["_project_avail"] == {"_locked_fit", "record_existing"}
     assert users["_TEMPLATE_GOVERNED"] == users["shortfall"] == users["resolve_placement"] == {"_locked_fit"}
 
 

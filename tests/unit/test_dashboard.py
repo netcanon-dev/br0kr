@@ -768,6 +768,7 @@ def test_post_action_routes_are_an_explicit_allowlist():
     assert set(dashboard._ACTIONS) == {
         "/api/cancel", "/api/lease/create", "/api/lease/renew", "/api/lease/release",
         "/api/lease/pin",                                              # 0049
+        "/api/record/create", "/api/record/close",                     # fleet onboarding phase 2
         "/api/quota", "/api/migrate", "/api/migration/cancel",
         "/api/project/create", "/api/project/edit", "/api/project/delete", "/api/project/template-disk",
         "/api/project/max-pinned",                                     # 0049
@@ -1358,6 +1359,71 @@ def test_active_leases_panel_badges_pinned_leases_and_offers_the_pin_toggle():
     assert "if(r.ok && r.data && r.data.reason == null) poll();" in js
     assert "postJSON('/api/project/max-pinned', {project_id:p.project_id, max_pinned:num})" in js
     assert "`pins ${p.pinned_count||0}/${p.max_pinned}`" in js
+
+
+def test_parse_record_create_is_strict_and_validates_like_the_writer():
+    """The record form's body (fleet onboarding phase 2) needs the node and project ids, the guest's vmid as a JSON
+    integer, a string label, memory and CPU as numbers (a JSON bool refused), and defaults the kind to `qemu`. Then
+    the whole ask goes through admission.validate_record, so a malformed record is a 400 naming the reason the
+    writer would give (a blank label, a vmid below 100, an unknown kind). The close body is a lease id. Guards a
+    `true` CPU becoming one core, a vmid typed as text, or the form and the writer disagreeing on a valid record."""
+    parse = dashboard._ACTIONS["/api/record/create"][0]
+    ok = {"node_id": " home ", "project_id": "infra", "req_cpu": 0, "req_mem_mb": 6144,
+          "observed_vmid": 9950, "label": "ledger VM failover hold"}
+    assert parse(ok) == {"node_id": "home", "project_id": "infra", "req_cpu": 0.0, "req_mem_mb": 6144,
+                         "observed_vmid": 9950, "label": "ledger VM failover hold", "guest_kind": "qemu"}
+    assert parse({**ok, "guest_kind": "lxc"})["guest_kind"] == "lxc"
+    for field, bad, reason in (("observed_vmid", "9950", "invalid_observed_vmid"),
+                               ("observed_vmid", True, "invalid_observed_vmid"),
+                               ("observed_vmid", 99, "invalid_observed_vmid"),
+                               ("label", None, "invalid_label"), ("label", "  ", "invalid_label"),
+                               ("guest_kind", "docker", "invalid_guest_kind"),
+                               ("req_cpu", True, "req_cpu_invalid"), ("req_mem_mb", 0, "non_positive_resources"),
+                               ("project_id", "", "project_id_required")):
+        with pytest.raises(dashboard_actions._Reject) as err:
+            parse({**ok, field: bad})
+        assert err.value.reason == reason, (field, bad)
+    close = dashboard._ACTIONS["/api/record/close"][0]
+    assert close({"lease_id": 31}) == {"lease_id": 31}
+    with pytest.raises(dashboard_actions._Reject):
+        close({"lease_id": "31"})
+
+
+def test_record_actions_audit_what_changed_and_record_refusals():
+    """A made record and a close that freed one are audited under the lease id (the result-aware predicates in
+    br0kr/records.py), and a refused record is recorded on the throttled refused channel. Guards a refused record
+    flooding the main trail or a made one going unrecorded."""
+    from br0kr import records
+    assert dashboard_actions._RESULT_AUDIT["/api/record/create"] is records.audit_record
+    assert dashboard_actions._RESULT_AUDIT["/api/record/close"] is records.audit_close
+    assert dashboard_actions._RESULT_REFUSED["/api/record/create"] is records.refused_record
+    assert "/api/record/close" not in dashboard_actions._RESULT_REFUSED
+
+
+def test_active_leases_panel_shows_records_and_offers_close_only():
+    """The Active leases table badges a capacity-only record (`record`, or `hold` when it holds no CPU; `container`
+    for an LXC), shows its label and, in the vmid column, the vmid it stands for in brackets (br0kr does not manage
+    it); offers `close record` from the Python `closable` flag and no detail dialog (there is no guest to show);
+    and the toolbar opens the record form. The form ticks a failover hold down to CPU 0, posts the fields the
+    parser reads, and warns when the node is now over its declared capacity; Close posts the lease id after a
+    confirm that says the guest is not touched. hasVm/mayGetVm never call a record's lease a VM. Guards a record
+    offered cancel or detail, a hold sent with CPU, or the form and the parser drifting apart."""
+    js = _SCRIPT
+    assert js is not None
+    assert "${+l.req_cpu === 0 ? 'hold' : 'record'}" in js and "' · container'" in js
+    assert "${l.lease_id}${l.is_reservation?resTag:''}${recTag(l)}" in js and "${vmidCell(l)}" in js
+    assert "if(canEdit && l.closable)    ops += ab('closeRecord', 'close record');" in js
+    assert "!l.is_reservation && l.ownership !== 'capacity_only') ops += ab('leaseDetail', 'detail');" in js
+    assert 'data-act="openRecordForm()">+ record existing guest</button>' in js
+    assert "const cpu = hold ? 0 : parseFloat($('rc-cpu').value)" in js
+    assert "{node_id:$('rc-node').value, project_id:$('rc-project').value, guest_kind:$('rc-kind').value," in js
+    assert "observed_vmid:vmid, label:label, req_cpu:cpu, req_mem_mb:mem}" in js
+    assert "postJSON('/api/record/create', body)" in js and "if(r.data.node_overcommitted)" in js
+    assert "postJSON('/api/record/close', {lease_id:id})" in js and "'Close record');" in js
+    assert "l.ownership !== 'capacity_only' && l.state === 'ADMITTED'" in js
+    for code in ("record_exists", "vmid_leased", "invalid_guest_kind", "invalid_observed_vmid", "invalid_label",
+                 "not_a_record"):
+        assert f"  {code}: " in js, code
 
 
 def test_the_overview_carries_the_fleet_and_ledger_strips_best_effort(monkeypatch):

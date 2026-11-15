@@ -49,8 +49,22 @@ def test_renew_lease_reports_a_lost_lease_as_not_renewed(monkeypatch):
     lease_not_live — the signal that tells an agent to stop work. Guards a None leaking through as a truthy
     'renewed', and a negative answer with no reason (review UX-03)."""
     monkeypatch.setattr(lease, "heartbeat", lambda c, lid: None)
+    monkeypatch.setattr(lease, "ownership_of", lambda c, lid: lease.PROVISIONED)
     out = gateway.renew_lease(object(), 7)
     assert out == {"lease_id": 7, "renewed": False, "expires_at": None, "reason": "lease_not_live"}
+
+
+def test_renew_lease_answers_lease_protected_for_a_lease_br0kr_did_not_build(monkeypatch):
+    """A renew of an adopted lease or a capacity-only record (0055) loses (lease.heartbeat matches provisioned
+    leases only) and answers lease_protected, not lease_not_live; an unknown id keeps lease_not_live. Guards a
+    renew reporting renewed=true for a record the inventory marks not renewable, and a tenant reading
+    lease_not_live as "my record ended" when it never will."""
+    from br0kr import reasons
+    monkeypatch.setattr(lease, "heartbeat", lambda c, lid: None)
+    owners = {1: lease.ADOPTED, 2: lease.CAPACITY_ONLY, 3: None}
+    monkeypatch.setattr(lease, "ownership_of", lambda c, lid: owners[lid])
+    assert [gateway.renew_lease(object(), lid)["reason"] for lid in (1, 2, 3)] == [
+        reasons.LEASE_PROTECTED, reasons.LEASE_PROTECTED, reasons.LEASE_NOT_LIVE]
 
 
 def test_release_lease_says_why_it_did_not_release(monkeypatch):

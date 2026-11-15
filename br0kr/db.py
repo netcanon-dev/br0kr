@@ -259,8 +259,9 @@ def assert_read_committed(conn: psycopg.Connection[Any]) -> None:
     A belt-and-braces check on `connect`'s isolation pin (`_READ_COMMITTED_OPT`): if a
     connection pooler in transaction/statement mode, a role/database-level `ALTER … SET
     default_transaction_isolation`, or a future kwarg ever defeats the pin, the admission floor's
-    race-freedom proof (`admission.admit`) is silently void. The admit-ing processes (the
-    reconciler daemon and the MCP gateway) call this once at startup and REFUSE TO SERVE on a
+    race-freedom proof (`admission.admit`) is silently void. The processes that write through
+    admission (the reconciler daemon, the MCP gateway, and the dashboard, whose Record existing guest
+    action runs `admission.record_existing`) call this once at startup and REFUSE TO SERVE on a
     mismatch, so a misconfigured ledger surfaces as a LOUD boot error instead of a silent
     double-allocation in production. Raises RuntimeError naming the observed level. See SECURITY.md
     (the admission-floor control) and docs/runbooks/ledger-ha.md.

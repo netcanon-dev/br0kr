@@ -433,10 +433,12 @@ def renew_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
     lease's renewable spot, capped at its max-wait ceiling). ``renewed`` is False (with ``expires_at``
     null and reason ``lease_not_live``) if the lease is no longer renewable — released/reaped, or a queued
     spot past its wait ceiling — in which case the caller must stop work (or re-request); the broker has
-    reclaimed it / dropped the spot."""
+    reclaimed it / dropped the spot. A lease br0kr did not build (0055: an adopted guest, a capacity-only record)
+    never renews: it answers ``lease_protected``, since it is pinned and nothing expires it."""
     exp = lease.heartbeat(conn, lease_id)
     if exp is None:
-        return {"lease_id": lease_id, "renewed": False, "expires_at": None, "reason": reasons.LEASE_NOT_LIVE}
+        reason = reasons.LEASE_PROTECTED if _protected(conn, lease_id, "renew") else reasons.LEASE_NOT_LIVE
+        return {"lease_id": lease_id, "renewed": False, "expires_at": None, "reason": reason}
     return {"lease_id": lease_id, "renewed": True, "expires_at": exp.isoformat()}
 
 
@@ -519,13 +521,14 @@ def cancel_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
     return {"lease_id": lease_id, "cancelled": False, "outcome": "noop", "reason": reasons.LEASE_NOT_LIVE}
 
 
-def _protected(conn: psycopg.Connection[Any], lease_id: int) -> bool:
-    """Whether a lease whose release just lost is one br0kr did not build (0055). Read after the CAS lost, so it only
-    names the refusal; the CAS itself is what refused (lease.release matches provisioned leases only). A detached
-    adopted lease (RELEASED) also answers ``lease_protected``: nothing br0kr does will release it."""
+def _protected(conn: psycopg.Connection[Any], lease_id: int, verb: str = "release") -> bool:
+    """Whether a lease whose release (or renew, `verb`) just lost is one br0kr did not build (0055). Read after the
+    CAS lost, so it only names the refusal; the CAS itself is what refused (lease.release and lease.heartbeat match
+    provisioned leases only). A detached adopted lease (RELEASED) also answers ``lease_protected``: nothing br0kr
+    does will release it."""
     ownership = lease.ownership_of(conn, lease_id)
     if ownership is not None and ownership != lease.PROVISIONED:
-        log.info("release of lease %d refused: br0kr did not build its guest (%s)", lease_id, ownership,
+        log.info("%s of lease %d refused: br0kr did not build its guest (%s)", verb, lease_id, ownership,
                  extra={"lease_id": lease_id, "ownership": ownership})
         return True
     return False

@@ -33,8 +33,8 @@ should have its target doc updated **in this same PR**.
 
 br0kr's invariants (SECURITY.md has the control behind each):
 
-- [ ] No new path grants capacity outside `admission.py`'s locked core
-      (`admit()` / `promote_pinned()`), and no new lease state write outside
+- [ ] No new path grants capacity outside `admission.py`'s scope locks
+      (`admit()` / `promote_pinned()` / `record_existing()`), and no new lease state write outside
       `lease.py`'s guarded CAS transitions
 - [ ] Every guest the change can destroy is first matched to br0kr's own
       fence or marker on the guest (`Pve.fenced_destroy` and its siblings),

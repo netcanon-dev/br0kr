@@ -4,7 +4,7 @@ br0kr was built to own every guest it knows about: it clones the guest, fences i
 it down when the lease ends. A real cluster also runs guests br0kr did not build and must never destroy: a storage
 server, a reverse proxy, a media container, br0kr's own ledger VM. To count them, br0kr needs to record them without
 ever being able to stop or delete them. This page is that design. Its first phase, the **never-destroy floor**, is
-built. The later phases are planned and not built yet.
+built, and so are the records of phase 2 (section 3). The later phases are planned and not built yet.
 
 See also: [pinned leases](pinned-lease.md) (the pin every recorded guest carries), [runtime.md §2](runtime.md#2-provisioning-and-teardown)
 (teardown and the orphan sweep), [storage and network discovery](storage-network-discovery.md) (node-scoped pools,
@@ -85,13 +85,39 @@ before PDM migration is enabled.
 Protection on the host is required before an adoption (phase 5 refuses an unprotected guest), so every adopted guest
 has all three layers.
 
-## 3. Later phases (planned, not built)
+## 3. Records (built, phase 2)
+
+An operator records a guest br0kr does not manage with the dashboard's **+ record existing guest** (Active leases),
+`POST /api/record/create`: the node it runs on, the project that pays for it, its kind (VM or container), its
+Proxmox vmid, a label and its memory and CPU. No agent tool records one: an agent never accounts for a guest it does
+not run. `admission.record_existing` writes it under the same scope locks as `admit()` (the node and project keys;
+a record debits no pool), so a record and a concurrent request race one budget with exactly one winner:
+
+- **The project's quota is a refusal.** A record counts in its project like any lease (decision: infrastructure
+  counts in its owner's quota), so the operator raises the quota first when it is full.
+- **The node is not.** A record stands for memory a guest already uses, so it is written even on a cordoned node or
+  one that is already full; the answer says `node_overcommitted` and a warning is logged. The node's declared
+  capacity usually left that guest out, so the operator raises it by the same amount after recording. Until then
+  the node refuses new requests, the safe direction.
+- **One open record per guest per node** (the partial unique index): a second answers `record_exists` with the open
+  one's id. A guest's home-node record and its failover hold on another node are two records.
+- **Never a guest br0kr runs.** On a node in a cluster, a vmid a live lease holds on that cluster is refused
+  `vmid_leased`.
+- **A failover hold** is a record with CPU 0: the memory the guest needs to restart on that node, and no CPU, since
+  it runs on only one node at a time (decision: a hold is memory only).
+
+A record is pinned, has no vmid and stays ADMITTED: nothing expires, provisions, releases or migrates it (section 2).
+The dashboard's **Close record**, `POST /api/record/close`, ends it: `lease.close_record` is the one ADMITTED to
+RELEASED edge, ledger-only, and stamps `releasing_at` so usage history counts the time it held capacity. Close a
+record when its guest is gone or moves; a node with an open record cannot be deleted. Both actions are audited.
+Proven on real Postgres by `scripts/harness_records.py`.
+
+## 4. Later phases (planned, not built)
 
 Each is a few small PRs, in this order:
 
-2. **Records and moves.** Capacity-only records through a new admission writer, `record_existing` (for example the
-   ledger VM on its home node plus a memory-only hold on its failover node, and a container), and moving a lease
-   between projects (`move_project`). Both new writers take the scope locks in `admission.py`.
+2. **Moves.** Moving a lease between projects (`move_project`), a second admission writer under the scope locks:
+   the target project's budget is checked like a new request, and the lease's usage history moves with it.
 3. **See the real allocation.** Every 5 minutes the daemon reads every guest and node from Proxmox into report-only
    tables, with a metric and an alert for guests br0kr does not account for. It never writes capacity.
 4. **Same-name pools.** A pool that is not shared becomes one row per node (`pool@node`), each reached by exactly one
@@ -108,7 +134,7 @@ the cluster CA.
 **Not planned yet:** turning an adopted guest into one br0kr may destroy (an adopted-to-managed conversion). It would
 need a deliberate migration that relaxes the section 1 CHECKs, and a confirmation flow with strong warnings.
 
-## 4. Upgrading and rolling back
+## 5. Upgrading and rolling back
 
 0055 only adds columns with constant defaults, CHECKs every existing row passes, and one partial index, so it needs
 no backfill. Before any adopted or capacity-only lease exists, rolling back past 0055 changes nothing. Once they

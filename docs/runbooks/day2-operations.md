@@ -253,7 +253,29 @@ exactly the containers whose environment changed.
    - is refused `node_in_use` while any lease row names the node, live or finished;
    - with `force`, it deletes once only finished history remains, and those history rows lose their node;
    - it is always refused while a live or queued lease, or a live template instance (`node_has_instances`: retire or
-     rebind it first), is on the node.
+     rebind it first), is on the node. An open record counts: close it first (below).
+
+## Record a guest br0kr does not manage
+
+A container, the ledger VM or any other guest br0kr did not build uses memory admission does not see. Record it so
+new VMs are not placed into that memory ([designs/fleet-onboarding.md](../designs/fleet-onboarding.md) §3).
+
+1. **Make room in the project.** A record counts in its project's quota, memory, CPU and one lease slot. Raise the
+   quota first if it would not fit (Tenancy tab, or `POST /api/project/edit`); the record is refused
+   `insufficient_project_*` or `project_lease_limit` otherwise.
+2. **Record it.** Active leases, **+ record existing guest**: the node it runs on, the project, VM or container, its
+   Proxmox vmid, a label and its memory and CPU. For a guest that fails over to another node (HA), add a second record
+   on that node with **Failover hold** ticked: memory only, CPU 0.
+3. **Raise the node.** If the node's declared memory or CPU left this guest out, the answer says the node now holds
+   more than it declares: raise the node's capacity by the same amount (Capacity tab). Until then new requests on
+   that node wait or are placed elsewhere; nothing already running is touched.
+4. **Close it when the guest goes.** **Close record** frees the memory and CPU at once and touches no guest. To
+   change a record's figures, close it and record it again. Close every record on a node before deleting the node.
+   Deleting a project leaves its open records holding node capacity with no project: close or re-record them
+   first.
+
+A record is never destroyed, expired or migrated, and its guest is never stopped. Do not roll back past migration
+0055 once a record exists (the table above).
 
 ## Re-clone a dead standby
 

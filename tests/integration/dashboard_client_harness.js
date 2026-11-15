@@ -1032,6 +1032,37 @@ const SCENARIOS = {
     await run("submitForm('node', 'create')"); await settle();
     return { formErr: $('form-err').textContent };
   },
+  // fleet onboarding phase 2: a record (capacity_only) in the leases table, the record form as a failover hold,
+  // and Close record from the table
+  async record_hold_and_close() {
+    const rec = LEASE(30, 'ADMITTED', null, { ownership: 'capacity_only', guest_kind: 'lxc', observed_vmid: 104,
+      label: '<b>media</b> box', req_cpu: 2, cancellable: false, renewable: false, pinned: true, closable: true });
+    const over = { ...OVERVIEW, leases: [LEASE(7, 'ACTIVE', 107, { ownership: 'provisioned' }), rec],
+      projects: [{ project_id: 'p1', cpu_available: 4, mem_mb_available: 8192 }] };
+    await boot({ token: 't', routes: { '/api/overview': ok(over),
+      '/api/record/create': ok({ lease_id: 31, recorded: true, reason: null, node_id: 'n1', project_id: 'p1',
+        node_overcommitted: true }),
+      '/api/record/close': ok({ lease_id: 30, closed: true, reason: null }) } });
+    const table = $('leases').innerHTML;
+    const acts = $('leases').querySelectorAll('button').map(b => b.getAttribute('data-act'));
+    run('openRecordForm()');
+    const form = $('form-slot').innerHTML;
+    run("document.getElementById('rc-hold').checked = true");
+    await dispatch($('rc-hold'), 'change');
+    const held = { cpu: $('rc-cpu').value, disabled: $('rc-cpu').disabled };
+    run(`document.getElementById('rc-vmid').value = '9950';
+      document.getElementById('rc-label').value = '  ledger failover hold ';
+      document.getElementById('rc-mem').value = '6144';`);
+    const n = calls.length;
+    await pressSave();
+    const created = { posts: posts(n), slot: $('form-slot').innerHTML, toasts: toasts() };
+    const m = calls.length;
+    await clickOn(buttonIn('leases', 'closeRecord(30)'));
+    const ask = { label: $('cm-ok').textContent, red: $('cm-ok').className.split(' ').includes('danger'),
+      says: $('dlg-desc').textContent, markup: $('dlg-desc').innerHTML };
+    await confirmYes();
+    return { table, acts, form, held, created, ask, closed: posts(m) };
+  },
   async toast_kinds_and_cap() {
     await boot({});
     run("for(let i = 0; i < 6; i++) notify('err ' + i, 'err'); notify('<b>done</b>', 'ok')");

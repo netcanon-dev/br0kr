@@ -29,7 +29,10 @@ See also: [../architecture.md](../architecture.md#module-map), [surfaces.md](sur
 - **Admission (`br0kr/admission.py`)** — `admit()`: ordered advisory locks over each debited scope +
   derived-capacity re-read + idempotent insert. Pure policy (`scope_keys`, `validate`, `shortfall`)
   is split out and unit-tested hermetically; the concurrency + idempotency are proven against real
-  Postgres in `scripts/harness_admission.py`.
+  Postgres in `scripts/harness_admission.py`. `record_existing` (an operator's capacity-only record of a guest br0kr
+  does not manage, fleet onboarding phase 2) takes the same node and project locks and budget read; the project
+  quota refuses it, the node's declared capacity does not (it reports `node_overcommitted`). Proven in
+  `scripts/harness_records.py`.
 - **Reason vocabulary (`br0kr/reasons.py`)** — the refusal reasons and error codes the request path answers an
   agent's ask with, one `Final` constant per code, named after its value
   (`INSUFFICIENT_NODE_CPU = "insufficient_node_cpu"`), plus the sets the request path branches on (`QUEUEABLE`,
@@ -113,7 +116,8 @@ check every teardown reads the guest's config before the stop and before the DEL
 `br0kr-keep` tag answers `protected`: nothing is stopped or deleted, the reaper ends that lease `RELEASE_FAILED`
 at once, the sweep counts it `protected_spared`, and a replication reclaim never marks a protected copy settled.
 No tag rewrite on a guest br0kr already fences drops the keep tag (`pve._keeping`), and the call that fences a
-fresh clone also clears the protection it copied from its template.
+fresh clone also clears the protection it copied from its template. A capacity-only record leaves only by
+`lease.close_record` (the dashboard's Close record): ADMITTED to RELEASED in the ledger, no guest touched.
 
 **Per-VMID fencing closes the cross-window/vmid-reuse gap:** `br0kr/pve.py` stamps each guest with its
 lease id and `fenced_destroy` deletes only on a tag match, so a stale teardown can never DELETE a

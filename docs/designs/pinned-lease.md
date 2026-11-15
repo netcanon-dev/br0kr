@@ -38,7 +38,7 @@ pinned at once. 0, the default, turns pinning off for the project. Ungoverned le
 Lowering the bound unpins nothing; it applies to the next pin, as a lowered quota applies to the next admission.
 A lease br0kr did not build (an adopted guest or a capacity-only record, migration `0055`) is always pinned by schema
 and can't be unpinned (`pin_class_fixed`); those pins are not counted against the bound
-([fleet-onboarding.md](fleet-onboarding.md)).
+([fleet-onboarding.md](fleet-onboarding.md)). A record ends by Close record instead, never by an unpin.
 
 **Race-freedom.** `pin.set_pinned` takes the project's row lock (`SELECT max_pinned … FOR NO KEY UPDATE`), then
 the lease row's the same way, counts the project's live pinned leases and pins only below the bound. Concurrent
@@ -77,7 +77,7 @@ its lock order untouched, at the cost of the rare admit-then-release on a lost r
 
 - `lease_status`, `list_leases` and the dashboard show `pinned`; the Active leases TTL column reads `pinned`.
 - A pinned lease is not `renewable` in the dashboard (its heartbeat is pointless).
-- `/metrics` exports `br0kr_leases_pinned` (live pinned leases, leader only), a family of its own beside
+- `/metrics` exports `br0kr_leases_pinned` (live pinned leases br0kr built, leader only), a family of its own beside
   `br0kr_leases{state=…}`, so a forgotten pin is visible.
 
 ## 6. Limits (v1)

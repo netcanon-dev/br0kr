@@ -524,6 +524,47 @@ def test_lease_create_audits_a_fresh_reservation_but_not_a_rejection(monkeypatch
     assert rows == []   # a rejection commits (nothing reserved) but is NOT trailed
 
 
+def test_record_routes_need_the_operator_token_validate_and_audit_only_what_changed(monkeypatch):
+    """The record routes (fleet onboarding phase 2) over a real socket: no token is 401 and reaches no verb; a
+    malformed body is a 400 naming its reason before any verb runs; a made record is a 200 audited under the new
+    lease id and the project; a refused record is a 200 carrying its reason and no main-trail row; a close that
+    freed a record is audited, one that did not is not. Guards a record written without the operator gate, a
+    malformed ask reaching the writer, or the trail missing a record (or flooding with refusals)."""
+    rows: list = []
+    seen: list = []
+
+    class _AuditConn(_FakeConn):
+        def execute(self, sql: str, params: object = None) -> _FakeConn:
+            if "INSERT INTO operator_audit" in sql:
+                rows.append(params)
+            return self
+
+    answer = {"lease_id": 31, "recorded": True, "reason": None, "node_id": "home", "project_id": "infra",
+              "node_overcommitted": False}
+    monkeypatch.setattr(dashboard_actions.records, "record", lambda c, **k: seen.append(k) or dict(answer))
+    monkeypatch.setattr(dashboard_actions.records, "close",
+                        lambda c, **k: {"lease_id": k["lease_id"], "closed": k["lease_id"] == 31,
+                                        "reason": None if k["lease_id"] == 31 else "not_a_record"})
+    body = {"node_id": "home", "project_id": "infra", "req_cpu": 4, "req_mem_mb": 8192, "observed_vmid": 9950,
+            "label": "ledger VM"}
+    with _serving(lambda: _AuditConn(), token="sekret") as port:
+        assert _post(port, "/api/record/create", body)[0] == 401
+        status, text = _post(port, "/api/record/create", {**body, "label": ""}, token="sekret")
+        assert status == 400 and "invalid_label" in text
+        assert seen == []
+        status, text = _post(port, "/api/record/create", body, token="sekret")
+        assert status == 200 and json.loads(text)["recorded"] is True
+        assert len(rows) == 1 and "infra" in rows[0] and "31" in rows[0]
+        assert seen == [{**body, "req_cpu": 4.0, "guest_kind": "qemu"}]
+        rows.clear()
+        answer.update(lease_id=None, recorded=False, reason="insufficient_project_mem")
+        status, text = _post(port, "/api/record/create", body, token="sekret")
+        assert status == 200 and json.loads(text)["reason"] == "insufficient_project_mem" and rows == []
+        assert _post(port, "/api/record/close", {"lease_id": 31}, token="sekret")[0] == 200 and len(rows) == 1
+        status, text = _post(port, "/api/record/close", {"lease_id": 7}, token="sekret")
+        assert json.loads(text)["reason"] == "not_a_record" and len(rows) == 1
+
+
 def test_lease_create_and_renew_require_the_operator_token(monkeypatch):
     """The act-as create + the renew are token-gated writes: no bearer -> 401, wrong bearer -> 401, and with
     NO operator token configured -> 403 disabled. Guards the provisioning surface (which debits a project's
@@ -1274,24 +1315,43 @@ def test_healthz_closes_its_own_probe_connection_and_never_pools_it():
 def test_main_closes_its_pool_on_sigterm_and_names_a_boot_error(monkeypatch):
     """main() serves until SIGTERM (what `docker stop` sends), then stops the server and closes its ledger pool.
     When the boot check cannot borrow a connection (PoolTimeout), one direct connect raises the real reason, and
-    the pool is still closed. Guards the dashboard, PID 1 in its container, ignoring SIGTERM until it is killed,
-    so its pooled sessions are dropped on every deploy; and a wrong password surfacing only as the pool's
-    timeout."""
+    the pool is still closed. A ledger session that is not READ COMMITTED refuses the boot before anything is
+    served (the record writer takes admission's locks in this process). Guards the dashboard, PID 1 in its
+    container, ignoring SIGTERM until it is killed, so its pooled sessions are dropped on every deploy; a wrong
+    password surfacing only as the pool's timeout; and a record admitted on an isolation that reopens the
+    double-allocation race."""
     import signal
+    from types import SimpleNamespace
 
     import psycopg
     from psycopg_pool import PoolTimeout
 
     events: list[str] = []
 
+    class _Conn:
+        """What the boot isolation canary (db.assert_read_committed) reads: an idle session at `level`."""
+
+        autocommit = False
+
+        def __init__(self, level: str) -> None:
+            self.level = level
+            self.info = SimpleNamespace(transaction_status=psycopg.pq.TransactionStatus.IDLE)
+
+        def execute(self, _sql: str):
+            return SimpleNamespace(fetchone=lambda: (self.level,))
+
+        def rollback(self) -> None:
+            pass
+
     class _Pool:
-        def __init__(self, reachable: bool) -> None:
+        def __init__(self, reachable: bool, level: str = "read committed") -> None:
             self.reachable = reachable
+            self.level = level
 
         def connection(self):
             if not self.reachable:
                 raise PoolTimeout("couldn't get a connection after 15.00 sec")
-            return contextlib.nullcontext(object())
+            return contextlib.nullcontext(_Conn(self.level))
 
         def getconn(self):
             return object()
@@ -1327,5 +1387,11 @@ def test_main_closes_its_pool_on_sigterm_and_names_a_boot_error(monkeypatch):
         with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
             dashboard.main()
         assert events == ["pool closed"]
+
+        events.clear()
+        monkeypatch.setattr(dashboard.db, "pool", lambda **_k: _Pool(reachable=True, level="repeatable read"))
+        with pytest.raises(RuntimeError, match="'repeatable read'"):
+            dashboard.main()
+        assert events == ["pool closed"]   # never served: _build's server was not started
     finally:
         signal.signal(signal.SIGTERM, previous)

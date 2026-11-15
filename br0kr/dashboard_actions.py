@@ -2,11 +2,11 @@
 
 `_ACTIONS` maps each POST path to `(parse, verb)`. `parse(body)` coerces and validates the JSON body into the
 verb's keyword arguments, or raises `_Reject(reason)` for a clean 400 (a coercion error is a generic 400).
-`verb(conn, **kwargs)` runs the write through an admin, gateway, actas, pin, replication or settings function,
-looked up at call time, so a test that patches one in its home module is seen here. The verbs do NOT commit:
-in br0kr/dashboard.py, do_POST authorizes the caller before reading the body, and its `_action` runs the verb,
-commits and writes the audit row (the commit is load-bearing for the admin verbs and a no-op for cancel, whose
-lease helpers commit themselves).
+`verb(conn, **kwargs)` runs the write through an admin, gateway, actas, pin, records, replication or settings
+function, looked up at call time, so a test that patches one in its home module is seen here. The verbs do NOT
+commit: in br0kr/dashboard.py, do_POST authorizes the caller before reading the body, and its `_action` runs the
+verb, commits and writes the audit row (the commit is load-bearing for the admin verbs and a no-op for cancel and
+the records verbs, which commit themselves).
 Write correctness and race safety live in the verbs; this module only marshals. Each action also has a row in
 tests/unit/test_surface_parity.py saying which MCP tool does the same, or why none does (review CODE-05).
 
@@ -25,7 +25,7 @@ from typing import Any
 
 import psycopg
 
-from br0kr import actas, admin, gateway, pin, replication, settings
+from br0kr import actas, admin, admission, gateway, pin, records, replication, settings
 
 
 class _Reject(Exception):
@@ -223,6 +223,30 @@ def _parse_max_pinned(body: dict[str, Any]) -> dict[str, Any]:
     if reason is not None:
         raise _Reject(reason)
     return {"project_id": pid, "max_pinned": raw}
+
+
+def _parse_record_create(body: dict[str, Any]) -> dict[str, Any]:
+    """Parse "record an existing guest" (fleet onboarding phase 2): the node and project ids, the guest's memory
+    (MiB) and CPU (0 for a memory-only failover hold), its Proxmox vmid, a label, and `guest_kind` (`qemu` when
+    absent). The amounts are read as every form reads them (`_num`: a JSON bool is refused, a number or numeric
+    string is converted); the vmid must be a JSON integer and the label a string. Then the whole ask goes
+    through admission.validate_record, so a malformed record is a 400 naming the same reason the writer would
+    give. The writer re-checks it and reads the node and project under the locks."""
+    vmid = body.get("observed_vmid")
+    if not isinstance(vmid, int) or isinstance(vmid, bool):
+        raise _Reject("invalid_observed_vmid")
+    label = body.get("label")
+    if not isinstance(label, str):
+        raise _Reject("invalid_label")
+    out = {"node_id": _req_str(body, "node_id"), "project_id": _req_str(body, "project_id"),
+           "req_cpu": _num(body, "req_cpu", float), "req_mem_mb": _num(body, "req_mem_mb", int),
+           "observed_vmid": vmid, "label": label, "guest_kind": _opt_str(body, "guest_kind") or "qemu"}
+    reason = admission.validate_record(project_id=out["project_id"], req_cpu=out["req_cpu"],
+                                       req_mem_mb=out["req_mem_mb"], guest_kind=out["guest_kind"],
+                                       observed_vmid=vmid, label=label)
+    if reason is not None:
+        raise _Reject(reason)
+    return out
 
 
 def _parse_node(body: dict[str, Any]) -> dict[str, Any]:
@@ -584,6 +608,12 @@ _ACTIONS: dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]],
     # the project row lock (br0kr/pin.py). Does not commit; _action does, which also frees the row locks.
     "/api/lease/pin": (lambda b: {"lease_id": _req_int(b, "lease_id"), "pinned": _req_bool(b, "pinned")},
                        lambda c, **k: pin.set_pinned(c, k["lease_id"], pinned=k["pinned"])),
+    # Fleet onboarding phase 2 (br0kr/records.py): record a guest br0kr does not manage, holding its memory and CPU
+    # against a project's quota under admission's locks, and close such a record. Dashboard only: no agent records
+    # a guest it does not run. The writer commits itself; _action's commit is a no-op. Audited result-aware.
+    "/api/record/create": (_parse_record_create, lambda c, **k: records.record(c, **k)),
+    "/api/record/close": (lambda b: {"lease_id": _req_int(b, "lease_id")},
+                          lambda c, **k: records.close(c, **k)),
     # /api/quota is the BASE-quota editor — preserves the *_max ceilings (set_base_quota). /api/project/edit
     # is the full project edit (set_project_quota, which also writes the ceilings).
     "/api/quota": (_parse_base_quota, lambda c, **k: admin.set_base_quota(c, **k)),
@@ -783,6 +813,8 @@ _RESULT_AUDIT: dict[str, Callable[[dict[str, Any], dict[str, Any]], tuple[bool, 
     "/api/lease/create": actas.audit_create,
     "/api/template/download": actas.audit_download,
     "/api/replication/create": actas.audit_replicate,
+    "/api/record/create": records.audit_record,
+    "/api/record/close": records.audit_close,
 }
 
 # The complement of _RESULT_AUDIT for the FINAL-refusal channel (0033/PR-3): path -> a predicate
@@ -795,4 +827,5 @@ _RESULT_REFUSED: dict[str, Callable[[dict[str, Any], dict[str, Any]], tuple[bool
     "/api/lease/create": actas.refused_create,
     "/api/template/download": actas.refused_download,
     "/api/replication/create": actas.refused_replicate,
+    "/api/record/create": records.refused_record,
 }

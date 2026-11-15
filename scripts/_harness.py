@@ -55,9 +55,9 @@ OWN_SETUP: dict[str, str] = {
 OWN_CONTAINER = frozenset({"ledger_ha"})
 # The proofs CI runs on every PR (the race-free admission, the promoter, the vmid fence race, the lease CASes,
 # the migration saga, multi-disk admission, template seeding, the gateway wiring, the SLO reads, the token CLI,
-# the usage report).
+# the usage report, capacity-only records).
 CI_SET: tuple[str, ...] = ("admission", "queue", "vmid_race", "lease", "migrate_lease", "multidisk_admit",
-                           "template_seed", "gateway", "slo", "cli", "usage")
+                           "template_seed", "gateway", "slo", "cli", "usage", "records")
 
 IMAGE = os.environ.get("BR0KR_HARNESS_PG_IMAGE", "postgres:16")
 DEFAULT_TIMEOUT = 420   # seconds per harness; the slowest (lease) takes under 3 minutes on a 4-vCPU host

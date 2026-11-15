@@ -357,6 +357,33 @@ def test_release_moves_only_a_live_lease():
     assert lease.release(lost, 7) is False and lost.commits == 1
 
 
+def test_close_record_moves_only_an_open_capacity_only_record():
+    """close_record() is the one ADMITTED → RELEASED edge: it matches only an ADMITTED capacity-only lease (0055),
+    stamps the reason and releasing_at (the end of the hold the usage report measures), commits, and reports a lease
+    it did not match as False. Guards a close that frees the capacity of a provisioned or adopted guest that still
+    runs, or a closed record that the usage report counts as unmeasured."""
+    conn = _CasConn(row=(7,))
+    assert lease.close_record(conn, 7) is True
+    sql = conn.sql[0]
+    assert sql.startswith("UPDATE lease SET state = 'RELEASED', released_reason = %s, releasing_at = now()"), sql
+    assert " ".join(sql.split()).endswith("WHERE id = %s AND state = 'ADMITTED' AND ownership = %s RETURNING id")
+    assert conn.params[0] == ("record_closed", 7, lease.CAPACITY_ONLY) and conn.commits == 1
+    assert lease.can_transition("ADMITTED", "RELEASED")
+    lost = _CasConn(row=None)
+    assert lease.close_record(lost, 7) is False and lost.commits == 1
+
+
+def test_heartbeat_renews_only_a_lease_br0kr_built():
+    """heartbeat() matches only a provisioned lease (0055) in a renewable state: an adopted guest's or a
+    capacity-only record's lease is pinned with no TTL to push, so its renew loses (None) and the gateway names
+    it lease_protected. Guards a renew answering renewed=true for a record the inventory marks not renewable."""
+    conn = _CasConn(row=None)
+    assert lease.heartbeat(conn, 7) is None
+    sql = " ".join(conn.sql[0].split())
+    assert "WHERE id = %s AND state IN " in sql and " AND ownership = %s" in sql, sql
+    assert conn.params[0] == (7, lease.PROVISIONED) and conn.commits == 1
+
+
 def test_claim_releasing_hands_each_row_to_one_reaper():
     """claim_releasing() takes only RELEASING rows never handed out or handed out longer ago than the grace window,
     fresh ones first, locks them with FOR UPDATE SKIP LOCKED inside the same statement so a concurrent reaper skips

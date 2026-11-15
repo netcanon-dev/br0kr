@@ -228,6 +228,12 @@ const REASON_HINT = {
   pin_not_queueable: 'a queued request cannot ask for a pin; pin the lease once it is admitted',
   pin_refused_on_replay: 'a retry never adds a pin: the lease is live but not pinned (pin it here, or release it)',
   negative_max_pinned: 'the pin limit cannot be negative',
+  record_exists: 'an open record already counts this vmid on this node',
+  vmid_leased: 'br0kr already runs this vmid as a lease, so it is counted; never record it',
+  invalid_guest_kind: 'pick VM or container',
+  invalid_observed_vmid: "enter the guest's Proxmox vmid (100 or more)",
+  invalid_label: 'enter a one-line label of 1 to 200 characters',
+  not_a_record: 'this lease is not a record: br0kr built or adopted its guest, so end it through its own action',
   already_terminal: 'it has already ended',
   already_revoked: 'it was already revoked',
   already_granted: 'that project already has access',
@@ -358,8 +364,9 @@ async function postJSON(path, body){
 }
 // a lease whose release destroys a VM: one that is running or being cloned. A reserved (ADMITTED) one has none
 // yet, but the daemon may start cloning it at any moment, so it is as risky. A migration reservation has no guest.
-const hasVm = l => !!l && !l.is_reservation && (l.state === 'ACTIVE' || l.state === 'PROVISIONING');
-const mayGetVm = l => !!l && !l.is_reservation && l.state === 'ADMITTED';
+const hasVm = l => !!l && !l.is_reservation && l.ownership !== 'capacity_only'
+  && (l.state === 'ACTIVE' || l.state === 'PROVISIONING');
+const mayGetVm = l => !!l && !l.is_reservation && l.ownership !== 'capacity_only' && l.state === 'ADMITTED';
 // A cancel asks the server about the lease before it asks the operator, so one is prepared at a time: a second
 // click while the first is still reading does nothing, and a confirm that would open over another dialog says so.
 let CANCEL_ASKING = false;
@@ -448,6 +455,73 @@ async function submitMaxPinned(i){
   const r = await postJSON('/api/project/max-pinned', {project_id:p.project_id, max_pinned:num});
   if(r.ok && r.data && r.data.updated) closeForm();       // closeForm() re-polls → the project card refreshes
   else $('form-err').textContent = why(r);
+}
+// ── Records (fleet onboarding phase 2): memory and CPU held for a guest br0kr does not manage (a container, the
+//    ledger VM, a failover hold). The server answers the refusals; this form only catches what it can see. ──
+function openRecordForm(){
+  if(paused) return;
+  const projOpts = cvProjectOptions(), nodes = (DATA && DATA.nodes) || [];
+  if(!projOpts){ notify('No projects defined — create one on the Tenancy tab first.', 'info'); return; }
+  if(!nodes.length){ notify('No nodes defined — add one on the Capacity tab first.', 'info'); return; }
+  paused = true;
+  const nodeOpts = nodes.map(n => `<option value="${esc(n.node_id)}">${esc(n.node_id)}`
+    + `${n.cordoned ? ' (cordoned)' : ''}</option>`).join('');
+  openDialog(`<div class="form" style="max-width:560px"><h3>Record an existing guest</h3>
+    <p class="banner">Holds the guest's memory and CPU against the project's quota, so the broker stops offering
+      that room to new VMs. br0kr never starts, stops or destroys the guest.</p>
+    <label class="ff"><span>Node it runs on</span><select id="rc-node">${nodeOpts}</select></label>
+    <label class="ff"><span>Project</span><select id="rc-project">${projOpts}</select></label>
+    <label class="ff"><span>Kind</span><select id="rc-kind"><option value="qemu" selected>VM</option>
+      <option value="lxc">container</option></select></label>
+    <label class="ff"><span>Proxmox vmid</span><input id="rc-vmid" type="number" step="1" min="100"></label>
+    <label class="ff"><span>Label</span><input id="rc-label" type="text" maxlength="200"
+      placeholder="what it is, e.g. media server"></label>
+    <label class="ff"><span>CPU (cores)</span><input id="rc-cpu" type="number" step="any" min="0" value="1"></label>
+    <label class="ff"><span>Memory (MiB)</span><input id="rc-mem" type="number" step="1" min="1" value="2048"></label>
+    <label class="ff"><span>Failover hold (memory only)</span><input id="rc-hold" type="checkbox"
+      data-change="recordHoldChanged()"></label>
+    <p class="pill">A failover hold keeps memory free on another node so the guest can restart there: record it on
+      that node with this box ticked. Record first, then raise the node by the same amount if its declared
+      capacity already left this guest out.</p>
+    <div class="erow"><button class="act" data-act="submitRecord()">record guest</button>
+    <button class="act ghost" data-act="closeForm()">cancel</button>
+    <span id="form-err" class="ferr"></span></div></div>`);
+}
+function recordHoldChanged(){
+  const c = $('rc-cpu'), hold = $('rc-hold').checked;
+  if(hold) c.value = '0';
+  c.disabled = hold;
+}
+async function submitRecord(){
+  const hold = $('rc-hold').checked;
+  const cpu = hold ? 0 : parseFloat($('rc-cpu').value), mem = parseInt($('rc-mem').value, 10);
+  const vmid = Number($('rc-vmid').value.trim()), label = $('rc-label').value.trim();
+  if(!(cpu >= 0) || !(mem > 0)){ $('form-err').textContent = 'Memory must be positive and CPU 0 or more.'; return; }
+  if(!Number.isInteger(vmid) || vmid < 100){
+    $('form-err').textContent = "Enter the guest's Proxmox vmid (100 or more)."; return;
+  }
+  if(!label){ $('form-err').textContent = 'Enter a label.'; return; }
+  const body = {node_id:$('rc-node').value, project_id:$('rc-project').value, guest_kind:$('rc-kind').value,
+    observed_vmid:vmid, label:label, req_cpu:cpu, req_mem_mb:mem};
+  const r = await postJSON('/api/record/create', body);
+  if(r.ok && r.data && r.data.recorded){
+    closeForm();
+    if(r.data.node_overcommitted) notify('Recorded as lease ' + r.data.lease_id + '. Node ' + body.node_id
+      + ' now holds more than it declares: raise its capacity, or new VMs there wait.', 'info');
+    return;
+  }
+  $('form-err').textContent = why(r);
+}
+function closeRecord(id){
+  const l = ((DATA && DATA.leases) || []).find(x => x.lease_id === id) || {};
+  const what = (l.label ? '“' + l.label + '”' : 'record ' + id)
+    + (l.observed_vmid != null ? ' (vmid ' + l.observed_vmid + (l.node_id ? ' on ' + l.node_id : '') + ')' : '');
+  confirmModal('Close ' + what + '? Its memory and CPU stop counting at once. The guest itself is not touched: '
+    + 'if it still runs, new VMs may be placed into memory it uses.', async () => {
+    const r = await postJSON('/api/record/close', {lease_id:id});
+    if(r.ok && r.data && r.data.closed){ poll(); return; }
+    notify('Close failed: ' + why(r), 'err');
+  }, false, 'Close record');
 }
 function setTemplateDisk(i){
   // phase A4.2: open a modal to set/clear a project's template-disk ceiling (GiB). Blank = disable downloads.
@@ -2079,9 +2153,18 @@ function renderLeases(){
   const resTag = ' <span class="warn" title="cross-cluster migration reservation — no guest">reservation</span>';
   const pinTag = '<span style="color:var(--accent)" title="pinned: never reclaimed for a missed heartbeat">'
     + 'pinned</span>';
+  // A record (0055 capacity_only) holds capacity for a guest br0kr does not manage; a hold is one with no CPU.
+  const recTag = l => l.ownership === 'capacity_only'
+    ? ` <span class="pill" title="a record: br0kr holds this capacity and never touches the guest">`
+      + `${+l.req_cpu === 0 ? 'hold' : 'record'}${l.guest_kind === 'lxc' ? ' · container' : ''}</span>`
+      + (l.label ? `<div class="pill">${esc(l.label)}</div>` : '')
+    : (l.ownership === 'adopted' ? ' <span class="pill" title="an adopted guest: never destroyed">adopted</span>' : '');
+  const vmidCell = l => l.vmid != null ? l.vmid : (l.observed_vmid != null
+    ? `<span title="the guest this record stands for; br0kr does not manage it">(${+l.observed_vmid})</span>` : '—');
   let bar = '';
   if(canEdit){
-    const createBtn = `<button class="act" data-act="openCreateVM()">+ create VM</button>`;
+    const createBtn = `<button class="act" data-act="openCreateVM()">+ create VM</button> `
+      + `<button class="act ghost" data-act="openRecordForm()">+ record existing guest</button>`;
     if(sel){
       bar = `<div class="toolbar"><button class="act danger" data-act="cancelSelected()">cancel selected</button> `
         + `<button class="act ghost" data-act="exitLeaseSelect()">done</button>`
@@ -2105,20 +2188,21 @@ function renderLeases(){
       const ab = (fn, lbl, red) => `<button class="act ${red ? 'danger' : 'ghost'}" `
         + `data-act="${fn}(${+l.lease_id})">${lbl}</button> `;
       let ops = '';
-      if(canEdit && !l.is_reservation) ops += ab('leaseDetail', 'detail');
+      if(canEdit && !l.is_reservation && l.ownership !== 'capacity_only') ops += ab('leaseDetail', 'detail');
       if(canEdit && l.renewable)   ops += ab('renewLease', 'renew');
       if(canEdit && l.pinnable)    ops += ab(l.pinned ? 'unpinLease' : 'pinLease', l.pinned ? 'unpin' : 'pin');
       if(canEdit && l.cancellable) ops += ab('cancelLease', 'cancel', hasVm(l) || mayGetVm(l));   // a VM goes
       if(canEdit && l.migratable)  ops += ab('openMigrateForm', 'migrate');
+      if(canEdit && l.closable)    ops += ab('closeRecord', 'close record');   // re-recordable: not red
       opcell = ops;
     }
     return `<tr>
       <td class="num">${i+1}</td>
-      <td>${l.lease_id}${l.is_reservation?resTag:''}</td>
+      <td>${l.lease_id}${l.is_reservation?resTag:''}${recTag(l)}</td>
       <td class="pill">${l.project_id?esc(l.project_id):'—'}</td>
       <td class="pill">${place}</td>
       <td><span style="color:${lstate(l.state)}">${esc(l.state)}</span></td>
-      <td class="num">${l.vmid!=null?l.vmid:'—'}</td>
+      <td class="num">${vmidCell(l)}</td>
       <td class="pill">${l.ip_address?esc(l.ip_address):'—'}</td>
       <td class="num">${l.req_cpu}</td><td class="num">${gib(l.req_mem_mb)}</td>
       <td class="pill">${store}</td>
@@ -2773,16 +2857,16 @@ fetchJSON('/api/meta').then(r => {
 function selectText(el){ el.select(); }   // a read-only field an operator copies from (the ssh command)
 const ACTS = {
   ackFailures, cancelLease, cancelMigration, cancelReplication, cancelSelected, clearAuditFilters, clearDismissal,
-  clearPdm, closeForm, copyOperatorSecret, copySecret, cvRefreshTemplates, delItem, delSource, deleteInstance,
+  clearPdm, closeForm, closeRecord, copyOperatorSecret, copySecret, cvRefreshTemplates, delItem, delSource, deleteInstance,
   deleteNetwork, editItem, enterLeaseSelect, exitLeaseSelect, exportAudit, forceFailBuild, forceFailReplication, goTo,
   leaseDetail, loadAudit, loadMoreAudit, loadOperators, loadTokens, loadUsage, lock, openBindForm, openBridgesForm,
   openContentForm, openCreateVM, openDismissForm, openDownloadForm, openForm, openGrantForm, openMigrateForm,
-  openNetworkForm, openOperatorForm, openPlacementForm, openReplicateForm, openReplicatePrune, openSourceForm,
+  openNetworkForm, openOperatorForm, openPlacementForm, openRecordForm, openReplicateForm, openReplicatePrune, openSourceForm,
   openStorageNodeAdd, openStoragePair, openTemplateNetForm, openTenantDownload, openTokenForm, pinLease, reloadFleet,
-  renewLease, replClusterChanged, retireInstance, revokeGrant, revokeOperator, revokeToken, setMaxPinned, setTab,
+  recordHoldChanged, renewLease, replClusterChanged, retireInstance, revokeGrant, revokeOperator, revokeToken, setMaxPinned, setTab,
   setTemplateDisk, setTokenExpiry, submitBind, submitContent, submitCreateVM, submitDismiss, submitDownload,
   submitForm, submitGrant, submitMaxPinned, submitMigrate, submitNetwork, submitOperator, submitPlacement,
-  submitReplicate, submitReplicatePrune, submitSettings, submitSource, submitStorageNodeAdd, submitTemplateDisk,
+  submitRecord, submitReplicate, submitReplicatePrune, submitSettings, submitSource, submitStorageNodeAdd, submitTemplateDisk,
   submitTemplateNet, submitTenantDownload, submitToken, submitTokenExpiry, syncNever, toggleCordon, toggleSourceDirty,
   unlock, unpinLease, selectText
 };

@@ -16,7 +16,8 @@ rollout.
   never edit a hub file. Capability is added additively. A function past the length ceiling in
   [docs/architecture.md](docs/architecture.md#module-size) is split into named steps, or its reason is written there.
 - **One race-critical seam.** Every capacity grant is made under the scope advisory locks in
-  `br0kr/admission.py`: `admit()` and its sibling `promote_pinned()` share one locked core, and nothing else adds
+  `br0kr/admission.py`: `admit()` and its sibling `promote_pinned()` share one locked core, an operator's record of
+  a guest br0kr does not manage (`record_existing()`) takes the same locks and budget read, and nothing else adds
   a debit. Capacity is freed only by the guarded-CAS lease transitions in `br0kr/lease.py`, which need no lock
   (each targets one existing row). A job's transitions (build, replication, migration) are the edges of its
   machine in `br0kr/statemachine.py`, and a test checks every guarded UPDATE in those modules against it. Inputs reach their

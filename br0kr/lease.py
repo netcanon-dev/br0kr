@@ -13,6 +13,8 @@ State machine (docs/architecture.md "Lease lifecycle"):
     RELEASE_FAILED — a guest the reaper could not destroy after repeated
                      attempts; terminal, and does NOT hold capacity (the slot is
                      freed, the orphaned vmid is left for an operator).
+    ADMITTED → RELEASED — a capacity-only record (0055) closing: no guest, so
+                     no teardown (close_record).
 
 `LIVE_STATES` = the states that HOLD capacity and can be renewed or released.
 `RELEASING` still holds capacity (the guest isn't gone yet) but is past the point
@@ -127,13 +129,14 @@ def is_reserved_idem_key(idem_key: str | None) -> bool:
 # The legal edges of the state machine — and, for every edge below, there is a
 # guarded-CAS function here that implements it. One raw UPDATE elsewhere takes a lease edge:
 # replication.sweep_waiters rejects a queued lease whose awaited replication failed (PENDING →
-# REJECTED), checked against this machine by tests/unit/test_statemachine.py. A transition NOT
-# listed is a bug, not a race. Declared with the same
+# REJECTED), checked against this machine by tests/unit/test_statemachine.py. ADMITTED → RELEASED is
+# close_record's alone: a capacity-only record has no guest to tear down, so it skips RELEASING (which
+# the 0055 shape CHECK forbids it). A transition NOT listed is a bug, not a race. Declared with the same
 # Machine class as the job machines (br0kr/statemachine.py, review ARCH-04), here beside
 # its CAS functions; VALID_TRANSITIONS is its read-only edge table.
 LEASE = statemachine.Machine("lease", {
     "PENDING": frozenset({"ADMITTED", "REJECTED"}),
-    "ADMITTED": frozenset({"PROVISIONING", "RELEASING"}),
+    "ADMITTED": frozenset({"PROVISIONING", "RELEASING", "RELEASED"}),
     "PROVISIONING": frozenset({"ACTIVE", "RELEASING"}),
     "ACTIVE": frozenset({"RELEASING"}),
     "RELEASING": frozenset({"RELEASED", "RELEASE_FAILED"}),
@@ -422,6 +425,9 @@ def heartbeat(conn: psycopg.Connection[Any], lease_id: int) -> datetime | None:
     heartbeat lose gracefully — if the reaper already flipped the lease to RELEASING (or a
     PENDING spot to REJECTED), this updates 0 rows and the agent learns its lease is gone
     instead of working on (or waiting for) a lease the broker has reclaimed.
+
+    Only a lease br0kr built renews (0055): an adopted guest's or a capacity-only record's lease is pinned and has no
+    TTL to push, so its renew loses and the gateway answers ``lease_protected``.
     """
     row = conn.execute(
         f"""UPDATE lease
@@ -429,10 +435,10 @@ def heartbeat(conn: psycopg.Connection[Any], lease_id: int) -> datetime | None:
                    expires_at   = CASE WHEN queue_deadline IS NOT NULL
                                        THEN LEAST(now() + make_interval(secs => ttl_seconds), queue_deadline)
                                        ELSE now() + make_interval(secs => ttl_seconds) END
-             WHERE id = %s AND state IN {_RENEWABLE_SQL}
+             WHERE id = %s AND state IN {_RENEWABLE_SQL} AND ownership = %s
                AND (queue_deadline IS NULL OR queue_deadline > now())
          RETURNING expires_at""",
-        (lease_id,),
+        (lease_id, PROVISIONED),
     ).fetchone()
     conn.commit()
     if row is None:
@@ -473,6 +479,29 @@ def release(conn: psycopg.Connection[Any], lease_id: int, reason: str = "complet
         "initiated" if won else "ignored (already releasing/gone)",
         extra={"lease_id": lease_id, "reason": reason},
     )
+    return won
+
+
+def close_record(conn: psycopg.Connection[Any], lease_id: int, reason: str = "record_closed") -> bool:
+    """Close a capacity-only record: CAS ADMITTED → RELEASED in one statement, so its memory and CPU stop counting.
+
+    A record (0055, ownership ``capacity_only``) holds capacity for a guest br0kr does not manage, so closing it
+    touches no guest and needs no reaper pass: it goes straight to RELEASED, the one lease edge that skips
+    RELEASING. Stamps ``releasing_at`` too, the end of the hold inventory.project_usage measures (a closed record
+    without it would read as unmeasured). Returns ``True`` if this call closed it; ``False`` for any other lease,
+    one already closed, or an unknown id (records.close names which). Never matches a provisioned or adopted lease,
+    so it cannot free the capacity of a guest that still runs.
+    """
+    row = conn.execute(
+        """UPDATE lease SET state = 'RELEASED', released_reason = %s, releasing_at = now()
+             WHERE id = %s AND state = 'ADMITTED' AND ownership = %s
+         RETURNING id""",
+        (reason, lease_id, CAPACITY_ONLY),
+    ).fetchone()
+    conn.commit()
+    won = row is not None
+    log.info("record %s", "closed" if won else "close ignored (not an open record)",
+             extra={"lease_id": lease_id, "reason": reason})
     return won
 
 

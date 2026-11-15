@@ -438,8 +438,8 @@ Returns {depth, shown, truncated, waiting: [...]}. Requires a read-tier (or high
 List YOUR project's ACTIVE leases — the ones currently HOLDING capacity (ADMITTED/PROVISIONING/
 ACTIVE/RELEASING), oldest-first (up to `limit`). Each entry carries the lease id, where it runs (node/
 cluster/vmid/ip), its state and ask (cpu/mem/storage/disk), how long it has run, and how long until its
-heartbeat TTL expires — so you can see what you hold before renew_leases/release_leases (the bulk ops)
-or a targeted release. PENDING (queued) leases are NOT here — use queue_view for those; a terminal lease
+heartbeat TTL expires. An `ownership` other than provisioned (an operator's record of a guest br0kr does
+not run) is not yours to release. PENDING (queued) leases are NOT here — use queue_view for those; a terminal lease
 is gone. Scoped to your token's project — a PROJECT-BOUND token never sees another tenant's leases; an
 OPERATOR token (not project-bound) sees ALL tenants' leases. Returns {acting_as, leases: [...]} (`acting_as`
 = your bound project, null for an operator). Requires a read-tier (or higher) token."""),

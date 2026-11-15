@@ -999,9 +999,13 @@ def main() -> None:
     # backend process each. /healthz keeps its fast, non-pooled probe.
     pool = db.pool(max_size=DASHBOARD_POOL_MAX, application_name="br0kr-dashboard")
     try:
-        # Refuse to serve on a ledger older than this build (review ARCH-02); a boot-time blip is ridden through.
+        # Refuse to serve on a ledger older than this build (review ARCH-02), or one whose isolation would void the
+        # admission floor: Record existing guest writes through admission.record_existing under the scope locks in
+        # this process, so the dashboard checks READ COMMITTED at boot as the daemon and the gateway do. A
+        # boot-time blip is ridden through.
         try:
             with pool.connection() as c:
+                db.assert_read_committed(c)
                 migrate.assert_schema(c, "dashboard")
         except PoolTimeout:
             # The pool only says it got no connection; one direct connect raises the real reason (a wrong
