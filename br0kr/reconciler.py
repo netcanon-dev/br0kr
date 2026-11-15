@@ -59,7 +59,7 @@ import psycopg
 import requests
 
 from br0kr import build, cloudinit, imgbuild, lease, nodes, placement, pve
-from br0kr.driver import GONE, Driver
+from br0kr.driver import GONE, PROTECTED, Driver, GuestProtected
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +154,11 @@ def _best_effort_destroy(driver: Driver, vmid: int, lease_id: int,
     the backstop."""
     for _ in range(_CLEANUP_RETRIES):
         try:
-            driver.fenced_destroy(vmid, lease_id, on_progress=on_progress)
+            if driver.fenced_destroy(vmid, lease_id, on_progress=on_progress) == PROTECTED:
+                # Protected on the host (0055): never stopped, never deleted. Not an orphan br0kr may reclaim
+                # either; the sweep spares it the same way. An operator decides.
+                log.error("guest vmid %s for terminal lease %s is protected (PVE protection or the br0kr-keep "
+                          "tag): left in place", vmid, lease_id, extra={"lease_id": lease_id, "vmid": vmid})
             return
         except pve.DeleteTaskFailed:
             # A server-side DELETE failure/timeout won't clear on an immediate inline retry, and hammering
@@ -349,7 +353,10 @@ def _build_via_clone(
         # rc; the caller leaves PROVISIONING (TIMEOUT) or releases (other). The marker reclaim is the
         # backstop for any unfenced guest left behind.
         return CloneBuild(rc)
-    config: dict[str, Any] = {"cores": cores, "memory": memory, "agent": "1",
+    # The clone copied the template's tags and Proxmox protection; both are replaced here, in the call that fences
+    # it, so protecting a template (or tagging it br0kr-keep) does not make every guest cloned from it one br0kr
+    # can never tear down (0055). This is the only place br0kr writes protection, and only on its own fresh clone.
+    config: dict[str, Any] = {"cores": cores, "memory": memory, "agent": "1", "protection": 0,
                               "tags": f"{pve.TEMPLATE_TAG};{pve.fence_tag(lease_id)}"}
     if cloud_init:
         config.update(cloud_init)
@@ -449,7 +456,9 @@ def _destroy_build(driver: Driver, vmid: int, build_id: int) -> None:
     which return WITHOUT calling this and leave the build live for review S04's destroy-first reclaim.)"""
     for _ in range(_CLEANUP_RETRIES):
         try:
-            driver.destroy_build_vm(vmid, build_id)
+            if driver.destroy_build_vm(vmid, build_id) == PROTECTED:
+                log.error("build %s vmid %s is protected (PVE protection or the br0kr-keep tag): left in place; "
+                          "operator cleanup required", build_id, vmid, extra={"build_id": build_id, "vmid": vmid})
             return
         except pve.DeleteTaskFailed:
             # A failed/timed-out DELETE won't clear on an inline retry, and looping un-heartbeated waits risks
@@ -1021,8 +1030,10 @@ def make_destroyer(driver: Driver,
     a single-node deployment; `make_routing_destroyer` is the multi-node form."""
 
     def destroy(claimed: lease.ClaimedLease) -> None:
-        if claimed.vmid is not None:   # the reaper already skips null-vmid, but be defensive
-            driver.fenced_destroy(claimed.vmid, claimed.id, on_progress=on_progress)
+        # The reaper already skips a null vmid; checked here too, to be defensive.
+        if (claimed.vmid is not None
+                and driver.fenced_destroy(claimed.vmid, claimed.id, on_progress=on_progress) == PROTECTED):
+            raise GuestProtected(claimed.vmid)
 
     return destroy
 
@@ -1036,7 +1047,9 @@ def make_routing_destroyer(registry: nodes.NodeRegistry,
     RAISES if the lease's node has no driver (deregistered / capacity-only / a credential
     this daemon lacks): that surfaces as a reaper destroy_error and, after retries, a loud
     `RELEASE_FAILED` — the guest can't be torn down by this daemon, so it must not be
-    silently dropped from the ledger while the real VM lives on.
+    silently dropped from the ledger while the real VM lives on. RAISES `GuestProtected` when the
+    guest carries Proxmox protection or the br0kr-keep tag (0055): the reaper ends that lease
+    RELEASE_FAILED at once, without retries, and the guest is not destroyed.
 
     ``on_progress`` (the daemon's heartbeat) is passed into each fenced destroy, so the stop + DELETE task waits
     of one slow teardown keep /healthz fresh; the reaper also beats between leases (review REL-02)."""
@@ -1050,6 +1063,7 @@ def make_routing_destroyer(registry: nodes.NodeRegistry,
                 f"no driver for node {claimed.node_id!r} — cannot tear down lease {claimed.id} "
                 f"(vmid {claimed.vmid}); node deregistered or this daemon lacks its credentials"
             )
-        driver.fenced_destroy(claimed.vmid, claimed.id, on_progress=on_progress)
+        if driver.fenced_destroy(claimed.vmid, claimed.id, on_progress=on_progress) == PROTECTED:
+            raise GuestProtected(claimed.vmid)
 
     return destroy

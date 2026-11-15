@@ -17,6 +17,12 @@ resolve in this repository.
 
 ## [Unreleased]
 
+- **br0kr can now record guests it must never destroy** (fleet onboarding phase 1, migration 0055). Releases,
+  expiry, provisioning, unpin, migrate and the sweep refuse `adopted`/`capacity_only` leases, and every teardown
+  refuses a guest with Proxmox protection or `br0kr-keep` before any stop. [docs/designs/fleet-onboarding.md]
+- **A fresh clone no longer keeps its template's Proxmox protection.** The call that fences a lease or
+  replication clone clears it and replaces the inherited tags, so protecting a template protects only it.
+
 ## [0.2.2] — 2026-11-14
 
 A patch release with one fix: after a ledger rollback the orphan sweep holds off the guests the ledger lost

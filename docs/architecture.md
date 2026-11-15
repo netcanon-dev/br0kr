@@ -105,6 +105,9 @@ teardown in flight isn't re-handed-out on the next pass.
 Teardown is fenced and has a backstop: `pve.fenced_destroy` deletes a guest only when its tag names the lease, and the
 orphan sweep (`sweeper.py`) destroys a fenced guest whose lease is terminal or gone, refusing a mass delete when the
 whole ledger reads empty. A fence id with no lease row (a ledger rollback) holds the sweep (`fence_census.py`).
+Only a `provisioned` lease's guest is br0kr's to destroy (migration `0055`): every path refuses an `adopted` or
+`capacity_only` lease, CHECKs fix their shapes, and every teardown refuses a guest with Proxmox protection or the
+`br0kr-keep` tag before it stops anything ([designs/fleet-onboarding.md](designs/fleet-onboarding.md)).
 
 ## Module map
 
@@ -250,15 +253,12 @@ Out of scope by decision, not by omission. Each has its reason, so a request for
 - **A Terraform / Pulumi provider.** A lease is a short-lived reservation an agent asks for at run time, not declared
   infrastructure.
 
-**Dormant, not cut:** the PDM cross-cluster inventory + lease-migration arc (roadmap #9 above) is built, hermetically
-proven and wired, but disabled until PDM hardware exists; see [pdm-api-contract.md](pdm-api-contract.md) for the first
-step when it does.
-
 ## See also
 
 - [designs/runtime.md](designs/runtime.md) and [designs/surfaces.md](designs/surfaces.md) — each component in full
 - The per-feature designs: [admission queue](designs/admission-queue.md), [pinned leases](designs/pinned-lease.md),
-  [template sharing](designs/template-sharing-cross-cluster.md), [storage and network
-  discovery](designs/storage-network-discovery.md), [multi-disk placement](designs/multi-disk-placement.md)
+  [fleet onboarding](designs/fleet-onboarding.md), [template sharing](designs/template-sharing-cross-cluster.md),
+  [storage and network discovery](designs/storage-network-discovery.md), [multi-disk
+  placement](designs/multi-disk-placement.md)
 - [status.md](status.md) — what is built, dormant and next, with its proof; [/SECURITY.md](../SECURITY.md) — the
   controls

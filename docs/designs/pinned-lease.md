@@ -5,7 +5,7 @@ lease can be pinned until an operator allows it. Code: [br0kr/pin.py](../../br0k
 `scripts/harness_lease.py` (the `pin*` checks, real Postgres) and `tests/unit/test_pin.py`.
 
 See also: [../architecture.md](../architecture.md#lease-lifecycle), [runtime.md](runtime.md#2-provisioning-and-teardown),
-[admission-queue.md](admission-queue.md),
+[admission-queue.md](admission-queue.md), [fleet-onboarding.md](fleet-onboarding.md),
 [../../SECURITY.md](../../SECURITY.md), [../runbooks/connecting-an-agent.md](../runbooks/connecting-an-agent.md).
 
 ## 1. Why
@@ -36,6 +36,9 @@ its node; the two are unrelated, which is why the pin lives in its own module an
 A pin is a permanent capacity hold, so it is bounded per project: `max_pinned` live leases of the project may be
 pinned at once. 0, the default, turns pinning off for the project. Ungoverned leases (no project) can't be pinned.
 Lowering the bound unpins nothing; it applies to the next pin, as a lowered quota applies to the next admission.
+A lease br0kr did not build (an adopted guest or a capacity-only record, migration `0055`) is always pinned by schema
+and can't be unpinned (`pin_class_fixed`); those pins are not counted against the bound
+([fleet-onboarding.md](fleet-onboarding.md)).
 
 **Race-freedom.** `pin.set_pinned` takes the project's row lock (`SELECT max_pinned … FOR NO KEY UPDATE`), then
 the lease row's the same way, counts the project's live pinned leases and pins only below the bound. Concurrent

@@ -707,3 +707,38 @@ def test_an_unconfirmed_copy_on_a_migration_target_is_spared_with_a_warning(stat
     assert any("migration target" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
     other = sweeper.orphan_sweep(object(), _FakeDriver([(777, 7)]), node_id="n8", node_cluster="c9")
     assert other.clash_spared == 1 and other.migration_spared == 0
+
+
+# ── The never-destroy floor (0055, fleet onboarding phase 1) ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("state", ["ACTIVE", "RELEASED", "REJECTED", "RELEASE_FAILED"])
+def test_a_guest_whose_lease_br0kr_did_not_build_is_never_swept(states, state):
+    """A fenced guest whose lease is ADOPTED is never destroyed, in any state, even when that lease recorded
+    exactly this guest; only a terminal one counts as protected_spared (an ACTIVE recorded guest is not noise).
+    Guards the sweep taking a detached adopted guest (OMV, say) whose br0kr tag was left behind: its RELEASED row
+    would otherwise be positive destroy evidence."""
+    states.update({7: lease.LeaseOwner(state, "c1", 300, "n1", ownership=lease.ADOPTED)})
+    d = _FakeDriver([(300, 7)])
+    summary = sweeper.orphan_sweep(object(), d, node_id="n1", node_cluster="c1")
+    assert d.destroyed == [] and summary.terminal == 0 and summary.orphans == 0
+    assert summary.protected_spared == (0 if state == "ACTIVE" else 1)
+
+
+def test_a_protected_verdict_at_the_destroy_is_spared_not_counted_destroyed(states, monkeypatch):
+    """When the driver answers 'protected' (the guest's own config refused before any stop), the sweep counts it
+    protected_spared, not destroyed or refused, on the fenced, clone-orphan and repl-orphan phases alike; a
+    protected replication copy is NOT stamped settled (it still exists). Guards a protected guest being reported
+    reclaimed, and a FAILED replication row becoming prunable while its copy lives on."""
+    import br0kr.replication as replication
+    stamped: list[int] = []
+    states.update({7: "RELEASED"})
+    states.reclaimable = {9901: True}
+    d = _FakeDriver([(300, 7)], destroy_rc="protected", clone_orphans=[9901], clone_destroy_rc="protected",
+                    repl_orphans=[(9902, 3)], repl_destroy_rc="protected")
+    monkeypatch.setattr(replication, "repl_orphan_reclaimable", lambda conn, vmid, rid: True)
+    monkeypatch.setattr(replication, "stamp_repl_guest_settled", lambda conn, rid: stamped.append(rid))
+    summary = sweeper.orphan_sweep(object(), d)
+    assert summary.protected_spared == 3 and summary.destroyed == 0 and summary.refused == 0
+    assert summary.clone_reclaimed == 0 and summary.clone_refused == 0 and summary.repl_reclaimed == 0
+    assert stamped == []

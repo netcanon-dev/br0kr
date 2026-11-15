@@ -18,6 +18,102 @@ from br0kr import pve
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _unprotected_by_default(request, monkeypatch):
+    """The teardown stubs below fake exists/read_tags but not the config read the on-host protection check makes
+    (0055), so by default every guest here reads as unprotected. A test that requests the `real_protection` fixture
+    keeps the real `Pve._protection` and stubs `_get` itself."""
+    if "real_protection" not in request.fixturenames:
+        monkeypatch.setattr(pve.Pve, "_protection", lambda self, vmid: pve.DESTROY)
+
+
+@pytest.fixture
+def real_protection():
+    """Marker fixture: keep the real on-host protection check (see `_unprotected_by_default`)."""
+    return None
+
+
+@pytest.mark.parametrize("config,expected", [
+    ({}, "destroy"),
+    ({"tags": "br0kr-lease-5"}, "destroy"),
+    ({"protection": 0, "tags": "br0kr-lease-5;production"}, "destroy"),
+    ({"protection": 1}, "protected"),
+    ({"protection": "1"}, "protected"),
+    ({"tags": "br0kr-lease-5;br0kr-keep"}, "protected"),
+    ({"tags": "br0kr-keep"}, "protected"),
+    ({"tags": "a,BR0KR-KEEP"}, "protected"),           # a hand-typed upper-case tag still protects
+    ({"tags": "br0kr-keeper;not-br0kr-keep"}, "destroy"),   # exact membership, not a substring
+])
+def test_protection_decision_covers_every_case(config, expected):
+    """protection_decision reads a guest's own config: Proxmox protection on, or the br0kr-keep tag, refuses the
+    teardown ('protected'); anything else lets the fence verdict stand ('destroy'). Guards the on-host half of the
+    never-destroy floor (0055): it must hold even when the ledger lost the guest's row, and a substring match must
+    not protect (or unprotect) a guest by accident."""
+    assert pve.protection_decision(config) == expected
+
+
+class _ProtectedStub(pve.Pve):
+    """A Pve whose fence matches lease 5 and whose config read answers `config`; records stops and DELETEs."""
+
+    def __init__(self, config: dict[str, Any], configs_after_stop: dict[str, Any] | None = None) -> None:
+        super().__init__("h", "n", "id", "sec")
+        self.config, self.after = config, configs_after_stop
+        self.stopped: list[int] = []
+        self.deleted: list[str] = []
+
+    def exists(self, vmid: int) -> bool:
+        return True
+
+    def read_tags(self, vmid: int) -> str | None:
+        return "br0kr-lease-5"
+
+    def _get(self, path: str) -> Any:
+        assert path == "/nodes/n/qemu/100/config", path
+        return self.after if (self.stopped and self.after is not None) else self.config
+
+    def power_state(self, vmid: int) -> str | None:
+        return "running"
+
+    def _post(self, path: str, data: Any) -> Any:
+        if path.endswith("/status/stop"):
+            self.stopped.append(int(path.split("/")[-3]))
+        return "UPID:stop"
+
+    def _delete(self, path: str) -> Any:
+        self.deleted.append(path)
+        return "UPID:del"
+
+    def wait(self, upid: str, secs: int = 60, on_progress=None) -> str:
+        return "OK"
+
+
+@pytest.mark.parametrize("config", [{"protection": 1}, {"tags": "br0kr-lease-5;br0kr-keep"}])
+def test_a_protected_guest_is_neither_stopped_nor_deleted(config, real_protection):
+    """A guest whose fence MATCHES but whose own config carries Proxmox protection or the br0kr-keep tag answers
+    'protected' with NO stop and NO DELETE. Guards the reason the check runs before the stop: Proxmox protection
+    refuses only the DELETE, so without it a teardown would stop a protected guest (OMV, say) and then fail."""
+    p = _ProtectedStub(config)
+    assert p.fenced_destroy(100, 5) == "protected"
+    assert p.stopped == [] and p.deleted == []
+
+
+def test_protection_set_during_the_stop_still_refuses_the_delete(real_protection):
+    """The protection read runs again before the DELETE: a guest protected while it was being stopped is stopped
+    (that already happened) but NOT deleted. Guards the second stage of the floor: the flag is honoured the moment
+    it appears, not only at the first look."""
+    p = _ProtectedStub({}, configs_after_stop={"protection": 1})
+    assert p.fenced_destroy(100, 5) == "protected"
+    assert p.stopped == [100] and p.deleted == []
+
+
+def test_an_unprotected_guest_is_still_destroyed_through_the_real_check(real_protection):
+    """With the real protection read and a config that sets neither flag, the matching fence still destroys the
+    guest. Guards the floor turning every teardown into a refusal (a check that reads 'protected' by default)."""
+    p = _ProtectedStub({"tags": "br0kr-lease-5"})
+    assert p.fenced_destroy(100, 5) == "destroyed"
+    assert p.stopped == [100] and len(p.deleted) == 1
+
+
 def test_fence_tag_is_lease_scoped():
     """The fence tag embeds the lease id. Guards a regression that stamps a constant
     tag (which would make every guest look like it belongs to every lease)."""
@@ -712,6 +808,9 @@ class _BuildStub(pve.Pve):
     def read_tags(self, vmid: int) -> str | None:
         return self._tags
 
+    def _get(self, path: str) -> Any:   # make_template reads the tags it rewrites (0055 keeps br0kr-keep)
+        return {"tags": self._tags}
+
     def _post(self, path: str, data: Any) -> Any:
         self.posts.append((path, data))
         if path.endswith("/status/stop"):
@@ -757,10 +856,12 @@ class _StampStub(pve.Pve):
     and _post recorded — so the identity-gated adopt + the convergent /template skip are testable off-cluster."""
 
     def __init__(self, tags: str | None = None, name: str | None = None, template: int = 0,
-                 exists: bool = True) -> None:
+                 exists: bool = True, protection: int | None = None) -> None:
         super().__init__("h", "n", "id", "sec")
         self._exists = exists
         self._cfg: dict[str, Any] = {"tags": tags, "name": name, "template": template}
+        if protection is not None:
+            self._cfg["protection"] = protection
         self.posts: list[tuple[str, Any]] = []
 
     def exists(self, vmid: int) -> bool:
@@ -778,10 +879,11 @@ class _StampStub(pve.Pve):
 
 
 def test_stamp_repl_fence_adopts_our_unfenced_clone_by_name():
-    """A landed clone carrying the marker, template=0, and OUR deterministic _replica_name is STAMPED."""
+    """A landed clone carrying the marker, template=0, and OUR deterministic _replica_name is STAMPED, and the
+    same write clears the protection the clone copied from its source template (0055: Proxmox copies it)."""
     p = _StampStub(tags="br0kr-template", name="repl-debian12-7", template=0)
     assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7") == "stamped"
-    assert p.posts and p.posts[-1][1] == {"tags": "br0kr-repl-7;br0kr-template"}
+    assert p.posts and p.posts[-1][1] == {"tags": "br0kr-repl-7;br0kr-template", "protection": 0}
 
 
 def test_stamp_repl_fence_refuses_a_foreign_guest_at_a_collided_vmid():
@@ -1181,3 +1283,165 @@ def test_a_task_poll_slows_down_after_ten_seconds(monkeypatch):
     q = _Running("h", "n", "id", "sec")
     q.finish_at = 12
     assert q.wait("UPID:y", secs=300) == "OK" and q.polls == 12
+
+
+# ── 0055: br0kr never drops a br0kr-keep tag, and every stop and DELETE passes the protection read ──────────────
+def test_make_template_keeps_a_keep_tag_on_the_build_vm():
+    """make_template rewrites the build VM's tags to the build fence plus the marker; a `br0kr-keep` someone set on
+    the VM is kept (0055). Guards a conversion silently removing the keep, which would leave the template open to
+    a later teardown the owner meant to refuse."""
+    p = _BuildStub(tags="br0kr-build-5;br0kr-keep")
+    assert p.make_template(9500, 5) == "OK"
+    assert p.posts[-1][1] == {"tags": "br0kr-build-5;br0kr-template;br0kr-keep"}
+
+
+@pytest.mark.parametrize(("tags", "written"), [
+    ("br0kr-repl-7;br0kr-template;BR0KR-KEEP", "br0kr-template;br0kr-keep"),
+    ("br0kr-repl-7;br0kr-template", "br0kr-template"),
+])
+def test_finalize_template_keeps_a_keep_tag_when_it_strips_the_fence(tags, written):
+    """finalize_template strips the build or replication fence from a finished template and keeps a `br0kr-keep`
+    tag (any case) if the template carries one (0055); without one it writes the marker alone, as before. Guards
+    the fence strip removing the keep from a catalog template."""
+    p = _StampStub(tags=tags, name="repl-debian12-7", template=1)
+    p.finalize_template(100)
+    assert p.posts[-1][1] == {"tags": written}
+
+
+def test_stamp_repl_fence_keeps_a_keep_tag_on_a_copy_it_already_fences():
+    """Re-stamping a copy that already carries THIS job's fence keeps a `br0kr-keep` someone set on it (0055).
+    Guards the review's HIGH: the replication reclaim re-stamps before it destroys, so dropping the tag here made
+    the protection read that follows answer 'destroy' and the copy was stopped and deleted."""
+    p = _StampStub(tags="br0kr-repl-7;br0kr-template;br0kr-keep", name="repl-debian12-7", template=0)
+    assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7") == "stamped"
+    assert p.posts[-1][1] == {"tags": "br0kr-repl-7;br0kr-template;br0kr-keep"}
+
+
+def test_stamp_repl_fence_does_not_carry_a_keep_inherited_from_the_source_template():
+    """Adopting a freshly landed clone (not the reclaim) replaces its tags and clears its protection, both copied
+    from the source template by the clone, so neither passes to the copy (0055). Guards the opposite mistake:
+    every replica of a template its owner protected coming out protected, so a failed copy could never be
+    reclaimed."""
+    p = _StampStub(tags="br0kr-template;br0kr-keep", name="repl-debian12-7", template=0, protection=1)
+    assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7") == "stamped"
+    assert p.posts[-1][1] == {"tags": "br0kr-repl-7;br0kr-template", "protection": 0}
+
+
+def test_make_replica_template_keeps_a_keep_tag():
+    """make_replica_template re-asserts the fence and marker and keeps a `br0kr-keep` on the copy (0055). Guards
+    the conversion dropping a keep set between the clone and the conversion."""
+    p = _StampStub(tags="br0kr-repl-7;br0kr-template;br0kr-keep", name="repl-debian12-7", template=1)
+    assert p.make_replica_template(9500, 7) == "OK"
+    assert p.posts[-1][1] == {"tags": "br0kr-repl-7;br0kr-template;br0kr-keep"}
+
+
+class _KeptCopy(pve.Pve):
+    """A replication copy at vmid 100 fenced to job 7 and tagged br0kr-keep: tags change only through config POSTs;
+    records stops and DELETEs."""
+
+    def __init__(self) -> None:
+        super().__init__("h", "n", "id", "sec")
+        self.tags = "br0kr-repl-7;br0kr-template;br0kr-keep"
+        self.stopped: list[int] = []
+        self.deleted: list[str] = []
+
+    def exists(self, vmid: int) -> bool:
+        return True
+
+    def read_tags(self, vmid: int) -> str | None:
+        return self.tags
+
+    def _get(self, path: str) -> Any:
+        return {"tags": self.tags, "name": "repl-debian12-7", "template": 0}
+
+    def power_state(self, vmid: int) -> str | None:
+        return "running"
+
+    def _post(self, path: str, data: Any) -> Any:
+        if path.endswith("/config"):
+            self.tags = data["tags"]
+        if path.endswith("/status/stop"):
+            self.stopped.append(int(path.split("/")[-3]))
+        return "UPID:x"
+
+    def _delete(self, path: str) -> Any:
+        self.deleted.append(path)
+        return "UPID:del"
+
+    def wait(self, upid: str, secs: int = 60, on_progress=None) -> str:
+        return "OK"
+
+
+def test_a_kept_replication_copy_survives_the_reclaim_teardown(real_protection):
+    """End to end through the real Pve methods: the replication reclaim's teardown (re-stamp, then the fenced
+    destroy) on a copy tagged `br0kr-keep` keeps the tag, answers 'protected', and neither stops nor deletes the
+    copy (0055). Guards the review's HIGH, the re-stamp stripping the tag one call before the protection read."""
+    from br0kr import replication
+    copy = _KeptCopy()
+    job = replication.ReplicationJob(7, "debian12", 3, "clA", "FastStorage", "n", 100, "clone_shared", "COPYING",
+                                     0, None, 8)
+    assert replication._teardown_transient(job, copy) == "protected"
+    assert "br0kr-keep" in copy.tags and copy.stopped == [] and copy.deleted == []
+
+
+def test_a_failed_config_read_stops_and_deletes_nothing(real_protection):
+    """The protection read fails closed: when the guest's config cannot be read (an API error), the teardown raises
+    before any stop or DELETE, so the caller retries later instead of tearing down a guest whose protection it
+    never saw (0055). Guards a try/except around the read that would default to 'destroy'."""
+
+    class _Unreadable(_ProtectedStub):
+        def _get(self, path: str) -> Any:
+            raise RuntimeError("PVE API 500")
+
+    p = _Unreadable({})
+    with pytest.raises(RuntimeError):
+        p.fenced_destroy(100, 5)
+    assert p.stopped == [] and p.deleted == []
+
+
+def test_there_is_one_guest_stop_and_one_guest_delete_both_behind_the_protection_read():
+    """pve.py has exactly one guest stop (in `_stop_best_effort`) and one guest DELETE (in
+    `_stop_then_fenced_delete`), and the stop helper is called only from that sequence, which reads the guest's
+    protection first (0055). Guards a new destroyer or a refactor stopping or deleting a guest outside the one
+    sequence the never-destroy floor checks; such a change must route through it or be reviewed here."""
+    import inspect
+    src = inspect.getsource(pve)
+    assert src.count("/status/stop") == 1
+    assert src.count('self._delete(f"/nodes/{self.node}/qemu/') == 1
+    assert src.count("self._stop_best_effort(") == 1
+    seq = inspect.getsource(pve.Pve._stop_then_fenced_delete)
+    assert "self._stop_best_effort(" in seq and 'self._delete(f"/nodes/{self.node}/qemu/' in seq
+    assert seq.index("self._protection(") < seq.index("self._stop_best_effort(")
+    assert "/status/stop" in inspect.getsource(pve.Pve._stop_best_effort)
+
+
+@pytest.mark.parametrize(("tags", "protection"), [
+    ("br0kr-repl-7;br0kr-template;br0kr-keep", None),   # ours, kept by tag
+    ("br0kr-repl-7;br0kr-template", 1),                 # ours, protected in Proxmox
+    ("br0kr-template;BR0KR-KEEP", None),                # an unfenced clone, keep inherited or set by hand
+    ("br0kr-template", 1),                              # an unfenced clone, protection inherited or set by hand
+])
+def test_stamp_repl_fence_for_a_teardown_refuses_a_protected_copy_with_nothing_written(tags, protection):
+    """With refuse_protected (the reclaim, which destroys next) a protected copy, fenced or still to be adopted,
+    answers 'protected' and no tag or protection write is made (0055). Guards the review's round-2 HIGH: the adopt
+    replaced an unfenced copy's tags, dropping a br0kr-keep, one call before the destroy read the config again."""
+    p = _StampStub(tags=tags, name="repl-debian12-7", template=0, protection=protection)
+    assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7", refuse_protected=True) == "protected"
+    assert p.posts == []
+
+
+def test_stamp_repl_fence_for_a_teardown_still_stamps_an_unprotected_copy():
+    """refuse_protected changes nothing for a copy without protection or the keep tag: it is adopted and stamped as
+    before, so the reclaim's destroy can match the fence (0055). Guards the flag making every reclaim refuse."""
+    p = _StampStub(tags="br0kr-template", name="repl-debian12-7", template=0, protection=0)
+    assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7", refuse_protected=True) == "stamped"
+    assert p.posts[-1][1] == {"tags": "br0kr-repl-7;br0kr-template", "protection": 0}
+
+
+def test_stamp_repl_fence_for_a_teardown_checks_identity_before_protection():
+    """A protected guest that is not this job's copy still answers 'fence_mismatch', not 'protected' (0055): the
+    reclaim then leaves it untouched and settles, as it always did for a foreign guest. Guards a foreign guest's
+    protection turning into a job left FAILED and retried every cutoff for a guest that was never its own."""
+    p = _StampStub(tags="br0kr-template;br0kr-keep", name="someone-elses-clone", template=0, protection=1)
+    assert p.stamp_repl_fence(100, 7, expected_name="repl-debian12-7", refuse_protected=True) == "fence_mismatch"
+    assert p.posts == []

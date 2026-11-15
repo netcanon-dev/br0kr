@@ -36,7 +36,7 @@ import psycopg
 import requests
 
 from br0kr import admission, imgbuild, lease, placement, pve, reasons, reclaim_beat, reconciler, statemachine
-from br0kr.driver import FENCE_MISMATCH, GONE, Driver
+from br0kr.driver import FENCE_MISMATCH, GONE, PROTECTED, Driver
 from br0kr.logging_setup import redact_text
 
 log = logging.getLogger(__name__)
@@ -1188,7 +1188,9 @@ def _teardown_transient(job: ReplicationJob, driver: Driver,
       * 'settled'    — the guest is gone / provably not ours → the caller may mark the job FAILED + settled;
       * 'unresolved' — our clone MAY still be live (the clone task is still running, so the guest is `lock:clone`
                        and can't be torn down yet) → the caller LEAVES the job non-terminal (RECLAIMING) for the
-                       next cutoff, exactly like tick_builds.reclaim_builds' inconclusive-teardown rule.
+                       next cutoff, exactly like tick_builds.reclaim_builds' inconclusive-teardown rule;
+      * 'protected'  — the copy carries Proxmox protection or the br0kr-keep tag (0055) and was left alone →
+                       the caller ends the job FAILED but NEVER stamps it settled (the guest still exists).
     RAISES on a transient PVE/API error (the caller leaves the job non-terminal + retries) — incl. the config
     POST `stamp_repl_fence` issues against a still-`lock:clone` guest in the upid-lost window (self-heals once the
     clone finishes). `on_progress` is threaded through the stop/DELETE waits so the reclaim heartbeat stays fresh."""
@@ -1205,11 +1207,30 @@ def _teardown_transient(job: ReplicationJob, driver: Driver,
     #    clobber a guest we can't prove is ours). Honoring the verdict is load-bearing: without it a bare
     #    fenced_destroy on an adopted-then-refused guest would still read fence_mismatch, but the explicit skip
     #    also avoids the wasted stop+DELETE attempt on a foreign guest.
-    if (driver.exists(job.vmid)
-            and driver.stamp_repl_fence(job.vmid, job.id, expected_name=_replica_name(job)) == FENCE_MISMATCH):
-        return "settled"   # provably not ours (foreign guest / stripped template) — leave it untouched
-    driver.fenced_destroy_replica(job.vmid, job.id, on_progress=on_progress)   # 'destroyed'/'gone'/'fence_mismatch'
-    return "settled"
+    if driver.exists(job.vmid):
+        # refuse_protected: a guest someone protected (protection or br0kr-keep, 0055) is refused before any tag
+        # write, fenced or not, so the adopt can never strip a keep one call before the destroy.
+        stamp = driver.stamp_repl_fence(job.vmid, job.id, expected_name=_replica_name(job), refuse_protected=True)
+        if stamp == FENCE_MISMATCH:
+            return "settled"   # provably not ours (foreign guest / stripped template) — leave it untouched
+        if stamp == PROTECTED:
+            return "protected"
+    if driver.fenced_destroy_replica(job.vmid, job.id, on_progress=on_progress) == PROTECTED:
+        return "protected"
+    return "settled"   # 'destroyed' / 'gone' / 'fence_mismatch'
+
+
+def _fail_protected(conn: psycopg.Connection[Any], job_id: int, vmid: int | None, reason: str) -> None:
+    """End a job whose copy is protected (0055): FAILED, its reservation settled like any failed job's (so the
+    pool stops counting the copy's bytes while the copy stays on it), and `guest_settled_at` left NULL because
+    the guest still exists. The leaked-guest reclaim then retries it each cutoff and finishes the teardown once
+    the protection is cleared; until then the row is not prunable and its pool and cluster cannot be
+    decommissioned. Commits."""
+    log.error("replication %s reclaim: the copy at vmid %s is protected (PVE protection or the br0kr-keep tag) — "
+              "left in place, job FAILED and not settled", job_id, vmid,
+              extra={"replication_id": job_id, "vmid": vmid})
+    _mark_failed(conn, job_id, reason, settled=False)
+    _settle_by_key(conn, job_id)
 
 
 def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver: Driver, reason: str,
@@ -1252,6 +1273,9 @@ def _reclaim_and_fail(conn: psycopg.Connection[Any], job: ReplicationJob, driver
             log.warning("replication %s reclaim: clone still materializing — leaving RECLAIMING for the next "
                         "cutoff (vmid %s)", job.id, vmid, extra={"replication_id": job.id, "vmid": vmid})
             return False
+        if result == "protected":
+            _fail_protected(conn, job.id, vmid, reason)
+            return True
         log.info("replication %s reclaim: transient guest settled (vmid %s)", job.id, vmid,
                  extra={"replication_id": job.id, "vmid": vmid})
     if not _mark_failed(conn, job.id, reason, settled=True):
@@ -1814,6 +1838,11 @@ def reclaim_stale_replications(
             log.warning("replication %s leaked-guest reclaim: clone still materializing (vmid %s) — next cutoff",
                         rid, fresh.vmid, extra={"replication_id": rid, "vmid": fresh.vmid})
             continue
+        if result == "protected":
+            log.warning("replication %s leaked-guest reclaim: the copy is protected (vmid %s) — left in place, "
+                        "not settled", rid, fresh.vmid, extra={"replication_id": rid, "vmid": fresh.vmid})
+            # updated_at is left alone: the re-request cooldown and the node rotation read it on FAILED rows.
+            continue
         _stamp_settled(conn, rid)
         reclaimed += 1
         log.info("replication %s leaked-guest reclaim: guest settled + row now prunable (vmid %s)", rid,
@@ -1866,6 +1895,12 @@ def reclaim_stale_replications(
                 log.warning("replication %s reclaim: clone still materializing (vmid %s) — leaving RECLAIMING "
                             "for the next cutoff", job.id, claim.vmid, extra={"replication_id": job.id})
                 left_reclaiming(job.id)
+                continue
+            if result == "protected":
+                if backoff is not None:
+                    backoff.done(job.id)
+                _bump_attempts(conn, job.id)
+                _fail_protected(conn, job.id, claim.vmid, reason)
                 continue
             log.info("replication %s reclaim: transient guest settled (vmid %s)", job.id, claim.vmid,
                      extra={"replication_id": job.id, "vmid": claim.vmid})

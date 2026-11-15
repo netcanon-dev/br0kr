@@ -3,7 +3,7 @@
 Per-VMID fence gate — proves br0kr/pve.py's fencing against a REAL Proxmox node.
 
 Uses a clearly-throwaway vmid (default 9901) and a bare config-only VM (no disk, no
-OS, never started — instant and harmless). ABORTS up front if that vmid already
+OS; started once, for the protection checks, and it boots nothing). ABORTS up front if that vmid already
 exists, so it can never touch a pre-existing guest, and a `finally` force-removes the
 test VM even if a check fails.
 
@@ -15,6 +15,11 @@ The money shot (zombie_destroy_refused): after the throwaway vmid is freed and R
 by a NEW lease, a stale teardown still holding the OLD lease calls fenced_destroy and
 gets 'fence_mismatch' — the new guest survives. That is the vmid-reuse zombie-destroy
 the fence exists to prevent.
+
+The never-destroy floor (0055, fleet onboarding phase 1): the same reused guest, started, then with Proxmox
+`protection: 1` and then with the `br0kr-keep` tag, answers 'protected' to the matching lease's fenced_destroy, still
+exists and is STILL RUNNING. That is the on-host check reading the guest's own config before any stop (a check moved
+after the stop would leave it stopped). The guest's protection is cleared before the cleanup.
 
 Env: PVE_HOST, PVE_NODE, PVE_TOKEN_ID, PVE_TOKEN_SECRET, optional FENCE_VMID.
 """
@@ -97,6 +102,23 @@ def main() -> int:
         d_stale = p.fenced_destroy(VMID, OLD_LEASE)
         check("zombie_destroy_refused", d_stale == "fence_mismatch" and p.exists(VMID), d_stale)
 
+        # The never-destroy floor: the right lease, but the guest says no (Proxmox protection, then the keep tag).
+        # Started, so a check that ran only after the stop would show as a stopped guest.
+        config = f"/nodes/{NODE}/qemu/{VMID}/config"
+        started = p.start(VMID)
+        check("started_for_floor", started == "OK" and p.power_state(VMID) == "running", f"start={started}")
+        p._put(config, {"protection": 1})
+        d_prot = p.fenced_destroy(VMID, NEW_LEASE)
+        power = p.power_state(VMID)
+        check("protection_refused", d_prot == "protected" and p.exists(VMID) and power == "running",
+              f"{d_prot}, {power}")
+        p._put(config, {"protection": 0, "tags": f"{pve.fence_tag(NEW_LEASE)};{pve.KEEP_TAG}"})
+        d_keep = p.fenced_destroy(VMID, NEW_LEASE)
+        power = p.power_state(VMID)
+        check("keep_tag_refused", d_keep == "protected" and p.exists(VMID) and power == "running",
+              f"{d_keep}, {power}")
+        p._put(config, {"tags": pve.fence_tag(NEW_LEASE)})
+
         d_clean = p.fenced_destroy(VMID, NEW_LEASE)
         check("cleanup_destroyed", d_clean == "destroyed" and not p.exists(VMID), d_clean)
 
@@ -105,11 +127,14 @@ def main() -> int:
         # Belt-and-suspenders: never leave the throwaway VM behind, fence or no fence.
         if p.exists(VMID):
             print(f"[cleanup] force-removing leftover test vmid {VMID}")
+            p._put(f"/nodes/{NODE}/qemu/{VMID}/config", {"protection": 0})   # a protected guest refuses the DELETE
+            if p.power_state(VMID) == "running":                             # a running guest refuses it too
+                p.wait(p._post(f"/nodes/{NODE}/qemu/{VMID}/status/stop", {}))
             p.wait(p._delete(f"/nodes/{NODE}/qemu/{VMID}"))
 
     print(f"[session_reuse] info: {calls[0]} requests over {connects[0]} TCP connects")
 
-    ok = all(results) and len(results) == 8
+    ok = all(results) and len(results) == 11
     print("\n" + ("GO" if ok else "NO-GO"))
     return 0 if ok else 1
 

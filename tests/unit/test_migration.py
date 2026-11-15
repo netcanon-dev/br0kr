@@ -66,6 +66,18 @@ def test_request_verdict_refuses_a_data_disk_lease_even_with_a_null_boot_pool():
     assert migration.request_verdict("ACTIVE", 1, None, "clB", "clA", True, lease_has_data_disks=False) is None
 
 
+@pytest.mark.parametrize("ownership", ["adopted", "capacity_only"])
+def test_request_verdict_refuses_a_lease_br0kr_did_not_build(ownership):
+    """A lease that is not 'provisioned' (0055) is refused lease_protected right after the unknown-lease check,
+    even when everything else would admit the move. Guards a migration stopping and moving an adopted guest (OMV,
+    say) or a capacity-only record being turned into a reservation for a guest br0kr never managed."""
+    assert migration.request_verdict("ACTIVE", 1, None, "clB", "clA", True,
+                                     lease_ownership=ownership) == "lease_protected"
+    assert migration.request_verdict(None, None, None, "clB", "clA", True,
+                                     lease_ownership=ownership) == "unknown_lease"
+    assert migration.request_verdict("ACTIVE", 1, None, "clB", "clA", True, lease_ownership="provisioned") is None
+
+
 def test_resolve_wait_commits_only_when_the_guest_is_visible_on_the_target():
     """`resolve_wait` returns 'commit' iff the guest is confirmed on the target (we then hold its real dest
     vmid), whatever the task status said — the crash-after-move resume (the task status may be lost yet the

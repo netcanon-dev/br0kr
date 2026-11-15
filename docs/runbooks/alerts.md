@@ -56,10 +56,12 @@ read it repeats at most every 10 s, so they can be that much behind the ledger.
 | `br0kr_admit_total{tool,outcome}` | gateway | `request_lease` / `schedule_lease` answers; `outcome` is `admitted`, `queued`, `replay`, `error`, `invalid_input`, or the refusal reason or error code |
 | `br0kr_pve_request_seconds_{sum,count}{op,outcome}` | daemon, operator gateway | PVE API calls by HTTP method; `outcome` is `ok`, `denied`, `http_error`, `bad_reply`, `timeout` or `unreachable`; a GET retried after a 502/503/504 counts once, by its final answer |
 | `br0kr_release_failed_total` | daemon | leases the reaper gave up on (terminal `RELEASE_FAILED`) |
+| `br0kr_release_protected_total` | daemon | of those, leases whose guest had Proxmox protection or the `br0kr-keep` tag: given up at once, guest not destroyed |
 | `br0kr_placement_released_total` | daemon | held leases released after running out of placement re-checks |
 | `br0kr_last_sweep_hold_on` | daemon | 1 while the sweep's rollback hold (the `sweep_hold_absent` setting) is on |
 | `br0kr_sweep_clash_spared_total` | daemon | guests the sweep spared because their terminal lease recorded a different guest |
 | `br0kr_sweep_migration_spared_total` | daemon | terminal-lease guests the sweep spared for a migration: one in flight, or a copy on its target it never confirmed |
+| `br0kr_sweep_protected_spared_total` | daemon | guests the sweep spared as never br0kr's to destroy: a detached adopted guest still tagged, or a guest with Proxmox protection or the `br0kr-keep` tag. No alert by design: a guest kept on purpose would page every sweep; `Br0krReleaseFailedGrowing` fires when a lease first meets one |
 | `br0kr_last_progress_age_seconds` | daemon | seconds since the loop last stamped progress, on every role |
 
 `br0kr_admit_total` is counted at the MCP tool boundary, so it holds what the agent got: the admission verdict, a
@@ -144,6 +146,12 @@ SELECT id, node_id, vmid, release_attempts, reclaim_at FROM lease
 
 The daemon log has `teardown abandoned after N attempts` and, before it, a `destroy failed for lease` traceback per
 attempt. A rising `br0kr_stop_errors_total` means PVE refused to stop the guest (the token lacks `VM.PowerMgmt`).
+A rising `br0kr_release_protected_total` with the log line `teardown refused: guest vmid N on <node> is protected`
+means the guest has Proxmox protection or the `br0kr-keep` tag: br0kr gave up at once, without stopping it. Someone
+protected a guest br0kr built. Its lease no longer counts against capacity, as for any failed teardown, but the
+guest still runs. Decide whether it should stay. If not, clear the flag (`qm set <vmid> --protection 0`, remove the
+tag) and the next sweep destroys it; if it should stay, leave it protected, and the sweep spares it every pass
+(`br0kr_sweep_protected_spared_total`). Clearing the flag later still means the next sweep destroys it.
 
 **Fix.** Fix the cause (the ACL, a guest left locked by a failed task: `qm unlock <vmid>`, offline storage). The
 orphan sweep destroys every fenced guest whose lease is terminal on its next pass (every 12 ticks by default), so the

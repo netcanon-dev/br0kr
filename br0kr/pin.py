@@ -41,7 +41,10 @@ from br0kr import lease, reasons
 log = logging.getLogger(__name__)
 
 _LIVE_SQL = "(" + ",".join(f"'{s}'" for s in lease.LIVE_STATES) + ")"
-_LIVE_PINNED = f"SELECT count(*) FROM lease WHERE project_id = %s AND pinned AND state IN {_LIVE_SQL}"
+# The project's live pinned leases that count against max_pinned. A lease br0kr did not build (0055: adopted or
+# capacity-only) is always pinned by schema and is not the tenant's choice, so it never uses up a pin slot.
+_LIVE_PINNED = (f"SELECT count(*) FROM lease WHERE project_id = %s AND pinned AND state IN {_LIVE_SQL} "
+                f"AND ownership = '{lease.PROVISIONED}'")
 
 
 def _answer(lease_id: int, *, pinned: bool, updated: bool, reason: str | None) -> dict[str, Any]:
@@ -54,7 +57,9 @@ def set_pinned(conn: psycopg.Connection[Any], lease_id: int, *, pinned: bool) ->
     Returns {lease_id, pinned, updated, reason}. ``pinned`` is the lease's flag after the call; ``updated`` is True
     when this call changed it. ``reason`` names a refusal: unknown_lease; lease_not_live (released or reaped);
     pin_needs_project (an ungoverned lease has no max_pinned to bound it); pin_disabled (the project's max_pinned
-    is 0); pinned_limit (the project already has max_pinned live pinned leases). A lease already in the asked
+    is 0); pinned_limit (the project already has max_pinned live pinned leases); pin_class_fixed (an unpin of a
+    lease br0kr did not build, 0055: adopted and capacity-only leases are always pinned, and those pins are not
+    counted against max_pinned). A lease already in the asked
     state is not a refusal (updated False, reason None). Unpinning gives the lease a fresh TTL from now (its own
     ttl_seconds), or the reaper would take it on its next pass. Does NOT commit: the caller owns the transaction,
     and the row locks are held until it ends, so an autocommit connection is refused (each statement would commit
@@ -74,13 +79,18 @@ def set_pinned(conn: psycopg.Connection[Any], lease_id: int, *, pinned: bool) ->
         if prow is None:   # the project was deleted since the first read (its leases are now ungoverned)
             return _answer(lease_id, pinned=False, updated=False, reason=reasons.PIN_NEEDS_PROJECT)
         max_pinned = int(prow[0])
-    row = conn.execute("SELECT state, pinned, project_id FROM lease WHERE id = %s FOR NO KEY UPDATE",
+    row = conn.execute("SELECT state, pinned, project_id, ownership FROM lease WHERE id = %s FOR NO KEY UPDATE",
                        (lease_id,)).fetchone()
     if row is None:
         return _answer(lease_id, pinned=False, updated=False, reason=reasons.UNKNOWN_LEASE)
-    state, is_pinned, project_now = str(row[0]), bool(row[1]), row[2]
+    state, is_pinned, project_now, ownership = str(row[0]), bool(row[1]), row[2], str(row[3])
     if state not in lease.LIVE_STATES:
         return _answer(lease_id, pinned=is_pinned, updated=False, reason=reasons.LEASE_NOT_LIVE)
+    if ownership != lease.PROVISIONED and not pinned:
+        # CHECK lease_foreign_pinned (0055) would refuse the UPDATE anyway; answer the reason instead of a 500.
+        log.info("unpin of lease %d refused: br0kr did not build its guest (%s)", lease_id, ownership,
+                 extra={"lease_id": lease_id, "ownership": ownership})
+        return _answer(lease_id, pinned=is_pinned, updated=False, reason=reasons.PIN_CLASS_FIXED)
     if is_pinned == pinned:
         return _answer(lease_id, pinned=is_pinned, updated=False, reason=None)
     if pinned:

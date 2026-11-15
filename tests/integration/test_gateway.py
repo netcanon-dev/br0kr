@@ -66,6 +66,7 @@ def test_release_lease_says_why_it_did_not_release(monkeypatch):
         return lid == 3 and calls[lid] == 2   # lease 3: queued at the first release, promoted by the second
 
     monkeypatch.setattr(lease, "release", release)
+    monkeypatch.setattr(lease, "ownership_of", lambda c, lid: lease.PROVISIONED)
     monkeypatch.setattr(lease, "state_of", lambda c, lid: {1: "PENDING", 2: "RELEASED", 3: "ADMITTED"}[lid])
     assert gateway.release_lease(object(), 1) == {"lease_id": 1, "released": False, "reason": reasons.LEASE_QUEUED}
     assert gateway.release_lease(object(), 2) == {"lease_id": 2, "released": False,
@@ -79,6 +80,27 @@ def test_release_lease_maps_won_flag(monkeypatch):
     idempotent-no-op being indistinguishable from a real release."""
     monkeypatch.setattr(lease, "release", lambda c, lid: True)
     assert gateway.release_lease(object(), 7) == {"lease_id": 7, "released": True}
+
+
+def test_release_and_cancel_answer_lease_protected_for_a_lease_br0kr_did_not_build(monkeypatch):
+    """A release or cancel of an adopted or capacity-only lease (0055) begins nothing and answers lease_protected,
+    whatever its state; the losing release is not retried and the state is not read. Guards a tenant reading
+    released=false/lease_not_live as "it already ended" for a record that will never end, and the gateway's
+    promotion re-release path re-trying a lease the CAS will always refuse."""
+    from br0kr import reasons
+    monkeypatch.setattr(lease, "release", lambda c, lid, reason="completed": False)
+    monkeypatch.setattr(lease, "cancel_pending", lambda c, lid: False)
+    owners = {1: lease.ADOPTED, 2: lease.CAPACITY_ONLY, 3: lease.PROVISIONED, 4: None}
+    monkeypatch.setattr(lease, "ownership_of", lambda c, lid: owners[lid])
+    monkeypatch.setattr(lease, "state_of", lambda c, lid: None if lid == 4 else "RELEASED")
+    for lid in (1, 2):
+        assert gateway.release_lease(object(), lid) == {"lease_id": lid, "released": False,
+                                                        "reason": reasons.LEASE_PROTECTED}
+        assert gateway.cancel_lease(object(), lid) == {"lease_id": lid, "cancelled": False, "outcome": "noop",
+                                                       "reason": reasons.LEASE_PROTECTED}
+    for lid in (3, 4):   # a provisioned lease that ended, and an unknown id, keep their old answer
+        assert gateway.release_lease(object(), lid)["reason"] == reasons.LEASE_NOT_LIVE
+        assert gateway.cancel_lease(object(), lid)["reason"] == reasons.LEASE_NOT_LIVE
 
 
 def test_lease_status_marks_unknown_lease(monkeypatch):
@@ -241,6 +263,7 @@ def test_cancel_lease_three_outcomes(monkeypatch):
     cancel-vs-release fork an agent uses to give up a queued (or since-promoted) request."""
     monkeypatch.setattr(lease, "cancel_pending", lambda c, lid: lid == 1)
     monkeypatch.setattr(lease, "release", lambda c, lid, reason="completed": lid == 2)
+    monkeypatch.setattr(lease, "ownership_of", lambda c, lid: lease.PROVISIONED)
     assert gateway.cancel_lease(object(), 1) == {"lease_id": 1, "cancelled": True, "outcome": "cancelled"}
     assert gateway.cancel_lease(object(), 2) == {"lease_id": 2, "cancelled": True, "outcome": "released"}
     assert gateway.cancel_lease(object(), 3) == {"lease_id": 3, "cancelled": False, "outcome": "noop",

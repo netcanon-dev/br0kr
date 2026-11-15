@@ -98,6 +98,23 @@ def test_failed_destroy_is_not_released_and_is_retryable(seam):
     assert summary.destroy_errors == 1 and summary.released == 0
 
 
+def test_a_protected_guest_ends_its_lease_release_failed_at_once(seam):
+    """A destroy that raises GuestProtected (the guest carries Proxmox protection or the br0kr-keep tag, 0055)
+    gives up on the FIRST attempt: the lease goes RELEASE_FAILED, counted in failed and protected, never released,
+    and the pass carries on with the next lease. Guards a protected guest being retried until max_attempts (a
+    destroy that can never be allowed) and its lease being marked RELEASED while the guest still runs."""
+    from br0kr.driver import GuestProtected
+
+    def destroy(cl):
+        if cl.id == 1:
+            raise GuestProtected(cl.vmid)
+
+    seam["releasing"] = [_claim(1, vmid=901, attempts=1), _claim(2, vmid=902)]
+    summary = reaper.reap_once(object(), destroy, grace_seconds=0)
+    assert seam["failed"] == [1] and seam["released"] == [2]
+    assert summary.failed == 1 and summary.protected == 1 and summary.destroy_errors == 0 and summary.released == 1
+
+
 def test_gives_up_after_max_attempts(seam):
     """Past MAX_RELEASE_ATTEMPTS the reaper stops retrying and moves the lease to
     RELEASE_FAILED WITHOUT calling destroy again — this is what stops a permanently

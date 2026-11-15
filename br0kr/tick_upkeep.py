@@ -172,6 +172,7 @@ def reap_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) ->
                             should_stop=d._halted)
     summary.expired, summary.reaped = reap.expired, reap.released
     summary.release_failed = reap.failed
+    summary.release_protected = reap.protected
     summary.provision_stuck = reap.provision_stuck
     summary.queue_expired = reap.queue_expired
 
@@ -216,6 +217,7 @@ def sweep_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -
     summary.swept = sum(s.destroyed for s in per_node.values())
     summary.sweep_clash_spared = sum(s.clash_spared for s in per_node.values())
     summary.sweep_migration_spared = sum(s.migration_spared for s in per_node.values())
+    summary.sweep_protected_spared = sum(s.protected_spared for s in per_node.values())
 
 
 def audit_prune_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:

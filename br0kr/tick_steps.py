@@ -66,12 +66,18 @@ class TickSummary:
     reaped: int = field(default=0, metadata=_COUNTER)            # guests the reaper destroyed (or settled) → RELEASED
     # leases the reaper gave up on → terminal RELEASE_FAILED (an orphan guest to triage); br0kr_release_failed_total
     release_failed: int = field(default=0, metadata=_COUNTER)
+    # of those, leases whose guest was protected on the host (0055: PVE protection or the br0kr-keep tag), given up
+    # at once and not destroyed; br0kr_release_protected_total
+    release_protected: int = field(default=0, metadata=_COUNTER)
     swept: int = field(default=0, metadata=_COUNTER)             # orphan guests the sweep destroyed
     # guests the sweep SPARED although their lease is terminal: that lease never recorded them (a lease id minted
     # twice after a ledger rollback, fence_census.py) — each one is a guest an operator must decide about
     sweep_clash_spared: int = field(default=0, metadata=_COUNTER)
     # terminal-lease guests the sweep SPARED for a migration (one in flight, or an unconfirmed copy on its target)
     sweep_migration_spared: int = field(default=0, metadata=_COUNTER)
+    # guests the sweep SPARED as never br0kr's to destroy (0055): a lease br0kr did not build, or a guest whose own
+    # config (PVE protection, the br0kr-keep tag) refused at the destroy
+    sweep_protected_spared: int = field(default=0, metadata=_COUNTER)
     # the fence census moved the lease id sequence past a fence id the ledger had not reached (a rollback)
     lease_id_floor_raised: int = field(default=0, metadata=_COUNTER)
     # the fence census set the sweep_hold_absent knob (0053): the ledger was found behind the fleet

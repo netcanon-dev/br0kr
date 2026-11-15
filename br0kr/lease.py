@@ -81,6 +81,18 @@ _RENEWABLE_SQL = "(" + ",".join(f"'{s}'" for s in RENEWABLE_STATES) + ")"
 # The CHECK constraint (0052, review REL-07) that a PROVISIONING or ACTIVE lease has a vmid and a cluster.
 LIVE_LEASE_CHECK = "lease_live_has_vmid"
 
+# Who built the lease's guest (0055, fleet onboarding phase 1). Only a PROVISIONED lease's guest is br0kr's to stop
+# and delete. An ADOPTED lease records a guest br0kr did not build (ACTIVE while recorded, RELEASED once detached,
+# never RELEASING); a CAPACITY_ONLY lease holds capacity for a guest br0kr does not manage (ADMITTED with no vmid).
+# Release, expiry, provisioning, unpin, migrate and the orphan sweep all refuse the other two; the schema CHECKs in
+# 0055 make the shapes facts. Design: docs/designs/fleet-onboarding.md.
+PROVISIONED = "provisioned"
+ADOPTED = "adopted"
+CAPACITY_ONLY = "capacity_only"
+OWNERSHIPS: tuple[str, ...] = (PROVISIONED, ADOPTED, CAPACITY_ONLY)
+# The work lists' filter (a code constant, never caller input, so it is spliced into the SQL).
+_PROVISIONED_SQL = f"l.ownership = '{PROVISIONED}'"
+
 # Reserved idem_key namespace for cross-cluster MIGRATION reservation leases (br0kr/migration.py).
 # A reservation is a REAL lease (so it debits the target node race-free through admit()), but it is
 # pure bookkeeping — it never has a guest to provision; the migration saga settles it once the lease
@@ -249,6 +261,8 @@ def begin_provisioning(
     because the reaper expired it (ADMITTED is LIVE, so a slow pickup past TTL is reapable) — and the
     reconciler must NOT provision a guest for a lease that is already being torn down. ``False`` also means the
     lease's node has no cluster (CHECK ``lease_live_has_vmid``, 0052): the lease stays ADMITTED, nothing is built.
+    ``False`` also means the lease is not ``provisioned`` (0055): a capacity-only record has no guest to build, so the
+    CAS never matches it (the work lists already exclude it; this is the last line before a clone).
     Also refreshes the deadline so the provisioning window starts at pickup, not at admission, and stamps
     ``provisioning_at`` (0048), the start of the bounded PROVISIONING budget `claim_provisioning_stale` enforces.
 
@@ -265,8 +279,8 @@ def begin_provisioning(
             "hold_reason = NULL, "   # 0033: a lease being provisioned is no longer held — clear the diagnostic
             "provisioning_at = now(), "   # 0048: starts the PROVISIONING budget (claim_provisioning_stale)
             "expires_at = now() + make_interval(secs => ttl_seconds) "
-            "WHERE id = %s AND state = 'ADMITTED' RETURNING id",
-            (vmid, name, lease_id),
+            "WHERE id = %s AND state = 'ADMITTED' AND ownership = %s RETURNING id",
+            (vmid, name, lease_id, PROVISIONED),
         ).fetchone()
     except psycopg.errors.UniqueViolation as exc:
         # The failed UPDATE changed nothing (the lease stays ADMITTED). Clean up the transaction so the
@@ -440,12 +454,17 @@ def release(conn: psycopg.Connection[Any], lease_id: int, reason: str = "complet
     racing the reaper's expiry, is a safe no-op). The reaper (br0kr/reaper.py) then
     destroys the guest and finishes with `mark_released`. The same CAS stamps ``releasing_at``
     (0051), the end of the tenant's hold that inventory.project_usage reads.
+
+    Only a ``provisioned`` lease (0055) is released: an adopted or capacity-only lease is never matched, so this
+    returns ``False`` for it (the gateway reports ``lease_protected``; `ownership_of` tells the cases apart). Every
+    caller (release_lease, cancel_lease, the provisioner's hand-off, a held lease's placement give-up, a settled
+    reservation) goes through this one CAS, so none of them can start the teardown of a guest br0kr did not build.
     """
     row = conn.execute(
         f"""UPDATE lease SET state = 'RELEASING', released_reason = %s, releasing_at = now()
-             WHERE id = %s AND state IN {_LIVE_SQL}
+             WHERE id = %s AND state IN {_LIVE_SQL} AND ownership = %s
          RETURNING id""",
-        (reason, lease_id),
+        (reason, lease_id, PROVISIONED),
     ).fetchone()
     conn.commit()
     won = row is not None
@@ -466,14 +485,16 @@ def claim_expired(conn: psycopg.Connection[Any], limit: int = 100) -> list[Claim
     `release` does. ``FOR UPDATE SKIP LOCKED`` lets many reaper instances run at once without claiming
     the same lease twice or blocking one another. A lease renewed since the scan has ``expires_at``
     in the future and is simply not matched — the heartbeat wins. A PINNED lease (0049) is
-    never matched, whatever its expires_at: pinning exempts it from this step only. The actual guest
+    never matched, whatever its expires_at: pinning exempts it from this step only. Nor is a lease that is not
+    ``provisioned`` (0055): the schema already pins every one, and this filter keeps the TTL step from ever
+    claiming one if that CHECK were dropped. The actual guest
     teardown is then driven by `claim_releasing` (a freshly-expired lease has
     ``reclaim_at IS NULL``, so the very next teardown pass picks it up).
     """
     rows = conn.execute(
         f"""WITH due AS (
                 SELECT id FROM lease
-                 WHERE state IN {_LIVE_SQL} AND expires_at <= now() AND NOT pinned
+                 WHERE state IN {_LIVE_SQL} AND expires_at <= now() AND NOT pinned AND ownership = %s
                  ORDER BY expires_at
                  FOR UPDATE SKIP LOCKED
                  LIMIT %s)
@@ -481,7 +502,7 @@ def claim_expired(conn: psycopg.Connection[Any], limit: int = 100) -> list[Claim
                SET state = 'RELEASING', released_reason = 'expired', releasing_at = now()
               FROM due WHERE l.id = due.id
           RETURNING l.id, l.node_id, l.vmid, l.name, l.release_attempts""",
-        (limit,),
+        (PROVISIONED, limit),
     ).fetchall()
     conn.commit()
     claimed = [ClaimedLease(*r) for r in rows]
@@ -524,7 +545,7 @@ def claim_provisioning_stale(conn: psycopg.Connection[Any], budget_seconds: int,
     rows = conn.execute(
         """WITH due AS (
                 SELECT id FROM lease
-                 WHERE state = 'PROVISIONING'
+                 WHERE state = 'PROVISIONING' AND ownership = %s
                    AND provisioning_at <= now() - make_interval(secs => %s)
                  ORDER BY provisioning_at, id
                  FOR UPDATE SKIP LOCKED
@@ -533,7 +554,7 @@ def claim_provisioning_stale(conn: psycopg.Connection[Any], budget_seconds: int,
                SET state = 'RELEASING', released_reason = 'provision_stuck', releasing_at = now()
               FROM due WHERE l.id = due.id
           RETURNING l.id, l.node_id, l.vmid, l.name, l.release_attempts""",
-        (budget_seconds, limit),
+        (PROVISIONED, budget_seconds, limit),
     ).fetchall()
     conn.commit()
     claimed = [ClaimedLease(*r) for r in rows]
@@ -696,7 +717,8 @@ def list_admitted(
     are EXCLUDED: they debit the target node but have no guest to build — provisioning one
     would create a spurious VM for a placeholder (br0kr/migration.py settles them on commit).
     The filter is NULL-safe: a NULL idem_key (a direct test insert) must NOT be swept out by
-    ``NOT LIKE`` (which yields NULL → row dropped), so it is admitted explicitly.
+    ``NOT LIKE`` (which yields NULL → row dropped), so it is admitted explicitly. A lease that is not
+    ``provisioned`` (0055, a capacity-only record) is excluded for the same reason: it has no guest to build.
 
     HELD leases (``hold_reason`` set, 0033) are EXCLUDED from this HOT provision list: a templated lease the
     daemon could not place (retired instance, revoked reachability, a would-be cross-provision) parks with a
@@ -710,7 +732,7 @@ def list_admitted(
             "       l.template_id, l.template_instance_id, l.req_disk_gb, l.storage_id "
             "FROM lease l "
             "WHERE l.state = 'ADMITTED' AND l.hold_reason IS NULL "
-            f"AND {_NOT_RESERVED_SQL}")
+            f"AND {_PROVISIONED_SQL} AND {_NOT_RESERVED_SQL}")
     if node_ids is None:
         rows = conn.execute(f"{base} ORDER BY l.created_at, l.id LIMIT %s", (*_RESERVED_LIKE, limit)).fetchall()
     else:
@@ -801,6 +823,16 @@ def state_of(conn: psycopg.Connection[Any], lease_id: int) -> str | None:
     return row[0] if row else None
 
 
+def ownership_of(conn: psycopg.Connection[Any], lease_id: int) -> str | None:
+    """Who built the lease's guest (0055: ``provisioned``, ``adopted`` or ``capacity_only``), or ``None`` if the lease
+    does not exist. Lets a caller whose `release` lost say why (``lease_protected`` rather than ``lease_not_live``).
+    Like `state_of`, a read for reporting, never a basis for a transition: the CASs filter by ownership themselves.
+    Commits to end the read transaction."""
+    row = conn.execute("SELECT ownership FROM lease WHERE id = %s", (lease_id,)).fetchone()
+    conn.commit()
+    return row[0] if row else None
+
+
 @dataclass(frozen=True)
 class LeaseOwner:
     """What the ledger says about the lease a fenced guest names: its state, its node, the guest it RECORDED (the
@@ -808,7 +840,8 @@ class LeaseOwner:
     migrations: `moved` = the (target node, vmid) of each copy a saga confirmed landed but could not move the lease
     onto (0054, `migration.dest_vmid`), `migrating` = a migration of it is still in flight, `migration_targets` =
     the target node of each of its migrations that is in flight or aborted (a finished one moved the lease, which
-    then records the copy itself)."""
+    then records the copy itself), and `ownership` (0055): who built the guest. The sweep never destroys a guest
+    whose lease is not ``provisioned``, in any state."""
 
     state: str
     cluster_id: str | None
@@ -817,6 +850,7 @@ class LeaseOwner:
     moved: tuple[tuple[str, int], ...] = ()
     migrating: bool = False
     migration_targets: frozenset[str] = frozenset()
+    ownership: str = PROVISIONED
 
     def recorded(self, vmid: int, cluster_id: str | None, node_id: str | None = None) -> bool:
         """Whether this lease recorded the guest at `vmid` on node `node_id` in `cluster_id`. A lease that never
@@ -853,8 +887,8 @@ def owners_of(conn: psycopg.Connection[Any], lease_ids: Iterable[int]) -> dict[i
     ids = sorted({int(i) for i in lease_ids})
     if not ids:
         return {}
-    rows = conn.execute("SELECT id, state::text, cluster_id, vmid, node_id FROM lease WHERE id = ANY(%s)",
-                        (ids,)).fetchall()
+    rows = conn.execute("SELECT id, state::text, cluster_id, vmid, node_id, ownership FROM lease "
+                        "WHERE id = ANY(%s)", (ids,)).fetchall()
     # A saga that settles between the two reads only adds a confirmed copy (`dest_vmid`) or ends `migrating`;
     # either order of reads gives a safe answer (a copy reclaimed one pass later, or left one pass longer).
     migs = conn.execute("SELECT lease_id, target_node, dest_vmid, state::text FROM migration "
@@ -872,8 +906,8 @@ def owners_of(conn: psycopg.Connection[Any], lease_ids: Iterable[int]) -> dict[i
         if live:
             migrating.add(int(lid))
     return {int(i): LeaseOwner(str(s), c, None if v is None else int(v), n, tuple(moved.get(int(i), ())),
-                               int(i) in migrating, frozenset(targets.get(int(i), ())))
-            for i, s, c, v, n in rows}
+                               int(i) in migrating, frozenset(targets.get(int(i), ())), str(o))
+            for i, s, c, v, n, o in rows}
 
 
 def max_lease_id(conn: psycopg.Connection[Any]) -> int:
@@ -1094,10 +1128,11 @@ def list_held(
     the hot ``list_admitted`` list), oldest first, on this daemon's served nodes. The daemon re-runs the
     placement re-check on each — clearing the hold if it healed, or counting a blocked re-check toward the
     bounded auto-release. Reserved reservation keys are never templated/held, but the same NULL-safe reserved-
-    prefix exclusion is applied for symmetry. A PLAIN read; commits."""
+    prefix exclusion is applied for symmetry, and so is the ``provisioned`` filter (0055): a capacity-only
+    record is never held, and the bounded auto-release must never reach one. A PLAIN read; commits."""
     base = ("SELECT l.id, l.node_id, l.template_id, l.template_instance_id, l.storage_id, l.hold_reason "
             "FROM lease l WHERE l.state = 'ADMITTED' AND l.hold_reason IS NOT NULL "
-            f"AND {_NOT_RESERVED_SQL}")
+            f"AND {_PROVISIONED_SQL} AND {_NOT_RESERVED_SQL}")
     if node_ids is None:
         rows = conn.execute(f"{base} ORDER BY l.created_at, l.id LIMIT %s", (*_RESERVED_LIKE, limit)).fetchall()
     else:
@@ -1154,29 +1189,41 @@ def clone_orphan_reclaimable(
     (COPYING/CONVERTING/RECLAIMING) OR a ``REPLICATING`` twin ``template_instance`` at this vmid (both carry the
     minted vmid) makes the clone NON-reclaimable regardless of lease evidence. The READY handoff needs no term —
     a READY copy is a real ``template_instance`` catalog row, not an unfenced orphan. Cluster-scoped like the
-    lease evidence when ``node_id`` is given."""
+    lease evidence when ``node_id`` is given.
+
+    OWNERSHIP (0055): a lease that is not ``provisioned`` (an adopted guest, in any state, detached included) counts
+    as OWNING its vmid, and a live capacity-only record whose ``observed_vmid`` names this vmid (in the swept
+    node's cluster) spares it like an active replication, so a guest br0kr did not build is never reclaimed
+    through this path. Both terms only ever spare."""
     if node_id is None:
         row = conn.execute(
-            f"SELECT bool_or(l.state IN {_VMID_OWNED_SQL}), bool_or(l.state IN {_VMID_TERMINAL_SQL}), "
+            f"SELECT bool_or(l.state IN {_VMID_OWNED_SQL} OR NOT {_PROVISIONED_SQL}), "
+            f"  bool_or(l.state IN {_VMID_TERMINAL_SQL}), "
             f"  (EXISTS (SELECT 1 FROM template_replication r WHERE r.vmid = %s "
             f"           AND r.job_state IN {_REPL_VMID_ACTIVE_SQL}) "
             f"   OR EXISTS (SELECT 1 FROM template_instance ti WHERE ti.vmid = %s "
-            f"              AND ti.instance_state = 'REPLICATING')) "
+            f"              AND ti.instance_state = 'REPLICATING') "
+            f"   OR EXISTS (SELECT 1 FROM lease c WHERE c.observed_vmid = %s "
+            f"              AND c.ownership = '{CAPACITY_ONLY}' AND c.state = 'ADMITTED')) "
             f"FROM lease l WHERE l.vmid = %s",
-            (vmid, vmid, vmid),
+            (vmid, vmid, vmid, vmid),
         ).fetchone()
     else:
         row = conn.execute(
-            f"SELECT bool_or(l.state IN {_VMID_OWNED_SQL}), bool_or(l.state IN {_VMID_TERMINAL_SQL}), "
+            f"SELECT bool_or(l.state IN {_VMID_OWNED_SQL} OR NOT {_PROVISIONED_SQL}), "
+            f"  bool_or(l.state IN {_VMID_TERMINAL_SQL}), "
             f"  (EXISTS (SELECT 1 FROM template_replication r WHERE r.vmid = %s "
             f"           AND r.job_state IN {_REPL_VMID_ACTIVE_SQL} "
             f"           AND r.target_cluster_id = (SELECT cluster_id FROM node WHERE id = %s)) "
             f"   OR EXISTS (SELECT 1 FROM template_instance ti WHERE ti.vmid = %s "
             f"              AND ti.instance_state = 'REPLICATING' "
-            f"              AND ti.cluster_id = (SELECT cluster_id FROM node WHERE id = %s))) "
+            f"              AND ti.cluster_id = (SELECT cluster_id FROM node WHERE id = %s)) "
+            f"   OR EXISTS (SELECT 1 FROM lease c JOIN node cn ON cn.id = c.node_id WHERE c.observed_vmid = %s "
+            f"              AND c.ownership = '{CAPACITY_ONLY}' AND c.state = 'ADMITTED' "
+            f"              AND cn.cluster_id IS NOT DISTINCT FROM (SELECT cluster_id FROM node WHERE id = %s))) "
             f"FROM lease l WHERE l.vmid = %s "
             f"AND l.cluster_id IS NOT DISTINCT FROM (SELECT cluster_id FROM node WHERE id = %s)",
-            (vmid, node_id, vmid, node_id, vmid, node_id),
+            (vmid, node_id, vmid, node_id, vmid, node_id, vmid, node_id),
         ).fetchone()
     conn.commit()
     if row is None:

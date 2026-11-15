@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 
 from br0kr import build, imgbuild, reclaim_beat, reconciler
-from br0kr.driver import Driver
+from br0kr.driver import PROTECTED, Driver
 
 if TYPE_CHECKING:
     from br0kr.daemon import Daemon
@@ -236,7 +236,7 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                 continue
             try:
                 # Heartbeat threaded through the ~180s stop+DELETE so the single tick thread stays alive.
-                driver.destroy_build_vm(claim.vmid, job.id, on_progress=beat)  # clean if gone/reused
+                rc = driver.destroy_build_vm(claim.vmid, job.id, on_progress=beat)  # clean if gone/reused
             except Exception:
                 # The guest may still be running — leave the build NON-TERMINAL (RECLAIMING) so a later sweep
                 # retries. NEVER mark terminal with the guest still up.
@@ -245,14 +245,21 @@ def reclaim_builds(d: Daemon, conn: psycopg.Connection[Any]) -> int:
                             "will retry in %ds", job.id, claim.vmid, wait,
                             extra={"build_id": job.id, "vmid": claim.vmid})
                 continue
-            # The guest — and thus its create/import task copying FROM the source — is provably gone now, so
+            if rc == PROTECTED:
+                # Someone protected the build VM (0055): it is left in place, the build is finalized as usual,
+                # and its import source is NOT reaped (the guest is not provably gone). Nothing retries it.
+                log.error("stale build %s: build VM vmid %s is protected (PVE protection or the br0kr-keep tag) "
+                          "— left in place for good, import source not reaped; remove both by hand when done",
+                          job.id, claim.vmid, extra={"build_id": job.id, "vmid": claim.vmid})
+            else:
+                # The guest — and thus its create/import task copying FROM the source — is provably gone now, so
             # best-effort reap the transient import SOURCE on THIS exact node (closes the import_timeout /
             # abandoned-leader leak). A build with a vmid downloaded FIRST (the download completed before the
             # vmid was ever stamped), so the source is present, and `driver` is the exact node it landed on —
             # no reach-blind guess. NEVER affects the reclaim outcome; idempotent.
-            reconciler.free_build_import(
-                driver, job.storage_id, imgbuild.download_filename(job.target_template_id, job.url),
-                job.id, expect_present=False, on_progress=beat)
+                reconciler.free_build_import(
+                    driver, job.storage_id, imgbuild.download_filename(job.target_template_id, job.url),
+                    job.id, expect_present=False, on_progress=beat)
         elif claim.download_upid is not None and claim.download_node is not None:
             # A guest-free DOWNLOADING build (no vmid ever stamped) whose download outran build_template's
             # wait budget: RE-ATTACH to the persisted download task (migration 0045) on its EXACT node and, IF

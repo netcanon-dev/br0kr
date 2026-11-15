@@ -442,10 +442,14 @@ def renew_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
 
 def release_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:
     """Release a lease (normal completion). ``released`` is True if this call began the release. Otherwise it is
-    False with a reason (idempotent): ``lease_queued`` for a lease still waiting in the queue (release does not drop
-    a queued request: cancel_lease does), else ``lease_not_live`` (already releasing or ended)."""
+    False with a reason (idempotent): ``lease_protected`` for a lease br0kr did not build (0055: an adopted guest
+    or a capacity-only record, which no tenant release ends), ``lease_queued`` for a lease still waiting in the
+    queue (release does not drop a queued request: cancel_lease does), else ``lease_not_live`` (already releasing
+    or ended)."""
     if lease.release(conn, lease_id):
         return {"lease_id": lease_id, "released": True}
+    if _protected(conn, lease_id):
+        return {"lease_id": lease_id, "released": False, "reason": reasons.LEASE_PROTECTED}
     # The release lost: the lease is queued, already on its way out, or it was promoted between that release and
     # this read. A lease now live is released once more, so a promotion in the window can never leave a live lease
     # the caller was told is gone.
@@ -504,12 +508,27 @@ def cancel_lease(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]
     A QUEUED (PENDING) request is dropped before it is promoted → REJECTED. If the request was already
     promoted (now a live lease), it is RELEASED instead (same intent: you no longer want it). Idempotent.
     Returns {lease_id, cancelled, outcome}: ``outcome`` is 'cancelled' (was queued), 'released' (was
-    live), or 'noop' (already terminal / unknown, with reason ``lease_not_live``)."""
+    live), or 'noop' with a reason: ``lease_protected`` (br0kr did not build its guest, 0055) or ``lease_not_live``
+    (already terminal / unknown)."""
     if lease.cancel_pending(conn, lease_id):
         return {"lease_id": lease_id, "cancelled": True, "outcome": "cancelled"}
     if lease.release(conn, lease_id):
         return {"lease_id": lease_id, "cancelled": True, "outcome": "released"}
+    if _protected(conn, lease_id):
+        return {"lease_id": lease_id, "cancelled": False, "outcome": "noop", "reason": reasons.LEASE_PROTECTED}
     return {"lease_id": lease_id, "cancelled": False, "outcome": "noop", "reason": reasons.LEASE_NOT_LIVE}
+
+
+def _protected(conn: psycopg.Connection[Any], lease_id: int) -> bool:
+    """Whether a lease whose release just lost is one br0kr did not build (0055). Read after the CAS lost, so it only
+    names the refusal; the CAS itself is what refused (lease.release matches provisioned leases only). A detached
+    adopted lease (RELEASED) also answers ``lease_protected``: nothing br0kr does will release it."""
+    ownership = lease.ownership_of(conn, lease_id)
+    if ownership is not None and ownership != lease.PROVISIONED:
+        log.info("release of lease %d refused: br0kr did not build its guest (%s)", lease_id, ownership,
+                 extra={"lease_id": lease_id, "ownership": ownership})
+        return True
+    return False
 
 
 def queue_status(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any]:

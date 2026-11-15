@@ -107,6 +107,14 @@ teardown later aims at the wrong cluster, and a create that fails releases the l
 `settings.request_reload` on a repoint (the next tick reloads); closing it is a cluster check in
 `begin_provisioning`.
 
+**A guest br0kr did not build is never torn down** (migration `0055`, [fleet-onboarding.md](fleet-onboarding.md)):
+the release, expiry, provisioning and sweep paths match `ownership = 'provisioned'` only, and after its fence
+check every teardown reads the guest's config before the stop and before the DELETE. Proxmox protection or the
+`br0kr-keep` tag answers `protected`: nothing is stopped or deleted, the reaper ends that lease `RELEASE_FAILED`
+at once, the sweep counts it `protected_spared`, and a replication reclaim never marks a protected copy settled.
+No tag rewrite on a guest br0kr already fences drops the keep tag (`pve._keeping`), and the call that fences a
+fresh clone also clears the protection it copied from its template.
+
 **Per-VMID fencing closes the cross-window/vmid-reuse gap:** `br0kr/pve.py` stamps each guest with its
 lease id and `fenced_destroy` deletes only on a tag match, so a stale teardown can never DELETE a
 reused vmid's guest — proven live on a real PVE node (the vmid-reuse zombie-destroy is refused).

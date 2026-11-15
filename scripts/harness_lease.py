@@ -46,6 +46,19 @@ Deterministic checks:
                        and every target node is named.
   raise_id_floor       lease.raise_id_floor moves the id sequence forward past a floor, never back, on a
                        transaction and an autocommit connection.
+  ownership_shapes     the 0055 CHECKs: an adopted lease is ACTIVE or RELEASED and pinned, never PENDING, ADMITTED
+                       or RELEASING; a capacity-only lease has no vmid, is pinned, and is ADMITTED on a node or
+                       RELEASED, never RELEASING; a container (adopted or provisioned) must be capacity-only; an
+                       unknown ownership is refused; one live capacity-only record per (node, observed vmid), on
+                       another node allowed; an adopted lease closes ACTIVE -> RELEASED, a record ADMITTED ->
+                       RELEASED, and a forced delete_node then severs a closed record's node; existing rows default
+                       provisioned/qemu; 0055 is idempotent.
+  ownership_guards     every path refuses what br0kr did not build (0055): release and the gateway's release/cancel
+                       (lease_protected), list_admitted/list_held/begin_provisioning skip a capacity-only record,
+                       unpin is pin_class_fixed, those pins don't use up max_pinned, migrate is lease_protected,
+                       owners_of reports ownership, a detached adopted row at a vmid and a live capacity-only
+                       record's observed vmid each keep a clone at that vmid from being reclaimed; claim_expired
+                       still reaps a provisioned lease beside them.
   id_floor_lock        with another session's INSERT open, a floor the sequence is already past returns at once
                        (no lock); a floor above it waits for that INSERT to commit and then lands above its id; an
                        INSERT open past the lock_timeout makes the floor give up and change nothing; a floor the
@@ -80,7 +93,7 @@ import psycopg
 
 # Import the modules under test from the repo root (scripts/ is a sibling of br0kr/).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import gateway, lease, migrate, migration, pin, reaper  # noqa: E402
+from br0kr import admin, gateway, lease, migrate, migration, pin, reaper  # noqa: E402
 
 CONN = os.environ["PGCONN"]
 NODE = "n1"
@@ -171,6 +184,163 @@ def check_live_lease_has_vmid() -> bool:
     ok = (refused == [True, True, True] and still == "ADMITTED" and gone_early > 0 and won
           and row == ("PROVISIONING", 778, "cl"))
     print(f"[live_lease_has_vmid]  refused={refused} untouched={still} provisioned={row}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def _foreign_lease(ownership: str, state: str, *, vmid: int | None = None, node: str | None = NODE,
+                   observed_vmid: int | None = None, guest_kind: str = "qemu", pinned: bool = True,
+                   project: str | None = None) -> int:
+    """Insert an adopted or capacity-only lease (0055) as the later phases' writers will: pinned, past due (so a
+    TTL step that ignored the pin would take it; the claim's ownership filter is pinned by tests/unit/test_lease.py),
+    with the node's cluster."""
+    with psycopg.connect(CONN, autocommit=True) as c:
+        return int(c.execute(
+            """INSERT INTO lease(node_id, cluster_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid,
+                                 ownership, guest_kind, observed_vmid, pinned, project_id)
+               VALUES (%s, (SELECT cluster_id FROM node WHERE id = %s), %s, %s, %s::lease_state, 900,
+                       now() - interval '1 day', %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (node, node, REQ_CPU, REQ_MEM, state, vmid, ownership, guest_kind, observed_vmid, pinned,
+             project)).fetchone()[0])
+
+
+def check_ownership_shapes() -> bool:
+    """The 0055 CHECKs refuse every shape a lease br0kr did not build must never take, and the unique index keeps
+    one live capacity-only record per (node, observed vmid). Each refusal writes nothing. Guards a later writer (or
+    a hand-run UPDATE) putting an adopted guest into RELEASING, where the reaper would destroy it, or giving a
+    capacity-only record a vmid a teardown could act on."""
+    reset()
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id) VALUES ('n2',%s,%s,'cl')",
+                  (NODE_CPU, NODE_MEM))
+    plain = insert_lease("ACTIVE", expires_offset_s=3600)
+    adopted = _foreign_lease(lease.ADOPTED, "ACTIVE", vmid=3001)
+    held = _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", observed_vmid=9950)
+    other_node = _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", observed_vmid=9950, node="n2")
+    container = _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", observed_vmid=104, guest_kind="lxc")
+    refusals: list[tuple[str, str | None]] = []
+
+    def refused(label: str, fn) -> None:  # type: ignore[no-untyped-def]
+        try:
+            fn()
+            refusals.append((label, None))
+        except (psycopg.errors.CheckViolation, psycopg.errors.UniqueViolation) as exc:
+            refusals.append((label, exc.diag.constraint_name))
+
+    def upd(sql: str, lid: int):  # type: ignore[no-untyped-def]
+        def run() -> None:
+            with psycopg.connect(CONN, autocommit=True) as c:
+                c.execute(sql, (lid,))
+        return run
+
+    refused("adopted_admitted", lambda: _foreign_lease(lease.ADOPTED, "ADMITTED", vmid=3002))
+    refused("adopted_releasing", upd("UPDATE lease SET state = 'RELEASING' WHERE id = %s", adopted))
+    refused("adopted_unpinned", upd("UPDATE lease SET pinned = false WHERE id = %s", adopted))
+    refused("capacity_vmid", upd("UPDATE lease SET vmid = 3003 WHERE id = %s", held))
+    refused("capacity_active", lambda: _foreign_lease(lease.CAPACITY_ONLY, "ACTIVE", vmid=3004))
+    refused("lxc_provisioned", lambda: _foreign_lease(lease.PROVISIONED, "ADMITTED", guest_kind="lxc",
+                                                      pinned=False))
+    refused("unknown_ownership", lambda: _foreign_lease("borrowed", "ADMITTED"))
+    refused("duplicate_record", lambda: _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", observed_vmid=9950))
+    refused("capacity_releasing", upd("UPDATE lease SET state = 'RELEASING' WHERE id = %s", held))
+    refused("capacity_no_node", lambda: _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", node=None,
+                                                       observed_vmid=105))
+    refused("capacity_unpinned", upd("UPDATE lease SET pinned = false WHERE id = %s", held))
+    refused("adopted_container", lambda: _foreign_lease(lease.ADOPTED, "ACTIVE", vmid=3005, guest_kind="lxc"))
+    refused("adopted_pending", lambda: _foreign_lease(lease.ADOPTED, "PENDING"))
+    # The allowed closes: an adopted lease ACTIVE -> RELEASED; a record ADMITTED -> RELEASED, after which a forced
+    # node delete may sever its node like any terminal row's (the CHECK requires a node only while it holds capacity).
+    detached = _foreign_lease(lease.ADOPTED, "ACTIVE", vmid=3006)
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("UPDATE lease SET state = 'RELEASED' WHERE id = ANY(%s)", ([detached, other_node],))
+    with connect() as c:
+        node_gone = admin.delete_node(c, "n2", force=True)
+        c.commit()
+    expected = [("adopted_admitted", "lease_adopted_states"), ("adopted_releasing", "lease_adopted_states"),
+                ("adopted_unpinned", "lease_foreign_pinned"), ("capacity_vmid", "lease_capacity_only_no_guest"),
+                ("capacity_active", "lease_capacity_only_no_guest"), ("lxc_provisioned", "lease_lxc_unfenced"),
+                ("unknown_ownership", "lease_ownership_known"),
+                ("duplicate_record", "lease_capacity_only_observed_uniq"),
+                ("capacity_releasing", "lease_capacity_only_no_guest"),
+                ("capacity_no_node", "lease_capacity_only_no_guest"),
+                ("capacity_unpinned", "lease_foreign_pinned"), ("adopted_container", "lease_lxc_unfenced"),
+                ("adopted_pending", "lease_adopted_states")]
+    with psycopg.connect(CONN, autocommit=True) as c:
+        defaults = c.execute("SELECT ownership, guest_kind FROM lease WHERE id = %s", (plain,)).fetchone()
+        rows = c.execute("SELECT id, state::text, vmid, pinned FROM lease WHERE id = ANY(%s) ORDER BY id",
+                         ([adopted, held],)).fetchall()
+        closed = {r[0]: (r[1], r[2]) for r in c.execute(
+            "SELECT id, state::text, node_id FROM lease WHERE id = ANY(%s)", ([detached, other_node],)).fetchall()}
+        sql = (Path(__file__).resolve().parent.parent / "db" / "migrations" / "0055_lease_ownership.sql").read_text(
+            encoding="utf-8")
+        c.execute(sql)                                                      # idempotent
+    bad = [r for r, e in zip(refusals, expected, strict=True) if r != e]
+    ok = (not bad and len(refusals) == len(expected) and defaults == ("provisioned", "qemu") and other_node > 0
+          and container > 0 and rows == [(adopted, "ACTIVE", 3001, True), (held, "ADMITTED", None, True)]
+          and node_gone["deleted"] is True
+          and closed == {detached: ("RELEASED", NODE), other_node: ("RELEASED", None)})
+    print(f"[ownership_shapes]     refused={len(refusals) - len(bad)}/{len(expected)} {bad or ''} "
+          f"defaults={defaults} closed={sorted(closed.values(), key=str)} node_deleted={node_gone['deleted']}  "
+          f"| {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_ownership_guards() -> bool:
+    """Every lease path refuses a lease br0kr did not build (0055), against real Postgres: see the docstring list
+    (ownership_guards). Guards each of them being the one gap through which a recorded infrastructure guest is
+    released, expired, provisioned over, unpinned, migrated or reclaimed."""
+    reset()
+    pin_project(1)
+    adopted = _foreign_lease(lease.ADOPTED, "ACTIVE", vmid=3101, project=PIN_PROJECT)
+    held = _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", observed_vmid=9950, project=PIN_PROJECT)
+    due = insert_lease("ACTIVE", expires_offset_s=-60, vmid=3102)
+    tenant = pinned_lease("ACTIVE", 3600, pinned=False)
+    with connect() as c:
+        released = [lease.release(c, adopted), lease.release(c, held)]
+        answers = [gateway.release_lease(c, adopted).get("reason"), gateway.cancel_lease(c, held).get("reason")]
+        admitted = [a.id for a in lease.list_admitted(c)]
+        c.execute("UPDATE lease SET hold_reason = 'instance_unavailable' WHERE id = %s", (held,))
+        c.commit()
+        held_list = [h.id for h in lease.list_held(c)]
+        provisioned = lease.begin_provisioning(c, held, vmid=3103, name="g")
+        unpin = pin.set_pinned(c, adopted, pinned=False)
+        c.commit()
+        pin_tenant = pin.set_pinned(c, tenant, pinned=True)   # the adopted pin must not use the one slot
+        c.commit()
+        moved = migration.request_migration(c, idem_key="own-guard-mig", lease_id=adopted, target_node=NODE)
+        owners = lease.owners_of(c, [adopted, held, due])
+        expired = [x.id for x in lease.claim_expired(c)]
+    # A clone orphan at vmid 3201: a provisioned lease there ended, but a detached adopted lease records it too.
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO lease(node_id, cluster_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid) "
+                  "VALUES (%s, 'cl', %s, %s, 'RELEASED', 900, now(), 3201)", (NODE, REQ_CPU, REQ_MEM))
+    with connect() as c:
+        lone = lease.clone_orphan_reclaimable(c, 3201, NODE)
+    _foreign_lease(lease.ADOPTED, "RELEASED", vmid=3201)
+    with connect() as c:
+        guarded = lease.clone_orphan_reclaimable(c, 3201, NODE)
+    # The same at vmid 3202, but the guest there is named by a live capacity-only record's observed vmid.
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO lease(node_id, cluster_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at, vmid) "
+                  "VALUES (%s, 'cl', %s, %s, 'RELEASED', 900, now(), 3202)", (NODE, REQ_CPU, REQ_MEM))
+    with connect() as c:
+        lone_obs = lease.clone_orphan_reclaimable(c, 3202, NODE)
+    _foreign_lease(lease.CAPACITY_ONLY, "ADMITTED", observed_vmid=3202)
+    with connect() as c:
+        guarded_obs = lease.clone_orphan_reclaimable(c, 3202, NODE)
+    states = {lid: state_of(lid) for lid in (adopted, held)}
+    ok = (released == [False, False] and answers == ["lease_protected", "lease_protected"]
+          and held not in admitted and held_list == [] and provisioned is False
+          and unpin["reason"] == "pin_class_fixed" and pin_tenant["updated"] is True
+          and moved.get("reason") == "lease_protected"
+          and {k: v.ownership for k, v in owners.items()} == {adopted: "adopted", held: "capacity_only",
+                                                               due: "provisioned"}
+          and expired == [due] and lone is True and guarded is False and lone_obs is True and guarded_obs is False
+          and states == {adopted: "ACTIVE", held: "ADMITTED"})
+    print(f"[ownership_guards]     release={released} answers={answers} admitted_has_record={held in admitted} "
+          f"held={held_list} provisioned={provisioned} unpin={unpin['reason']} tenant_pin={pin_tenant['updated']} "
+          f"migrate={moved.get('reason')} expired={expired == [due]} reclaim={lone}->{guarded} "
+          f"observed={lone_obs}->{guarded_obs}  "
+          f"| {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -978,6 +1148,8 @@ def main() -> int:
         check_raise_id_floor_forward_only,
         check_raise_id_floor_lock,
         check_live_lease_has_vmid,
+        check_ownership_shapes,
+        check_ownership_guards,
     ]
     results = [fn() for fn in checks]
     print("\n" + ("GO" if all(results) else "NO-GO"))

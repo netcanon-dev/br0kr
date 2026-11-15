@@ -82,7 +82,7 @@ from typing import Any
 import psycopg
 
 from br0kr import fence_census, lease, replication
-from br0kr.driver import DESTROYED, FENCE_MISMATCH, GONE, Driver
+from br0kr.driver import DESTROYED, FENCE_MISMATCH, GONE, PROTECTED, Driver
 from br0kr.logging_setup import generate_correlation_id, push_context
 
 log = logging.getLogger(__name__)
@@ -123,6 +123,9 @@ class SweepSummary:
     #                           (a lease id minted twice, after a rollback) — not this lease's guest to destroy
     migration_spared: int = 0  # terminal-lease guests SPARED for a migration: one is still in flight, or the guest
     #                            sits on a migration target the saga never confirmed a copy on
+    protected_spared: int = 0  # guests SPARED as br0kr's never to destroy (0055): a terminal lease br0kr did not
+    #                            build (adopted, detached), or a guest whose own config refused at the destroy
+    #                            (Proxmox protection or the br0kr-keep tag), on any of the sweep's phases
     destroyed: int = 0        # orphans actually destroyed (0 in dry_run or when aborted)
     refused: int = 0          # fence_mismatch at destroy (tag changed under us) — left alone
     errors: int = 0           # destroy raised a transient error; next sweep retries
@@ -141,13 +144,14 @@ def _log_summary(summary: SweepSummary) -> None:
     """Emit the one-line sweep roll-up — on EVERY exit path (incl. a breaker abort, which may have already
     reclaimed clone-orphans in phase 2 before aborting phase 1), so a reclaim is never invisible."""
     if (summary.orphans or summary.clone_orphans or summary.repl_orphans or summary.absent_spared
-            or summary.clash_spared or summary.migration_spared):
+            or summary.clash_spared or summary.migration_spared or summary.protected_spared):
         log.info("orphan sweep: scanned %d, %d orphan(s) (%d terminal, %d absent), %d absent SPARED "
                  "(rollback/lag watermark or hold), %d terminal-lease guest(s) SPARED (lease id clash), %d SPARED "
-                 "(migration), destroyed %d, refused %d, errors %d, aborted=%s; clone-orphans "
+                 "(migration), %d SPARED (protected), destroyed %d, refused %d, errors %d, aborted=%s; clone-orphans "
                  "%d reclaimed %d refused %d spared %d; repl-orphans %d reclaimed %d refused %d spared %d",
                  summary.scanned, summary.orphans, summary.terminal, summary.absent, summary.absent_spared,
-                 summary.clash_spared, summary.migration_spared, summary.destroyed, summary.refused,
+                 summary.clash_spared, summary.migration_spared, summary.protected_spared, summary.destroyed,
+                 summary.refused,
                  summary.errors, summary.aborted,
                  summary.clone_orphans, summary.clone_reclaimed, summary.clone_refused, summary.clone_spared,
                  summary.repl_orphans, summary.repl_reclaimed, summary.repl_refused, summary.repl_spared)
@@ -237,6 +241,19 @@ def orphan_sweep(
             owner = owners.get(lease_id)
             if owner is None:
                 absent.append((vmid, lease_id, lease_id >= watermark and lease_id not in acknowledged))
+            elif owner.ownership != lease.PROVISIONED:
+                # br0kr did not build this guest (0055: an adopted lease, ACTIVE or detached), so no state of its
+                # lease is evidence that the guest may go. Counted only once the lease is terminal (where a
+                # provisioned lease's guest would have been a destroy candidate), so a recorded guest is not noise.
+                if is_orphan(owner.state):
+                    summary.protected_spared += 1
+                    log.warning("orphan sweep: SPARED guest vmid %s on node %s fenced to lease %s (%s, %s): br0kr "
+                                "did not build it, so it never destroys it. Remove its br0kr tags by hand if the "
+                                "guest is no longer meant to be recorded.", vmid, node_id, lease_id,
+                                owner.state, owner.ownership,
+                                extra={"vmid": vmid, "lease_id": lease_id, "lease_state": owner.state,
+                                       "ownership": owner.ownership, "node_id": node_id})
+                continue
             elif not is_orphan(owner.state):
                 continue   # a LIVE/RELEASING lease still owns its guest — never swept
             elif owner.recorded(vmid, node_cluster, node_id):
@@ -332,6 +349,8 @@ def orphan_sweep(
                 continue
             if rc == DESTROYED:
                 summary.clone_reclaimed += 1
+            elif rc == PROTECTED:
+                summary.protected_spared += 1   # the guest's own config refused (pve logged it); not destroyed
             elif rc != GONE:
                 summary.clone_refused += 1   # fence_appeared / repl_fence_appeared / not_clone / is_template — spared
 
@@ -372,6 +391,8 @@ def orphan_sweep(
                 continue
             if rc == FENCE_MISMATCH:
                 summary.repl_refused += 1   # the vmid was reused under us since the scan — left alone
+            elif rc == PROTECTED:
+                summary.protected_spared += 1   # the guest's own config refused: still there, so NOT settled
             else:
                 replication.stamp_repl_guest_settled(conn, rid)   # 'destroyed'/'gone' → the guest is gone → prunable
                 summary.repl_reclaimed += 1
@@ -419,6 +440,8 @@ def orphan_sweep(
                 continue
             if rc == FENCE_MISMATCH:
                 summary.refused += 1   # vmid reused under a new lease since the scan; leave it
+            elif rc == PROTECTED:
+                summary.protected_spared += 1   # the guest's own config refused (pve logged it); not destroyed
             else:
                 summary.destroyed += 1  # "destroyed" or "gone" — the orphan is no longer running
     _log_summary(summary)

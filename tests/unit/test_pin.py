@@ -42,10 +42,10 @@ class _Conn:
 
 
 def _lease(project: str | None = "p", state: str = "ACTIVE", pinned: bool = False,
-           max_pinned: int = 2, live_pinned: int = 0) -> _Conn:
+           max_pinned: int = 2, live_pinned: int = 0, ownership: str = lease.PROVISIONED) -> _Conn:
     return _Conn({"SELECT project_id FROM lease": (project,),
                   "FROM project WHERE id = %s FOR NO KEY UPDATE": (max_pinned,),
-                  "SELECT state, pinned, project_id FROM lease": (state, pinned, project),
+                  "SELECT state, pinned, project_id, ownership FROM lease": (state, pinned, project, ownership),
                   "AND pinned AND state IN": (live_pinned,)})
 
 
@@ -99,6 +99,24 @@ def test_unpinning_gives_a_fresh_ttl_and_takes_no_project_lock():
     assert pin.set_pinned(c, 7, pinned=False)["updated"] is True
     assert "pinned = false" in c.sql[-1] and "expires_at = now() + make_interval(secs => ttl_seconds)" in c.sql[-1]
     assert not any("FROM project" in s for s in c.sql)
+
+
+@pytest.mark.parametrize("ownership", [lease.ADOPTED, lease.CAPACITY_ONLY])
+def test_a_lease_br0kr_did_not_build_cannot_be_unpinned(ownership: str):
+    """Unpinning an adopted or capacity-only lease (0055) is refused with pin_class_fixed and writes nothing;
+    pinning it again is the ordinary no-op. Guards an unpin giving such a lease a TTL (the reaper would then
+    expire a record br0kr must never end) and the CHECK lease_foreign_pinned surfacing as a 500."""
+    c = _lease(pinned=True, ownership=ownership)
+    assert pin.set_pinned(c, 7, pinned=False) == {"lease_id": 7, "pinned": True, "updated": False,
+                                                  "reason": "pin_class_fixed"}
+    assert not any(s.startswith("UPDATE") for s in c.sql)
+    assert pin.set_pinned(_lease(pinned=True, ownership=ownership), 7, pinned=True)["reason"] is None
+
+
+def test_the_pin_bound_counts_only_leases_br0kr_built():
+    """The live-pinned count against max_pinned filters ownership = 'provisioned' (0055). Guards a project's
+    infrastructure records (always pinned by schema) silently using up its tenants' pin slots."""
+    assert "ownership = 'provisioned'" in pin._LIVE_PINNED
 
 
 def test_asking_for_the_state_a_lease_is_already_in_is_not_a_refusal():

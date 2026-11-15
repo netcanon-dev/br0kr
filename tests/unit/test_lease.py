@@ -88,12 +88,26 @@ def test_a_pinned_lease_is_never_due_however_old_its_deadline():
 def test_claim_expired_sql_skips_pinned_leases():
     """The reaper's TTL claim filters `NOT pinned` in the same WHERE that picks the due live leases, so the one
     statement that flips leases to RELEASING(expired) can never take a pinned one. (The real-Postgres proof, a
-    pinned ACTIVE lease surviving expiry and a reaper pass, is scripts/harness_lease.py.) Guards the filter being
-    dropped from, or moved out of, the claim's WHERE."""
+    pinned ACTIVE lease surviving expiry and a reaper pass, is scripts/harness_lease.py.) It also matches only
+    leases br0kr built (`ownership = 'provisioned'`, 0055), in case the CHECK that pins every other lease is
+    ever dropped. Guards either filter being dropped from, or moved out of, the claim's WHERE."""
     c = _Conn(many=[])
     assert lease.claim_expired(c) == []
     where = c.sql.partition("WHERE")[2].partition("ORDER BY")[0]
-    assert "expires_at <= now()" in where and "NOT pinned" in where
+    assert "expires_at <= now()" in where and "NOT pinned" in where and "ownership = %s" in where
+    assert c.params[0] == lease.PROVISIONED
+
+
+def test_claim_provisioning_stale_matches_only_leases_br0kr_built():
+    """The PROVISIONING-budget claim, the third statement that moves leases to RELEASING, also filters
+    `ownership = 'provisioned'` (0055) in the CTE that picks the due rows, bound first. Neither foreign kind can be
+    PROVISIONING today (the CHECKs); guards the claim being the one release path without the filter if a later
+    phase relaxes them."""
+    c = _Conn(many=[])
+    assert lease.claim_provisioning_stale(c, 600) == []
+    due = c.sql.partition("WHERE")[2].partition("ORDER BY")[0]
+    assert "state = 'PROVISIONING' AND ownership = %s" in due
+    assert c.params == (lease.PROVISIONED, 600, 100)
 
 
 def test_next_expiry_extends_strictly_into_the_future():
@@ -284,38 +298,41 @@ class _CasConn:
 _TTL = "expires_at = now() + make_interval(secs => ttl_seconds)"
 # (call, the state its WHERE requires, the state it sets, its bound params, what else its SET must write)
 _CAS = [
-    (lambda c: lease.begin_provisioning(c, 7, 9901, "lease-7"), "ADMITTED", "PROVISIONING", (9901, "lease-7", 7),
+    (lambda c: lease.begin_provisioning(c, 7, 9901, "lease-7"), "ADMITTED", "PROVISIONING",
+     (9901, "lease-7", 7, lease.PROVISIONED),
      ("vmid = %s, name = %s", "cluster_id = (SELECT cluster_id FROM node WHERE node.id = lease.node_id)",
-      "hold_reason = NULL", "provisioning_at = now()", _TTL)),
-    (lambda c: lease.mark_active(c, 7), "PROVISIONING", "ACTIVE", (7,), ("active_at = now()", _TTL)),
-    (lambda c: lease.mark_released(c, 7), "RELEASING", "RELEASED", (7,), ()),
-    (lambda c: lease.mark_release_failed(c, 7), "RELEASING", "RELEASE_FAILED", (7,), ("released_reason = 'failed'",)),
+      "hold_reason = NULL", "provisioning_at = now()", _TTL), " AND ownership = %s"),
+    (lambda c: lease.mark_active(c, 7), "PROVISIONING", "ACTIVE", (7,), ("active_at = now()", _TTL), ""),
+    (lambda c: lease.mark_released(c, 7), "RELEASING", "RELEASED", (7,), (), ""),
+    (lambda c: lease.mark_release_failed(c, 7), "RELEASING", "RELEASE_FAILED", (7,), ("released_reason = 'failed'",),
+     ""),
 ]
 _CAS_IDS = [case[2] for case in _CAS]
 
 
-@pytest.mark.parametrize(("call", "src", "dst", "params", "sets"), _CAS, ids=_CAS_IDS)
-def test_each_cas_transition_requires_its_source_state(call, src, dst, params, sets):
+@pytest.mark.parametrize(("call", "src", "dst", "params", "sets", "guard"), _CAS, ids=_CAS_IDS)
+def test_each_cas_transition_requires_its_source_state(call, src, dst, params, sets, guard):
     """Each forward or teardown transition is ONE guarded UPDATE: it sets the target state only `WHERE id = %s AND
-    state = '<source>'`, writes what that state needs (begin_provisioning: the vmid, the cluster the per-cluster vmid
-    index keys on, the start of the PROVISIONING budget, a fresh deadline; mark_active: a fresh deadline), binds its
-    values in order, returns the row it changed, and commits. Guards the guard itself (an UPDATE without the
-    source-state predicate would resurrect a lease the reaper had already moved on, RELEASING back to ACTIVE) and
-    the columns the rest of the broker reads from that one statement."""
+    state = '<source>'` (begin_provisioning also `AND ownership = 'provisioned'`, migration 0055, so a capacity-only
+    record is never cloned over), writes what that state needs (begin_provisioning: the vmid, the cluster the
+    per-cluster vmid index keys on, the start of the PROVISIONING budget, a fresh deadline; mark_active: a fresh
+    deadline), binds its values in order, returns the row it changed, and commits. Guards the guard itself (an UPDATE
+    without the source-state predicate would resurrect a lease the reaper had already moved on, RELEASING back to
+    ACTIVE) and the columns the rest of the broker reads from that one statement."""
     conn = _CasConn(row=(7,))
     assert call(conn) is True
     assert len(conn.sql) == 1
     sql = conn.sql[0]
     assert sql.startswith("UPDATE lease SET state = '" + dst + "'"), sql
-    assert sql.endswith(f"WHERE id = %s AND state = '{src}' RETURNING id"), sql
+    assert sql.endswith(f"WHERE id = %s AND state = '{src}'{guard} RETURNING id"), sql
     head = sql.rsplit(" WHERE id = %s AND state", 1)[0]   # the SET (begin_provisioning's sub-select has a WHERE)
     assert [f for f in sets if f not in head] == []
     assert conn.params[0] == params
     assert conn.commits == 1
 
 
-@pytest.mark.parametrize(("call", "src", "dst", "params", "sets"), _CAS, ids=_CAS_IDS)
-def test_a_cas_that_matches_no_row_reports_it_lost(call, src, dst, params, sets):
+@pytest.mark.parametrize(("call", "src", "dst", "params", "sets", "guard"), _CAS, ids=_CAS_IDS)
+def test_a_cas_that_matches_no_row_reports_it_lost(call, src, dst, params, sets, guard):
     """When the guarded UPDATE changes no row (another writer moved the lease first), the call returns False and
     still ends its transaction, so the caller backs off: the reconciler does not provision or activate a lease the
     reaper owns, and the reaper does not double-free. Guards a refactor that reads success from the call returning
@@ -326,14 +343,16 @@ def test_a_cas_that_matches_no_row_reports_it_lost(call, src, dst, params, sets)
 
 
 def test_release_moves_only_a_live_lease():
-    """release() moves a lease to RELEASING only while it is in a live state, records the reason, commits, and
-    reports a lease already releasing or gone as False (a double release, or one racing the reaper, is a no-op).
-    Guards a release that re-opens a RELEASED or RELEASE_FAILED lease and frees its capacity twice."""
+    """release() moves a lease to RELEASING only while it is in a live state and br0kr built its guest (ownership
+    'provisioned', migration 0055), records the reason, commits, and reports a lease already releasing or gone as
+    False (a double release, or one racing the reaper, is a no-op). Guards a release that re-opens a RELEASED or
+    RELEASE_FAILED lease and frees its capacity twice, or one that sends an adopted guest to the reaper."""
     conn = _CasConn(row=(7,))
     assert lease.release(conn, 7, "completed") is True
     sql = conn.sql[0]
     assert "SET state = 'RELEASING', released_reason = %s" in sql and f"state IN {lease._LIVE_SQL}" in sql
-    assert conn.params[0] == ("completed", 7) and conn.commits == 1
+    assert sql.rstrip().endswith("AND ownership = %s RETURNING id"), sql
+    assert conn.params[0] == ("completed", 7, lease.PROVISIONED) and conn.commits == 1
     lost = _CasConn(row=None)
     assert lease.release(lost, 7) is False and lost.commits == 1
 

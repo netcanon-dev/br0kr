@@ -146,10 +146,14 @@ def request_verdict(
     source_cluster: str | None,
     target_exists: bool,
     lease_has_data_disks: bool = False,
+    lease_ownership: str = lease.PROVISIONED,
 ) -> str | None:
     """Decide whether a migration REQUEST is admissible, or the rejection reason — pure, so the
     control-plane validation is exhaustively testable without a DB:
       • 'unknown_lease'                 — no such lease.
+      • 'lease_protected'               — br0kr did not build the lease's guest (0055: adopted or capacity-only), so
+                                          it never moves it. Ownership never changes on a lease, so checking it
+                                          here, at request, covers the whole saga.
       • 'lease_not_active'              — the lease isn't ACTIVE with a guest (vmid); nothing to move.
       • 'storage_migration_unsupported' — a storage-backed lease (first cut moves compute-only). A lease is
                                           storage-backed if it debits a boot pool (`lease.storage_id`) OR carries
@@ -172,6 +176,8 @@ def request_verdict(
     live cluster. The order matters: lease problems first (the thing being moved), then the destination."""
     if lease_state is None:
         return "unknown_lease"
+    if lease_ownership != lease.PROVISIONED:
+        return reasons.LEASE_PROTECTED
     if lease_state != "ACTIVE" or lease_vmid is None:
         return "lease_not_active"
     if lease_storage_id is not None or lease_has_data_disks:
@@ -442,7 +448,8 @@ def request_migration(
         return _request_reject(None, lease_id, target_node, "missing_idem_key")
 
     row = conn.execute(
-        "SELECT state, vmid, storage_id, node_id, cluster_id FROM lease WHERE id = %s", (lease_id,)).fetchone()
+        "SELECT state, vmid, storage_id, node_id, cluster_id, ownership FROM lease WHERE id = %s",
+        (lease_id,)).fetchone()
     lease_state = row[0] if row else None
     lease_vmid = row[1] if row else None
     lease_storage = row[2] if row else None
@@ -462,7 +469,8 @@ def request_migration(
 
     reason = request_verdict(lease_state, lease_vmid, lease_storage,
                              target_cluster, source_cluster, target_exists,
-                             lease_has_data_disks=bool(ddrow and ddrow[0]))
+                             lease_has_data_disks=bool(ddrow and ddrow[0]),
+                             lease_ownership=(str(row[5]) if row else lease.PROVISIONED))
     if reason is not None:
         log.info("migrate_lease rejected (%s) lease=%s target=%s", reason, lease_id, target_node,
                  extra={"idem_key": idem_key, "lease_id": lease_id})

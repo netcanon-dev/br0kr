@@ -33,6 +33,10 @@ One pass (`reap_once`):
        • otherwise               → destroy(claimed); on success mark_released; on
                                     failure leave it (next pass retries after grace,
                                     attempt count already incremented).
+       • the guest is protected  → destroy raised driver.GuestProtected (Proxmox protection or
+                                    the br0kr-keep tag, read before any stop, 0055): give up at
+                                    once, mark_release_failed. Retrying could never succeed, and
+                                    the guest was not destroyed.
 
 The whole pass runs under a fresh run_id (push_context) so a forgotten lease's
 expire→destroy→release fan-out is greppable as one correlated operation.
@@ -47,6 +51,7 @@ from typing import Any
 import psycopg
 
 from br0kr import lease
+from br0kr.driver import GuestProtected
 from br0kr.logging_setup import generate_correlation_id, push_context
 
 log = logging.getLogger(__name__)
@@ -67,6 +72,7 @@ class ReapSummary:
     failed: int = 0           # given up on → RELEASE_FAILED
     destroy_errors: int = 0   # destroy() raised; will retry next pass
     queue_expired: int = 0    # PENDING (queued) leases past their wait deadline → REJECTED (no teardown)
+    protected: int = 0        # the guest was protected (0055): → RELEASE_FAILED at once, also counted in `failed`
 
 
 def reap_once(
@@ -140,6 +146,19 @@ def reap_once(
                 continue
             try:
                 destroy(t)
+            except GuestProtected:
+                # Nothing a retry can fix: someone protected a guest br0kr built. End it RELEASE_FAILED like any
+                # permanently failed teardown (its capacity stops counting; the guest is still there) and say so
+                # loudly; an operator decides about it. Clearing the protection lets the next sweep destroy it.
+                lease.mark_release_failed(conn, t.id)
+                summary.failed += 1
+                summary.protected += 1
+                log.error(
+                    "lease %s teardown refused: guest vmid %s on %s is protected (PVE protection or the br0kr-keep "
+                    "tag), not destroyed — lease RELEASE_FAILED, an operator must decide about the guest",
+                    t.id, t.vmid, t.node_id, extra={"lease_id": t.id, "vmid": t.vmid, "node_id": t.node_id},
+                )
+                continue
             except Exception:
                 summary.destroy_errors += 1
                 log.exception(

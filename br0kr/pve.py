@@ -34,7 +34,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import requests
@@ -51,6 +51,7 @@ from br0kr.driver import (
     GONE,
     IS_TEMPLATE,
     NOT_CLONE,
+    PROTECTED,
     REPL_FENCE_APPEARED,
 )
 
@@ -420,6 +421,26 @@ TEMPLATE_TAG = "br0kr-template"
 
 _FENCE_RE = re.compile(r"^br0kr-lease-(\d+)$")
 
+# The keep marker (0055, fleet onboarding phase 1): a guest carrying this tag is never stopped or deleted by any br0kr
+# teardown, whatever the ledger says. With Proxmox's own `protection: 1` it is the on-host half of the never-destroy
+# floor: it lives on the guest, so it survives a ledger rollback that lost the guest's row. Proxmox protection blocks
+# a DELETE but not a stop, which is why br0kr reads both before it stops anything (`protection_decision`). br0kr
+# never removes it: every tag rewrite on a guest it already fences goes through `_keeping`.
+KEEP_TAG = "br0kr-keep"
+
+
+def _tag_set(tags: str | None) -> set[str]:
+    """A guest's tags as a lower-cased set (Proxmox separates them with `;`, `,` or spaces)."""
+    return {t.lower() for t in re.split(r"[;,\s]+", str(tags or "").strip()) if t}
+
+
+def _keeping(old_tags: str | None, new_tags: str) -> str:
+    """``new_tags``, plus ``KEEP_TAG`` when ``old_tags`` carry it, so a tag rewrite on a guest br0kr already
+    fences (a re-stamp, a conversion, a fence strip) never drops a keep someone set on it (0055). A fresh clone's
+    inherited tags are replaced without it on purpose: a keep on a template protects the template, not its
+    clones."""
+    return f"{new_tags};{KEEP_TAG}" if KEEP_TAG in _tag_set(old_tags) else new_tags
+
 
 def parse_fence_tag(tags: str | None) -> int | None:
     """The lease id a guest is fenced to (the inverse of `fence_tag`), or None if it
@@ -433,6 +454,20 @@ def parse_fence_tag(tags: str | None) -> int | None:
         if m:
             return int(m.group(1))
     return None
+
+
+def protection_decision(config: Mapping[str, Any]) -> str:
+    """Whether a guest's own config lets a br0kr teardown stop and delete it, pure so it's exhaustively testable:
+      • 'protected' — Proxmox ``protection`` is on (1, or a true-ish string), or the tags carry ``KEEP_TAG``
+                      (compared without case, so a hand-typed ``BR0KR-KEEP`` also counts);
+      • 'destroy'   — neither: the fence verdict the caller already reached stands.
+    Fail-safe in one direction only: anything that reads as set protects the guest."""
+    prot = config.get("protection")
+    if prot is not None and str(prot).strip().lower() in ("1", "true", "yes", "on"):
+        return PROTECTED
+    if KEEP_TAG in _tag_set(config.get("tags")):
+        return PROTECTED
+    return DESTROY
 
 
 def destroy_decision(exists: bool, tags: str | None, lease_id: int) -> str:
@@ -962,7 +997,10 @@ class Pve:
         actor restarts a guest we wrongly stopped, so closing the stop window matters too, not only the delete.
 
         `recheck()` re-reads fresh state and returns the caller's own verdict vocabulary ('destroy' to proceed;
-        else 'gone' / 'fence_mismatch' / 'is_template' / … to refuse). `extra` carries per-destroyer structured
+        else 'gone' / 'fence_mismatch' / 'is_template' / … to refuse). Each 'destroy' is then checked against the
+        guest's own config (`protection_decision`, 0055): Proxmox protection or the ``br0kr-keep`` tag turns it into
+        'protected', refused before the stop, so a protected guest is never even stopped (Proxmox's protection
+        would refuse only the DELETE). `extra` carries per-destroyer structured
         log fields (lease_id / build_id) so the teardown + refusal events stay greppable by correlation id.
         Returns 'destroyed' or the refusal verdict; RAISES on a transient API error OR a non-OK DELETE task
         exitstatus (a TIMEOUT still running / a server-side failure), so the caller retries next grace rather
@@ -970,6 +1008,13 @@ class Pve:
         fields = {"vmid": vmid, **(extra or {})}
         for stage in ("before stop", "before delete"):
             verdict = recheck()
+            if verdict == DESTROY:
+                verdict = self._protection(vmid)
+                if verdict == PROTECTED:
+                    done = "nothing was done to it" if stage == "before stop" else "it was stopped, not deleted"
+                    log.warning("%s: vmid %s not destroyed (%s: the guest is protected — PVE protection or the %s "
+                                "tag; %s)", what, vmid, stage, KEEP_TAG, done, extra=fields)
+                    return verdict
             if verdict != DESTROY:
                 emit = log.info if verdict == GONE else log.warning       # 'gone' is benign, not a refusal
                 emit("%s: vmid %s not destroyed (%s: re-check → %s; vmid reused/vanished)", what, vmid, stage,
@@ -998,6 +1043,12 @@ class Pve:
             raise DeleteTaskFailed(f"{what}: DELETE of vmid {vmid} did not succeed (task={rc})")
         log.info("%s: vmid %s deleted (task=%s)", what, vmid, rc, extra=fields)
         return DESTROYED
+
+    def _protection(self, vmid: int) -> str:
+        """The guest's own verdict on a teardown (`protection_decision` over a fresh config read): 'protected' or
+        'destroy'. One read per teardown stage, so a protection flag or keep tag set during the stop is still seen
+        before the DELETE. Raises on an API error, like every re-check, so the caller retries next pass."""
+        return protection_decision(self._get(f"/nodes/{self.node}/qemu/{vmid}/config"))
 
     def agent_network_interfaces(self, vmid: int) -> Any:
         """The guest's network interfaces as the QEMU guest agent reports them (the `result` list of
@@ -1291,12 +1342,14 @@ class Pve:
         fence (br0kr-build-<id>) alongside the marker on purpose: if the daemon dies (or the catalog INSERT
         fails) AFTER conversion but BEFORE the catalog row exists, `destroy_build_vm` can still reclaim this
         template via its fence. `finalize_template` strips the fence (leaving only the marker) once the
-        catalog row is committed. Returns the template task's exitstatus; the tag config is synchronous."""
+        catalog row is committed. Returns the template task's exitstatus; the tag config is synchronous. A
+        ``br0kr-keep`` tag on the build VM is kept (`_keeping`)."""
         upid = self._post(f"/nodes/{self.node}/qemu/{vmid}/template", {})
         rc = self.wait(upid, secs=secs, on_progress=on_progress)
         if rc == "OK":
+            old = self._get(f"/nodes/{self.node}/qemu/{vmid}/config").get("tags")
             self._post(f"/nodes/{self.node}/qemu/{vmid}/config",
-                       {"tags": f"{build_fence_tag(build_id)};{TEMPLATE_TAG}"})
+                       {"tags": _keeping(old, f"{build_fence_tag(build_id)};{TEMPLATE_TAG}")})
         return rc
 
     def finalize_template(self, vmid: int) -> None:
@@ -1305,17 +1358,24 @@ class Pve:
         clones inherit the marker; it no longer looks like a reclaimable build. Fence-agnostic (it always sets
         tags = TEMPLATE_TAG), so the replication data plane reuses it verbatim to strip a br0kr-repl-<id> fence.
         Synchronous; raises on API error (the caller logs — a lingering fence on a READY template is harmless:
-        the build/replication row is terminal so the reclaim skips it, and template=1 makes every sweep skip it)."""
-        self._post(f"/nodes/{self.node}/qemu/{vmid}/config", {"tags": TEMPLATE_TAG})
+        the build/replication row is terminal so the reclaim skips it, and template=1 makes every sweep skip it).
+        A ``br0kr-keep`` tag on the template is kept (`_keeping`)."""
+        old = self._get(f"/nodes/{self.node}/qemu/{vmid}/config").get("tags")
+        self._post(f"/nodes/{self.node}/qemu/{vmid}/config", {"tags": _keeping(old, TEMPLATE_TAG)})
 
     # ── Replication data plane (PR-5): the transient copy guest's fence + convert + reclaim primitives ──
-    def stamp_repl_fence(self, vmid: int, replication_id: int, *, expected_name: str | None = None) -> str:
+    def stamp_repl_fence(self, vmid: int, replication_id: int, *, expected_name: str | None = None,
+                         refuse_protected: bool = False) -> str:
         """Stamp the replication fence onto a just-landed copy, GUARDED (§5.3): read the guest's config FIRST and
         proceed only if it is provably OUR clone (mirrors clone_orphan_decision). Sets tags to
         ``br0kr-repl-<id>;br0kr-template`` (KEEPS the marker so a later make_replica_template + strip yields a
         clean template). Returns 'stamped', 'gone' (vmid absent), or 'fence_mismatch' (the vmid is another
         lease's / another job's, or not our clone — refuse, never clobber a foreign guest). Idempotent: a guest
-        already carrying THIS job's fence re-stamps the same tags. Synchronous; raises on a transient API error.
+        already carrying THIS job's fence re-stamps the same tags, keeping a ``br0kr-keep`` on it. Adopting an
+        unfenced clone also clears the ``protection`` it inherited from the source template (Proxmox copies it
+        into a clone), as the lease configure does. ``refuse_protected`` (the reclaim, which destroys next):
+        a guest whose config is protected (`protection_decision`, 0055) answers 'protected' with nothing
+        written. Synchronous; raises on a transient API error.
 
         POSITIVE-IDENTITY adoption (adopt-by-marker-alone was unsafe): when the guest does NOT
         already carry OUR fence (an ADOPT of an unfenced clone), it is stamped ONLY if it carries the template
@@ -1345,7 +1405,14 @@ class Pve:
                 return FENCE_MISMATCH   # a converted guest we do not own (e.g. a stripped catalog template)
             if expected_name is not None and cfg.get("name") != expected_name:
                 return FENCE_MISMATCH   # a DIFFERENT guest at this (recycled/collided) vmid — not THIS job's clone
-        self.configure(vmid, {"tags": f"{repl_fence_tag(replication_id)};{TEMPLATE_TAG}"})
+        if refuse_protected and protection_decision(cfg) == PROTECTED:
+            return PROTECTED   # a teardown follows: never rewrite (or adopt) a guest someone protected
+        stamp = f"{repl_fence_tag(replication_id)};{TEMPLATE_TAG}"
+        if other == replication_id:
+            self.configure(vmid, {"tags": _keeping(tags, stamp)})   # already ours: a keep set on it stays
+        else:
+            # Adopting a fresh clone: its tags and protection are the source template's, copied by the clone.
+            self.configure(vmid, {"tags": stamp, "protection": 0})
         return "stamped"
 
     def make_replica_template(self, vmid: int, replication_id: int, *, secs: int = 120,
@@ -1365,7 +1432,7 @@ class Pve:
         cfg = self._get(f"/nodes/{self.node}/qemu/{vmid}/config")
         if parse_repl_fence(cfg.get("tags")) != replication_id:
             return FENCE_MISMATCH
-        tags = f"{repl_fence_tag(replication_id)};{TEMPLATE_TAG}"
+        tags = _keeping(cfg.get("tags"), f"{repl_fence_tag(replication_id)};{TEMPLATE_TAG}")
         if int(cfg.get("template", 0) or 0) == 1:
             self._post(f"/nodes/{self.node}/qemu/{vmid}/config", {"tags": tags})   # already a template → converge
             return "OK"

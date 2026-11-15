@@ -33,6 +33,7 @@ class _FakeDriver:
         self.net0 = net0         # the cloned guest's inherited net0 (what read_guest_net_config returns, 0039)
         self.provisioned: list[tuple[int, int]] = []
         self.destroyed: list[tuple[int, int]] = []
+        self.destroy_rc = "destroyed"   # what fenced_destroy answers ('protected' in the 0055 test)
         self.cloned: list[tuple] = []
         self.configured: list[tuple[int, dict]] = []
         self.grew: list[tuple[int, int]] = []
@@ -93,7 +94,7 @@ class _FakeDriver:
         self.destroyed.append((vmid, lease_id))
         if self.destroy_exc:
             raise self.destroy_exc
-        return "destroyed"
+        return self.destroy_rc
 
 
 @pytest.fixture
@@ -266,6 +267,18 @@ def test_clone_flow_clones_configures_fences_and_starts(cas):
     assert config["agent"] == "1" and config["ciuser"] == "runner" and config["cores"] == 2
 
 
+def test_clone_configure_clears_the_protection_the_clone_copied_from_its_template(cas):
+    """The configure that fences a fresh lease clone also writes protection 0 (0055). Proxmox copies a template's
+    protection (and tags) into each clone, so without it protecting a template would make every lease cloned
+    from it a guest br0kr refuses to tear down. Guards the floor turning a protected template into leaked VMs."""
+    d = _FakeDriver(clone_rc="OK", start_rc="OK")
+    reconciler.provision_lease(object(), d, 5, name="br0kr-5", cores=2, memory=2048, template_vmid=9000,
+                               cloud_init={"ciuser": "runner"})
+    vmid, config = d.configured[0]
+    assert vmid == 9001 and config["protection"] == 0
+    assert config["tags"] == "br0kr-template;br0kr-lease-5"   # in the same call as the fence
+
+
 def test_clone_failure_releases_to_the_reaper(cas):
     """A clone that returns a non-OK status releases the lease to the reaper (and never configures/starts).
     Guards a stuck PROVISIONING lease after a failed clone — the reaper + the marker sweep reclaim any
@@ -430,6 +443,21 @@ def test_make_routing_destroyer_routes_teardown_to_the_leases_own_node():
     destroy = reconciler.make_routing_destroyer(nodes.NodeRegistry({"n1": d1, "n2": d2}))
     destroy(lease.ClaimedLease(id=7, node_id="n2", vmid=903, name="g", release_attempts=1))
     assert d2.destroyed == [(903, 7)] and d1.destroyed == []
+
+
+@pytest.mark.parametrize("routing", [False, True])
+def test_both_destroyers_raise_guest_protected_for_a_protected_guest(routing):
+    """When the driver answers 'protected' (0055: the guest's own config refused before any stop), the reaper's
+    destroy callback RAISES GuestProtected with the vmid, single-node and routing alike. Guards the verdict being
+    swallowed like 'fence_mismatch', which would let the reaper mark the lease RELEASED while its guest still runs."""
+    from br0kr.driver import GuestProtected
+    d = _FakeDriver()
+    d.destroy_rc = "protected"
+    destroy = (reconciler.make_routing_destroyer(nodes.NodeRegistry({"n1": d})) if routing
+               else reconciler.make_destroyer(d))
+    with pytest.raises(GuestProtected) as err:
+        destroy(lease.ClaimedLease(id=7, node_id="n1", vmid=903, name="g", release_attempts=1))
+    assert err.value.vmid == 903 and d.destroyed == [(903, 7)]
 
 
 def test_make_routing_destroyer_raises_for_an_unserved_node():

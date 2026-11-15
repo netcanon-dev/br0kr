@@ -56,6 +56,7 @@ DATA_DISK_MALFORMED: Final = "data_disk_malformed"
 IDEM_KEY_CONFLICT: Final = "idem_key_conflict"                # the idem_key was used for a different ask
 LEASE_NOT_LIVE: Final = "lease_not_live"                      # the idem_key's (or the named) lease has ended
 LEASE_QUEUED: Final = "lease_queued"                          # release_lease on a still-queued lease: cancel it
+LEASE_PROTECTED: Final = "lease_protected"                    # br0kr did not build its guest: never released here
 RESERVED_IDEM_KEY: Final = "reserved_idem_key"                # an internal reservation namespace
 MULTI_DISK_DISABLED: Final = "multi_disk_disabled"            # data disks are off (operator setting)
 LOST_INSERT: Final = "lost_insert"                            # a racing insert of the same idem_key vanished; retry
@@ -120,6 +121,7 @@ PIN_NOT_QUEUEABLE: Final = "pin_not_queueable"
 PINNED_LIMIT: Final = "pinned_limit"
 PIN_REFUSED: Final = "pin_refused"                            # also a released_reason: admitted, then its pin lost
 PIN_REFUSED_ON_REPLAY: Final = "pin_refused_on_replay"
+PIN_CLASS_FIXED: Final = "pin_class_fixed"                    # an adopted or capacity-only lease is always pinned
 
 # ── Authorisation and tenancy (an MCP `{"error": code}` answer) ─────────────────────────────────────────────────
 NO_TOKEN: Final = "no_token"

@@ -34,6 +34,18 @@ FENCE_APPEARED = "fence_appeared"             # a lease fenced this vmid since t
 REPL_FENCE_APPEARED = "repl_fence_appeared"   # a replication copy lives here: spared (its own reclaim removes it)
 NOT_CLONE = "not_clone"                       # no br0kr template marker, so not ours: spared
 IS_TEMPLATE = "is_template"                   # a template: never destroyed as an orphan
+PROTECTED = "protected"                       # PVE protection or the keep tag is set: refused before any stop
+
+
+class GuestProtected(Exception):
+    """A teardown reached a guest that carries Proxmox ``protection: 1`` or the ``br0kr-keep`` tag (pve.KEEP_TAG), so
+    it was refused before the guest was stopped (0055, fleet onboarding phase 1). Raised by the reconciler's lease
+    destroyers so the reaper ends the lease RELEASE_FAILED at once (an operator must look) instead of retrying a
+    destroy that will never be allowed. Carries the vmid for the log line."""
+
+    def __init__(self, vmid: int) -> None:
+        super().__init__(f"guest {vmid} is protected (PVE protection or the br0kr-keep tag): not stopped, not deleted")
+        self.vmid = vmid
 
 
 class Driver(Protocol):
@@ -230,7 +242,8 @@ class Driver(Protocol):
         catalog row is committed (mark_ready won)."""
         ...
 
-    def stamp_repl_fence(self, vmid: int, replication_id: int, *, expected_name: str | None = None) -> str:
+    def stamp_repl_fence(self, vmid: int, replication_id: int, *, expected_name: str | None = None,
+                         refuse_protected: bool = False) -> str:
         """Stamp the replication fence onto a just-landed copy, GUARDED (§5.3): read the guest's config FIRST and
         proceed only if it is provably OUR clone (mirrors clone_orphan_decision)."""
         ...

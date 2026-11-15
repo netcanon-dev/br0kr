@@ -1606,6 +1606,30 @@ def test_reclaim_builds_reaps_the_stale_build_import_source(monkeypatch):
     assert len(beats) == 1 and isinstance(beats[0], reclaim_beat.Heartbeat) and beats[0]._beat == d._beat
 
 
+def test_reclaim_builds_leaves_a_protected_build_vm_and_its_import_source(monkeypatch):
+    """A stale build whose VM someone protected (Proxmox protection or the br0kr-keep tag, 0055) answers
+    'protected' from destroy_build_vm: the build is still finalized (its row must not wedge in RECLAIMING), but
+    the import source is NOT reaped, since the guest is not provably gone. Guards the reclaim reading any return
+    as "the guest is gone" and freeing a volume a protected guest may still be importing from."""
+    events: list[str] = []
+
+    class _Drv:
+        def destroy_build_vm(self, vmid, bid, on_progress=None):
+            events.append(f"destroy:{bid}")
+            return "protected"
+
+        def free_import_volume(self, storage, filename, *, on_progress=None):
+            events.append("free")
+            return "freed"
+
+    _win_claim(monkeypatch)
+    monkeypatch.setattr(build, "stale_builds", lambda c, secs: [_bjob(bid=1, vmid=9500)])
+    monkeypatch.setattr(build, "mark_failed", lambda c, bid, err: events.append(f"mark:{bid}") or True)
+    d = _daemon(registry=_cluster_registry(driver=_Drv()), build_limit=1)
+    assert tick_builds.reclaim_builds(d, _FakeConn()) == 1
+    assert events == ["destroy:1", "mark:1"]
+
+
 # ── 0045: the download-stage reclaim reap (a guest-free DOWNLOADING build, vmid None, with a persisted task) ──
 def test_reclaim_builds_reattaches_to_a_settled_download_and_reaps_its_source(monkeypatch):
     """0045: a guest-free DOWNLOADING build (vmid None) that persisted a download TASK handle is RE-ATTACHED on

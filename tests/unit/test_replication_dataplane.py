@@ -402,7 +402,8 @@ class _RebuildDrv:
         self.calls.append(("create", v, name, rid, imp, storage))
         return "OK"
 
-    def stamp_repl_fence(self, v: int, rid: int, expected_name: str | None = None) -> str:
+    def stamp_repl_fence(self, v: int, rid: int, expected_name: str | None = None,
+                         refuse_protected: bool = False) -> str:
         self.calls.append(("stamp", v, rid, expected_name))
         return self._stamp
 
@@ -887,3 +888,110 @@ def test_the_stale_reclaim_backs_off_a_job_whose_teardown_keeps_failing(monkeypa
     claims.clear()
     replication.reclaim_stale_replications(_NoRows(), lambda _n: object(), stale_seconds=7200)
     assert claims == [2700.0]                      # no backoff passed: claimed as before
+
+
+# ── 0055: a protected copy ends its job FAILED but is never marked settled ───────────────────────────────────────
+class _ReplDrv:
+    """A landed copy: the stamp answers `stamp` (and records refuse_protected); the fenced destroy answers `rc`
+    and is recorded."""
+
+    def __init__(self, rc: str, stamp: str = "stamped") -> None:
+        self.rc, self.stamp = rc, stamp
+        self.refuse: list[bool] = []
+        self.destroyed: list[int] = []
+
+    def exists(self, vmid: int) -> bool:
+        return True
+
+    def stamp_repl_fence(self, vmid: int, rid: int, *, expected_name: str | None = None,
+                         refuse_protected: bool = False) -> str:
+        self.refuse.append(refuse_protected)
+        return self.stamp
+
+    def fenced_destroy_replica(self, vmid: int, rid: int, on_progress=None) -> str:
+        self.destroyed.append(vmid)
+        return self.rc
+
+
+@pytest.mark.parametrize(("rc", "result"), [("destroyed", "settled"), ("gone", "settled"),
+                                             ("fence_mismatch", "settled"), ("protected", "protected")])
+def test_teardown_transient_answers_protected_for_a_protected_copy(rc, result):
+    """_teardown_transient passes a 'protected' destroy verdict up as 'protected' and every other clean verdict as
+    'settled' (0055). Guards the old behaviour, which answered 'settled' for any verdict, so the reclaim marked a
+    copy settled while it still existed."""
+    assert replication._teardown_transient(_job("COPYING", vmid=9800), _ReplDrv(rc)) == result  # type: ignore[arg-type]
+
+
+def test_teardown_transient_asks_the_stamp_to_refuse_and_stops_at_its_refusal():
+    """The teardown's re-stamp runs with refuse_protected, and a 'protected' answer from it ends the teardown as
+    'protected' without calling the destroy (0055). Guards the adopt rewriting a protected copy's tags right
+    before the destroy, the round-2 review's HIGH."""
+    drv = _ReplDrv("destroyed", stamp="protected")
+    assert replication._teardown_transient(_job("COPYING", vmid=9800), drv) == "protected"  # type: ignore[arg-type]
+    assert drv.refuse == [True] and drv.destroyed == []
+
+
+def _record_outcome(monkeypatch) -> list[tuple]:
+    """Record how a reclaim ends the job: _mark_failed (with its settled flag), _settle_by_key, _stamp_settled."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(replication, "_mark_failed",
+                        lambda conn, jid, reason, *, settled: calls.append(("failed", jid, settled)) or True)
+    monkeypatch.setattr(replication, "_settle_by_key", lambda conn, jid: calls.append(("settle", jid)))
+    monkeypatch.setattr(replication, "_stamp_settled", lambda conn, jid: calls.append(("stamp", jid)))
+    monkeypatch.setattr(replication, "touch_reclaiming", lambda conn, rid: True)
+    monkeypatch.setattr(replication, "_teardown_transient", lambda fresh, driver, on_progress=None: "protected")
+    return calls
+
+
+def test_the_advance_path_reclaim_never_settles_a_protected_copy(monkeypatch):
+    """_reclaim_and_fail on a protected copy ends the job FAILED with guest_settled_at left NULL and settles its
+    reservation, and never stamps it settled (0055). Guards the copy being recorded gone while it still sits on the
+    pool, which would make the row prunable and let its pool and cluster be decommissioned under it."""
+    job = _job("COPYING", vmid=9800)
+
+    class _Claimed(_NoRows):
+        def fetchone(self):
+            return (9800,)
+
+    monkeypatch.setattr(replication, "_refresh", lambda conn, rid: job)
+    calls = _record_outcome(monkeypatch)
+    assert replication._reclaim_and_fail(_Claimed(), job, object(), "clone_failed:x",  # type: ignore[arg-type]
+                                         on_progress=lambda: None) is True
+    assert calls == [("failed", job.id, False), ("settle", job.id)]
+
+
+def test_the_stale_reclaim_never_settles_a_protected_copy(monkeypatch):
+    """The stale reclaim on a protected copy ends the job FAILED, unsettled, with its reservation settled, and does
+    not count it reclaimed (0055). Guards the same settled-while-present mistake on the stale path."""
+    job = _job("COPYING", vmid=9800)
+    monkeypatch.setattr(replication, "stale_replications", lambda *a, **k: [job])
+    monkeypatch.setattr(replication, "claim_stale_for_reclaim",
+                        lambda *a, **k: replication._ReclaimClaim(vmid=9800, node_id="nA", wall_capped=False))
+    monkeypatch.setattr(replication, "_refresh", lambda conn, rid: job)
+    monkeypatch.setattr(replication, "_bump_attempts", lambda *a, **k: None)
+    calls = _record_outcome(monkeypatch)
+    assert replication.reclaim_stale_replications(_NoRows(), lambda _n: object(), on_progress=lambda: None) == 0
+    assert calls == [("failed", job.id, False), ("settle", job.id)]
+
+
+def test_the_leaked_guest_reclaim_never_stamps_a_protected_copy_settled(monkeypatch):
+    """The leaked-guest reclaim (a FAILED job whose copy is unsettled) leaves a protected copy unsettled and retries
+    it next cutoff, so the teardown finishes once the protection is cleared (0055). Guards it stamping the row
+    settled after a teardown that left the copy in place."""
+    job = _job("FAILED", vmid=9800)
+
+    class _Leaked(_NoRows):
+        sql = ""
+
+        def execute(self, sql, *a, **k):
+            self.sql = sql
+            return self
+
+        def fetchall(self):
+            return [(job.id, "nA")] if "job_state = 'FAILED' AND guest_settled_at IS NULL" in self.sql else []
+
+    monkeypatch.setattr(replication, "_refresh", lambda conn, rid: job)
+    monkeypatch.setattr(replication, "stale_replications", lambda *a, **k: [])
+    calls = _record_outcome(monkeypatch)
+    assert replication.reclaim_stale_replications(_Leaked(), lambda _n: object()) == 0
+    assert calls == []
