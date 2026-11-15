@@ -17,9 +17,18 @@ resolve in this repository.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-14
+
+The first step of fleet onboarding: a lease can now stand for a guest br0kr did not build, and br0kr never
+destroys one, nor any guest with Proxmox protection or the `br0kr-keep` tag. One migration (0055). Once it has
+run, do not roll back to an older image (docs/designs/fleet-onboarding.md §4).
+
+### Added
 - **br0kr can now record guests it must never destroy** (fleet onboarding phase 1, migration 0055). Releases,
   expiry, provisioning, unpin, migrate and the sweep refuse `adopted`/`capacity_only` leases, and every teardown
   refuses a guest with Proxmox protection or `br0kr-keep` before any stop. [docs/designs/fleet-onboarding.md]
+
+### Changed
 - **A fresh clone no longer keeps its template's Proxmox protection.** The call that fences a lease or
   replication clone clears it and replaces the inherited tags, so protecting a template protects only it.
 
@@ -2993,7 +3002,8 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `SECURITY.md` C6 + its residuals (vmid-reuse double-destroy needs per-VMID fencing; admission
   `idem_key` is inert while NULL). An adversarial multi-agent review of the lifecycle drove these.
 
-[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/netcanon-dev/br0kr/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/netcanon-dev/br0kr/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/netcanon-dev/br0kr/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/netcanon-dev/br0kr/compare/v0.1.0...v0.2.0
