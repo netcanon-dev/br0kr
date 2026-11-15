@@ -17,6 +17,12 @@ resolve in this repository.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-14
+
+Fleet onboarding phase 2, part 1: an operator can record a guest br0kr does not manage, so admission counts its
+memory and CPU, and close the record. No migration, so rolling back to 0.3.0 is an image swap: records stay safe
+there (it never destroys them), but none can be closed until 0.4.0 is back.
+
 ### Added
 - **Record a guest br0kr does not manage** (fleet onboarding phase 2): the dashboard holds its memory and CPU in a
   project under admission's locks, a failover hold is memory only, and Close record frees it. No migration.
@@ -3009,7 +3015,8 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `SECURITY.md` C6 + its residuals (vmid-reuse double-destroy needs per-VMID fencing; admission
   `idem_key` is inert while NULL). An adversarial multi-agent review of the lifecycle drove these.
 
-[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/netcanon-dev/br0kr/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/netcanon-dev/br0kr/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/netcanon-dev/br0kr/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/netcanon-dev/br0kr/compare/v0.2.0...v0.2.1
