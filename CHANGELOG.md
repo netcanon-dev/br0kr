@@ -17,6 +17,11 @@ resolve in this repository.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-11-14
+
+A patch release with one fix: after a ledger rollback the orphan sweep holds off the guests the ledger lost
+and new leases no longer reuse their ids. Two migrations (0053, 0054); `sweep_hold_absent` is a new setting.
+
 ### Fixed
 - **A ledger rollback can no longer destroy guests or reuse their lease ids.** A guest naming a lost lease id holds
   the sweep (`sweep_hold_absent`, 0053) until an operator clears it, and new ids start above every listed guest's.
@@ -2982,7 +2987,8 @@ against a real Postgres, and leasing, cloud-init access and template builds also
   `SECURITY.md` C6 + its residuals (vmid-reuse double-destroy needs per-VMID fencing; admission
   `idem_key` is inert while NULL). An adversarial multi-agent review of the lifecycle drove these.
 
-[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/netcanon-dev/br0kr/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/netcanon-dev/br0kr/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/netcanon-dev/br0kr/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/netcanon-dev/br0kr/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/netcanon-dev/br0kr/releases/tag/v0.1.0
