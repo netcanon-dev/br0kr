@@ -104,7 +104,7 @@ teardown in flight isn't re-handed-out on the next pass.
 
 Teardown is fenced and has a backstop: `pve.fenced_destroy` deletes a guest only when its tag names the lease, and the
 orphan sweep (`sweeper.py`) destroys a fenced guest whose lease is terminal or gone, refusing a mass delete when the
-whole ledger reads empty.
+whole ledger reads empty. A fence id with no lease row (a ledger rollback) holds the sweep (`fence_census.py`).
 
 ## Module map
 
@@ -132,6 +132,7 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `db.py` | The one connection seam: READ COMMITTED pin, keepalives, retry, pools; the integer column ceilings. | — | — | `unit/test_db.py`, `harness_ledger_ha.py` |
 | `driver.py` | The driver contract: every call the engine makes on a node driver, as a Protocol `pve.Pve` satisfies, and the destroy verdicts. | — | — | `unit/test_driver.py` |
 | `envelope.py` | Adds `ok` and a `reason` to every MCP tool answer. | — | — | `unit/test_envelope.py` |
+| `fence_census.py` | Every node's fenced guests in one pass: the rollback verdict, the sweep hold, the id floor, the clash check. | writes; via lease, audit | reads | `unit/test_fence_census.py`, `harness_sweeper_watermark.py` |
 | `gateway.py` | Transport-agnostic agent verbs: request, schedule, renew, release, status, jobs. | writes self-quota; via admission, lease, jobs | — | `unit/test_gateway.py`, `harness_gateway.py` |
 | `imgbuild.py` | Pure template-download checks: source allowlist, SHA-256 format, names. | — | — | `unit/test_imgbuild.py` |
 | `inventory.py` | Read-only fleet aggregates: nodes, clusters, storage, projects, queue, leases, usage per project. | reads | — | `unit/test_inventory.py`, `harness_inventory.py`, `harness_usage.py` |
@@ -166,14 +167,14 @@ state-changing calls itself; *reads* only GETs. **Proven by:** `unit/` and `inte
 | `scheduler.py` | Picks a node for an unpinned ask: ranks candidates, tries `admit()` on each. | reads; via admission | — | `unit/test_scheduler.py`, `harness_schedule.py` |
 | `settings.py` | The `operator_setting` knobs: ledger, then env, then default, applied each tick. | writes | — | `unit/test_settings.py`, `harness_settings.py` |
 | `statemachine.py` | The job state machines (build, replication, migration): each one's states and legal edges. | — | — | `unit/test_statemachine.py` |
-| `sweeper.py` | The teardown backstop: destroys fenced guests whose lease is terminal or gone. | via replication | via pve | `integration/test_sweeper.py`, `harness_sweeper_watermark.py` |
+| `sweeper.py` | The teardown backstop: destroys fenced guests whose terminal lease recorded them, or whose lease is gone. | via replication | via pve | `integration/test_sweeper.py`, `harness_sweeper_watermark.py` |
 | `tick_builds.py` | Tick steps: template downloads and the stale-build reclaim. | via build, reconciler | acts (build reclaim); via reconciler | `integration/test_daemon.py`, `harness_build_node_pick.py` |
 | `tick_config.py` | Tick steps: hot-apply the operator settings, then hot-reload the node registry. | via settings | — | `unit/test_daemon.py`, `integration/test_daemon.py` |
 | `tick_copies.py` | Tick steps: the migration saga, the replication data plane and its reclaim. | via migration, replication | via migration, replication | `integration/test_daemon.py`, `unit/test_tick_steps.py` |
 | `tick_provision.py` | Tick steps: provision ADMITTED leases; the placement re-check, holds and preflight. | reads; via lease, placement, audit, reconciler | via reconciler | `unit/test_daemon.py`, `integration/test_daemon.py` |
 | `tick_queue.py` | Tick step: promote queued leases, strict per-scope FIFO. | via admission, scheduler | — | `integration/test_daemon.py`, `unit/test_tick_steps.py` |
 | `tick_steps.py` | The tick as a table: each step's order, cadence and connection; `TickSummary`. | — | — | `unit/test_tick_steps.py`, `integration/test_daemon.py` |
-| `tick_upkeep.py` | Tick steps: reap, guest-IP discovery, orphan sweep, audit retention, discovery report. | via reaper, sweeper, reconciler, audit | via reaper, sweeper, reconciler; reads (discovery) | `unit/test_daemon.py`, `harness_discovery_cadence.py` |
+| `tick_upkeep.py` | Tick steps: fence census, reap, guest IPs, orphan sweep, audit prune, discovery. | via fence_census, reaper, sweeper, reconciler, audit | via reaper, sweeper, reconciler; reads | `unit/test_daemon.py`, `harness_discovery_cadence.py` |
 | `ui_assets.py` | Vendored UI-spec CSS and JS, served with the dashboard. | — | — | `unit/test_ui_assets.py`, `integration/test_dashboard.py` |
 | `verbs.py` | The MCP verb registry: one row per tool with its tier, verdict, shape and description. | — | — | `unit/test_mcp_contract.py`, `unit/test_envelope.py` |
 

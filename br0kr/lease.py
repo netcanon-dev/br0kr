@@ -58,6 +58,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
+from psycopg import sql
 
 from br0kr import multidisk, statemachine
 
@@ -800,17 +801,79 @@ def state_of(conn: psycopg.Connection[Any], lease_id: int) -> str | None:
     return row[0] if row else None
 
 
-def states_of(conn: psycopg.Connection[Any], lease_ids: Iterable[int]) -> dict[int, str]:
-    """The current state of each of `lease_ids` in ONE query, as {id: state}; an id with no lease row is simply
-    absent from the answer (the orphan sweep's 'absent' evidence). One read for the whole batch (review PERF-04:
-    the sweep made one query per fenced guest), and one snapshot, so the batch is classified consistently. Like
-    `state_of`, never a basis for a transition decision on its own; commits to end the read transaction."""
+@dataclass(frozen=True)
+class LeaseOwner:
+    """What the ledger says about the lease a fenced guest names: its state, its node, the guest it RECORDED (the
+    cluster and vmid `begin_provisioning` stamped; both None for a lease that was never provisioned), and its
+    migrations: `moved` = the (target node, vmid) of each copy a saga confirmed landed but could not move the lease
+    onto (0054, `migration.dest_vmid`), `migrating` = a migration of it is still in flight, `migration_targets` =
+    the target node of each of its migrations that is in flight or aborted (a finished one moved the lease, which
+    then records the copy itself)."""
+
+    state: str
+    cluster_id: str | None
+    vmid: int | None
+    node_id: str | None = None
+    moved: tuple[tuple[str, int], ...] = ()
+    migrating: bool = False
+    migration_targets: frozenset[str] = frozenset()
+
+    def recorded(self, vmid: int, cluster_id: str | None, node_id: str | None = None) -> bool:
+        """Whether this lease recorded the guest at `vmid` on node `node_id` in `cluster_id`. A lease that never
+        recorded a vmid recorded no guest at all. Otherwise:
+
+        * the same vmid on the lease's own node: yes (whatever the node's cluster is today, so a node repointed
+          to another cluster still has its terminal guests reclaimed);
+        * the same vmid on another node of the lease's recorded cluster: yes (PVE moved the guest within the
+          cluster, where a vmid names one guest);
+        * a migration copy the saga confirmed on that node under that vmid (`moved`): yes;
+        * anything else, including a node or lease whose cluster is unknown: no. Standalone nodes each number
+          their guests from 100, so the same vmid there is a different guest, and the sweep spares it.
+        A caller that knows neither the node nor the cluster (a direct, single-node `orphan_sweep` call) compares
+        the vmid alone."""
+        if node_id is not None and (node_id, vmid) in self.moved:
+            return True
+        if self.vmid is None or self.vmid != vmid:
+            return False
+        if node_id is None and cluster_id is None:
+            return True
+        if node_id is not None and self.node_id == node_id:
+            return True
+        return cluster_id is not None and self.cluster_id == cluster_id
+
+
+def owners_of(conn: psycopg.Connection[Any], lease_ids: Iterable[int]) -> dict[int, LeaseOwner]:
+    """The state, node, recorded guest and migrations of each of `lease_ids` in TWO queries (the leases, then their
+    migrations), as {id: LeaseOwner}; an id with no lease row is simply absent from the answer (the orphan sweep's
+    'absent' evidence). One read per table for the whole batch (review PERF-04: the sweep made one query per fenced
+    guest). The recorded guest lets the sweep refuse to
+    destroy a guest a TERMINAL lease never recorded: after a lease id is minted twice (a ledger rollback), the newer
+    lease's end must not take the older guest with it. Like `state_of`, never a basis for a transition decision on
+    its own; commits to end the read transaction."""
     ids = sorted({int(i) for i in lease_ids})
     if not ids:
         return {}
-    rows = conn.execute("SELECT id, state::text FROM lease WHERE id = ANY(%s)", (ids,)).fetchall()
+    rows = conn.execute("SELECT id, state::text, cluster_id, vmid, node_id FROM lease WHERE id = ANY(%s)",
+                        (ids,)).fetchall()
+    # A saga that settles between the two reads only adds a confirmed copy (`dest_vmid`) or ends `migrating`;
+    # either order of reads gives a safe answer (a copy reclaimed one pass later, or left one pass longer).
+    migs = conn.execute("SELECT lease_id, target_node, dest_vmid, state::text FROM migration "
+                        "WHERE lease_id = ANY(%s)", (ids,)).fetchall()
     conn.commit()
-    return {int(i): str(s) for i, s in rows}
+    moved: dict[int, list[tuple[str, int]]] = {}
+    migrating: set[int] = set()
+    targets: dict[int, set[str]] = {}
+    for lid, target, dest, mstate in migs:
+        live = mstate in statemachine.MIGRATION.live
+        if live or mstate == "ABORTED":
+            targets.setdefault(int(lid), set()).add(str(target))
+        if dest is not None:
+            moved.setdefault(int(lid), []).append((str(target), int(dest)))
+        if live:
+            migrating.add(int(lid))
+    return {int(i): LeaseOwner(str(s), c, None if v is None else int(v), n, tuple(moved.get(int(i), ())),
+                               int(i) in migrating, frozenset(targets.get(int(i), ())))
+            for i, s, c, v, n in rows}
 
 
 def max_lease_id(conn: psycopg.Connection[Any]) -> int:
@@ -825,6 +888,70 @@ def max_lease_id(conn: psycopg.Connection[Any]) -> int:
     row = conn.execute("SELECT max(id) FROM lease").fetchone()
     conn.commit()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+# How long `raise_id_floor` waits for its lock on `lease` before giving up for this pass (a long transaction
+# holding an insert must not stall the daemon's tick; the next census retries).
+_ID_FLOOR_LOCK_TIMEOUT = "5s"
+
+
+def _id_sequence(conn: psycopg.Connection[Any]) -> str:
+    """The qualified name of `lease.id`'s identity sequence."""
+    row = conn.execute("SELECT pg_get_serial_sequence('lease', 'id')").fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError("lease.id has no serial sequence")   # the baseline schema always gives it one
+    return str(row[0])
+
+
+def _id_position(conn: psycopg.Connection[Any], seq: str) -> int:
+    """The last id the sequence handed out (or would have: a fresh sequence reads one below its start). Reading a
+    sequence takes no lock on `lease`."""
+    schema, _, name = seq.partition(".")
+    row = conn.execute(sql.SQL("SELECT last_value, is_called FROM {}").format(
+        sql.Identifier(schema.strip('"'), name.strip('"')))).fetchone()
+    if row is None:
+        raise RuntimeError(f"sequence {seq} returned no row")   # a sequence relation always has exactly one
+    last_value, is_called = row
+    return int(last_value) if is_called else int(last_value) - 1
+
+
+def raise_id_floor(conn: psycopg.Connection[Any], floor: int) -> int | None:
+    """Move the lease id sequence FORWARD so the next lease id is above `floor`; never move it back. Returns
+    `floor` when it moved the sequence, None when the sequence was already at or past it.
+
+    Why: a fenced guest names its lease by id (`br0kr-lease-<id>`). After a ledger failover or restore the
+    sequence is behind the fleet, and the next admissions would mint ids that guests created in the lost minutes
+    already carry; one lease id would then name two guests, and the newer lease's end would take the older guest
+    with it (fence_census.secure calls this with the highest fence id it saw). The scripted restore did this by
+    hand (`restore_ledger.sh --lease-id-floor`, an `ALTER ... RESTART`); this is the forward-only, automatic form.
+
+    The healthy path takes no lock: the position is read first, and a sequence already past `floor` (every census
+    on a healthy ledger) returns at once. Only a sequence behind `floor` takes the lock. `SHARE ROW EXCLUSIVE` on
+    `lease` conflicts with the `ROW EXCLUSIVE` every INSERT, UPDATE and DELETE takes, an INSERT before it draws its
+    id, so no id is minted between re-reading the position under the lock and setting it (a concurrent nextval
+    past `floor` would otherwise be moved BACK, and the next insert would hit a duplicate key). Every lease write
+    (an admission, a renewal, a state CAS) waits while it is held; plain reads do not. Held for two reads and one
+    `setval`, under a short lock_timeout; a timeout raises psycopg.errors.LockNotAvailable and changes nothing.
+    Owns its transaction (a caller's pending work is committed first, per the module contract) and works on an
+    autocommit connection."""
+    if not conn.autocommit:
+        conn.commit()
+    seq = _id_sequence(conn)
+    behind = floor > _id_position(conn, seq)
+    if not conn.autocommit:
+        conn.commit()   # end the unlocked read, so the block below is a real transaction, not a savepoint
+    if not behind:
+        return None
+    with conn.transaction():
+        conn.execute(f"SET LOCAL lock_timeout = '{_ID_FLOOR_LOCK_TIMEOUT}'")
+        conn.execute("LOCK TABLE lease IN SHARE ROW EXCLUSIVE MODE")
+        position = _id_position(conn, seq)   # again, under the lock: an admission may have passed `floor` since
+        if floor <= position:
+            return None
+        conn.execute("SELECT setval(%s::regclass, %s, true)", (seq, floor))
+    log.warning("lease id sequence moved forward from %d to %d: the next lease id is above every fence the fleet "
+                "carries", position, floor, extra={"from_id": position, "to_id": floor})
+    return floor
 
 
 def access_of(conn: psycopg.Connection[Any], lease_id: int) -> dict[str, Any] | None:

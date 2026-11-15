@@ -21,6 +21,15 @@ Three safety properties make this safe to run unattended:
     tag, so `fenced_destroy` re-reads that same tag and matches by construction; if the
     tag changed between the scan and the destroy, the destroy is refused
     (`fence_mismatch`), not forced.
+  * **A terminal lease reclaims only the guest it RECORDED.** A terminal row is positive
+    evidence only for the guest that lease's `begin_provisioning` stamped (its vmid, in its
+    cluster). A fenced guest at any other vmid, or one naming a lease that never recorded a
+    vmid, belongs to an EARLIER lease minted under the same id (a ledger rollback re-minted
+    it), so it is spared and counted `clash_spared`, with a warning naming both. Without this,
+    the newer lease's end would destroy the older guest. A copy a migration left on its target
+    counts as recorded once the saga confirmed it (`migration.dest_vmid`, 0054); while a
+    migration of the lease is still in flight, or for a copy on a migration's target node that
+    the saga never confirmed, the guest is spared and counted `migration_spared` instead.
   * **Two guards protect the ABSENT branch.** A guest whose lease is ABSENT (no row) is
     the correct reading of "no lease accounts for this guest" — but it is ALSO what a
     br0kr guest looks like when the ledger is WRONG or STALE. Two failure shapes, two
@@ -46,24 +55,33 @@ Three safety properties make this safe to run unattended:
     dry-run confirms a genuine teardown. TERMINAL orphans (a lease row that exists and is
     terminal — positive evidence the guest should die) are never gated by either guard.
 
-  **This narrows, but does not fully close, the DR blast radius.** After a restore the
-  lease id sequence is ALSO rolled back, so new admissions re-mint ids in the spared range;
-  a re-minted id that later goes terminal can destroy the old guest via the terminal branch.
-  The restore runbook (`docs/runbooks/ledger-ha.md`) therefore requires restarting the id
-  sequence past the fleet's highest fence id — and a `dry_run` first — before resuming.
+  **After a rollback (br0kr/fence_census.py).** The watermark alone was a temporary guard:
+  the id sequence rolls back with the ledger, so new admissions re-minted the lost ids (one
+  id, two guests), and once new ids passed the lost ones the signal was gone and the lost
+  guests looked like ordinary orphans. The daemon's fleet census now closes both. Any fence
+  id with no lease row sets the `sweep_hold_absent` knob (a healthy ledger never deletes a
+  row), which spares every absent guest until an operator clears it after the dry-run review
+  in `docs/runbooks/ledger-ha.md`; then the census moves the id sequence past the highest
+  fence id (forward only). The watermark signal is judged across EVERY node before any is
+  swept (`orphan_sweep_all(census=)`), and a node the census could not list spares absent
+  guests fleet-wide for the pass. Ids in `sweep_hold_ids` (every one a hold was raised for)
+  no longer count as watermark evidence, so an operator's clear is final for them. A
+  lease admitted with a clashing id before the floor moved is held, not built
+  (`lease_id_clash`), and the terminal-branch guard above keeps its end from touching the
+  older guest.
 
 Use `dry_run=True` to audit what a sweep would destroy without touching anything.
 """
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Any
 
 import psycopg
 
-from br0kr import lease, replication
+from br0kr import fence_census, lease, replication
 from br0kr.driver import DESTROYED, FENCE_MISMATCH, GONE, Driver
 from br0kr.logging_setup import generate_correlation_id, push_context
 
@@ -100,6 +118,11 @@ class SweepSummary:
     absent: int = 0           # absent-lease orphans that WILL be destroyed (no rollback signal, or operator override)
     terminal: int = 0         # of the orphans, how many had a terminal lease row (positive destroy evidence)
     absent_spared: int = 0    # absent guests SPARED — a rollback/lag is suspected (an at/above-watermark absent), S20
+    #                           or the sweep_hold_absent knob is on (0053)
+    clash_spared: int = 0     # guests SPARED although their lease is terminal: that lease never recorded this guest
+    #                           (a lease id minted twice, after a rollback) — not this lease's guest to destroy
+    migration_spared: int = 0  # terminal-lease guests SPARED for a migration: one is still in flight, or the guest
+    #                            sits on a migration target the saga never confirmed a copy on
     destroyed: int = 0        # orphans actually destroyed (0 in dry_run or when aborted)
     refused: int = 0          # fence_mismatch at destroy (tag changed under us) — left alone
     errors: int = 0           # destroy raised a transient error; next sweep retries
@@ -117,12 +140,15 @@ class SweepSummary:
 def _log_summary(summary: SweepSummary) -> None:
     """Emit the one-line sweep roll-up — on EVERY exit path (incl. a breaker abort, which may have already
     reclaimed clone-orphans in phase 2 before aborting phase 1), so a reclaim is never invisible."""
-    if summary.orphans or summary.clone_orphans or summary.repl_orphans or summary.absent_spared:
+    if (summary.orphans or summary.clone_orphans or summary.repl_orphans or summary.absent_spared
+            or summary.clash_spared or summary.migration_spared):
         log.info("orphan sweep: scanned %d, %d orphan(s) (%d terminal, %d absent), %d absent SPARED "
-                 "(rollback/lag watermark), destroyed %d, refused %d, errors %d, aborted=%s; clone-orphans "
+                 "(rollback/lag watermark or hold), %d terminal-lease guest(s) SPARED (lease id clash), %d SPARED "
+                 "(migration), destroyed %d, refused %d, errors %d, aborted=%s; clone-orphans "
                  "%d reclaimed %d refused %d spared %d; repl-orphans %d reclaimed %d refused %d spared %d",
                  summary.scanned, summary.orphans, summary.terminal, summary.absent, summary.absent_spared,
-                 summary.destroyed, summary.refused, summary.errors, summary.aborted,
+                 summary.clash_spared, summary.migration_spared, summary.destroyed, summary.refused,
+                 summary.errors, summary.aborted,
                  summary.clone_orphans, summary.clone_reclaimed, summary.clone_refused, summary.clone_spared,
                  summary.repl_orphans, summary.repl_reclaimed, summary.repl_refused, summary.repl_spared)
 
@@ -132,19 +158,33 @@ def orphan_sweep(
     driver: Driver,
     *,
     node_id: str | None = None,
+    node_cluster: str | None = None,
     dry_run: bool = False,
     allow_mass_absent: bool = False,
+    hold_absent: bool = False,
+    fleet_rollback: bool = False,
+    acknowledged: Collection[int] = frozenset(),
     on_progress: Callable[[], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> SweepSummary:
-    """One reconciliation pass: destroy every fenced guest whose lease is terminal, or
+    """One reconciliation pass: destroy every fenced guest whose terminal lease recorded it, or that is
     absent-and-below-the-rollback-watermark. Safe to run on an interval. ``dry_run=True``
     reports what it WOULD destroy without touching anything. Two guards protect the absent
     branch (see module docstring): the mass-absent breaker aborts a scan where EVERY guest
     is absent (wrong/empty DSN), and the rollback watermark spares EVERY absent guest in any
     scan that contains an absent id at/above ``lease.max_lease_id`` (a restored-backup /
-    lagging-standby ledger behind the fleet) — counted ``absent_spared``. ``allow_mass_absent=True``
-    overrides BOTH.
+    lagging-standby ledger behind the fleet) — counted ``absent_spared``. An id in ``acknowledged``
+    (``sweep_hold_ids``: a hold was raised for it, and an operator reviewed it and cleared the hold) is no
+    such signal. ``fleet_rollback`` (the fleet verdict: the signal on ANY node, or a node the census
+    could not list) and ``hold_absent`` (the ``sweep_hold_absent`` knob) spare every absent guest the
+    same way. ``allow_mass_absent=True`` overrides all of them.
+
+    The terminal branch destroys a guest only when its lease RECORDED it (``lease.LeaseOwner.recorded``:
+    the same vmid, on the lease's node or in its cluster, ``node_cluster``); any other terminal-lease
+    guest is a lease id clash and is spared, counted ``clash_spared``, unless a migration explains it: a
+    migration of the lease still in flight (the saga settles it), or a guest on a node a migration of the
+    lease targeted (a copy the saga never confirmed), both spared and counted ``migration_spared``. A copy
+    the saga DID confirm is recorded (``migration.dest_vmid``) and reclaimed.
     A transient destroy error is counted and left for the next pass; a `fence_mismatch`
     (vmid reused under a new lease since the scan) is counted `refused`, never forced.
     Runs under one correlation id so a sweep's actions are greppable together.
@@ -187,24 +227,52 @@ def orphan_sweep(
         # anything is destroyed. `absent` carries, per guest, whether its id is at/above the watermark.
         terminal_orphans: list[tuple[int, int, str | None]] = []
         absent: list[tuple[int, int, bool]] = []   # (vmid, lease_id, id_at_or_above_watermark)
-        # Every fenced guest's lease state in ONE query (review PERF-04: one query per guest before), read from one
-        # snapshot so the whole node is classified consistently. A lease id missing from the answer is absent.
-        states = lease.states_of(conn, [lease_id for _, lease_id in fenced])
+        # Every fenced guest's lease state and recorded guest in ONE query (review PERF-04: one query per guest
+        # before), read from one snapshot so the whole node is classified consistently. A lease id missing from
+        # the answer is absent.
+        owners = lease.owners_of(conn, [lease_id for _, lease_id in fenced])
         if on_progress is not None:
             on_progress()
         for vmid, lease_id in fenced:
-            state = states.get(lease_id)
-            if state is None:
-                absent.append((vmid, lease_id, lease_id >= watermark))
-            elif is_orphan(state):   # a TERMINAL lease row exists — positive evidence the guest should die
-                terminal_orphans.append((vmid, lease_id, state))
-            # else: a LIVE/RELEASING lease still owns its guest — never swept.
+            owner = owners.get(lease_id)
+            if owner is None:
+                absent.append((vmid, lease_id, lease_id >= watermark and lease_id not in acknowledged))
+            elif not is_orphan(owner.state):
+                continue   # a LIVE/RELEASING lease still owns its guest — never swept
+            elif owner.recorded(vmid, node_cluster, node_id):
+                terminal_orphans.append((vmid, lease_id, owner.state))   # positive evidence: ITS guest, lease done
+            elif owner.migrating:
+                # A migration of this lease is still in flight: its saga confirms the copy (and records it, 0054)
+                # or aborts. Judge the guest once the saga has settled.
+                summary.migration_spared += 1
+                log.info("orphan sweep: deferred guest vmid %s on node %s fenced to lease %s (%s): a migration of "
+                         "that lease is still in flight", vmid, node_id, lease_id, owner.state,
+                         extra={"vmid": vmid, "lease_id": lease_id, "lease_state": owner.state, "node_id": node_id})
+            elif node_id is not None and node_id in owner.migration_targets:
+                # A copy on a node a migration of this lease targeted, which the saga never confirmed (it aborted
+                # before it saw the copy land). Most likely that lease's own copy, but nothing recorded it.
+                summary.migration_spared += 1
+                log.warning("orphan sweep: SPARED guest vmid %s on node %s fenced to lease %s (%s): that node was a "
+                            "migration target of the lease, but no migration confirmed a copy at this vmid. An "
+                            "operator decides (docs/runbooks/ledger-ha.md).", vmid, node_id, lease_id, owner.state,
+                            extra={"vmid": vmid, "lease_id": lease_id, "lease_state": owner.state,
+                                   "node_id": node_id})
+            else:
+                # A terminal lease that never recorded THIS guest: an earlier lease minted under the same id owns it
+                # (a ledger rollback re-minted the id). Its end is no evidence about this guest — spare it, loudly.
+                summary.clash_spared += 1
+                log.warning("orphan sweep: SPARED guest vmid %s on node %s fenced to lease %s — that lease (%s) "
+                            "recorded vmid %s on node %s in cluster %s, not this guest: a lease id minted twice after "
+                            "a ledger rollback. Not destroyed; an operator decides (docs/runbooks/ledger-ha.md).",
+                            vmid, node_id, lease_id, owner.state, owner.vmid, owner.node_id, owner.cluster_id,
+                            extra={"vmid": vmid, "lease_id": lease_id, "lease_state": owner.state,
+                                   "recorded_vmid": owner.vmid, "node_id": node_id})
 
-        rollback_suspected = any(above for (_, _, above) in absent)   # an at/above-watermark absent → stale ledger
+        rollback_suspected = fleet_rollback or any(above for (_, _, above) in absent)   # → stale ledger
         if allow_mass_absent:
             destroy_absent, spared_absent = absent, []   # operator override: reclaim every absent orphan
-        elif rollback_suspected:
-            destroy_absent, spared_absent = [], absent   # stale ledger — spare EVERY absent (below AND above)
+        elif rollback_suspected or hold_absent:
+            destroy_absent, spared_absent = [], absent   # stale ledger or held — spare EVERY absent (below AND above)
         else:
             destroy_absent, spared_absent = absent, []   # no rollback signal — a below-watermark absent is an orphan
         summary.terminal = len(terminal_orphans)
@@ -215,16 +283,18 @@ def orphan_sweep(
         summary.orphans = len(orphans)
         if spared_absent:   # one bounded WARNING per sweep (not per guest), then per-guest INFO detail
             lids = sorted(lid for (_, lid, _) in spared_absent)
+            why = (f"a rollback/lag is suspected (an absent guest at/above the ledger watermark {watermark}, on "
+                   "this node or another, or a node the fleet census could not list)" if rollback_suspected
+                   else "the sweep_hold_absent knob is on (set when the ledger was found behind the fleet)")
             log.warning(
-                "orphan sweep: SPARING %d ABSENT fenced guest(s) (lease ids %d..%d) — a rollback/lag is suspected "
-                "(an absent guest at/above the ledger watermark %d means the ledger is BEHIND the fleet), so NO "
-                "absent guest is destroyed this pass. Run a dry-run; after confirming a genuine teardown AND "
-                "restarting the lease id sequence past the fleet's highest fence id, set allow_mass_absent to reclaim.",
-                len(spared_absent), lids[0], lids[-1], watermark,
-                extra={"spared": len(spared_absent), "watermark": watermark})
+                "orphan sweep: SPARING %d ABSENT fenced guest(s) (lease ids %d..%d) — %s, so NO absent guest is "
+                "destroyed this pass. Run a dry-run; once no lost guest is still in use, clear sweep_hold_absent "
+                "(docs/runbooks/ledger-ha.md) and the next sweep reclaims them.",
+                len(spared_absent), lids[0], lids[-1], why,
+                extra={"spared": len(spared_absent), "watermark": watermark, "hold_absent": hold_absent})
             for v, lid, _ in spared_absent:
-                log.info("orphan sweep: spared absent fenced guest vmid %s → lease %s (rollback/lag suspected)",
-                         v, lid, extra={"vmid": v, "lease_id": lid})
+                log.info("orphan sweep: spared absent fenced guest vmid %s → lease %s (rollback/lag suspected or "
+                         "held)", v, lid, extra={"vmid": v, "lease_id": lid})
 
         # ── Phase 2: reclaim UNFENCED template-clones (runs REGARDLESS of the phase-1 breaker) ─────────
         # A clone abandoned between `clone` and `configure` (a daemon that died in that window) carries the
@@ -361,25 +431,52 @@ def orphan_sweep_all(
     *,
     dry_run: bool = False,
     allow_mass_absent: bool = False,
+    hold_absent: bool = False,
+    census: fence_census.FenceCensus | None = None,
+    cluster_of: Callable[[str], str | None] | None = None,
     on_progress: Callable[[], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, SweepSummary]:
     """Run `orphan_sweep` once PER node (multi-node deployment), returning a
-    {node_id: SweepSummary} map. Each node's scan + circuit-breaker is independent — a
-    fence-tagged guest is only visible on the node it lives on, and the lease lookup is
-    global, so per-node is the correct granularity. A driver that raises (a node's API is
-    down) is logged and the other nodes are still swept. ``on_progress`` (optional) is
-    forwarded to each node's sweep as a per-orphan liveness heartbeat (the daemon passes
-    its `_beat`). ``should_stop`` is asked before each node and forwarded (see `orphan_sweep`); a node not
-    reached is swept next pass."""
+    {node_id: SweepSummary} map. A fence-tagged guest is only visible on the node it lives
+    on and the lease lookup is global, so the destroy decisions are per node; the circuit-
+    breaker is too. A driver that raises (a node's API is down) is logged and the other nodes
+    are still swept. ``on_progress`` (optional) is forwarded to each node's sweep as a
+    per-orphan liveness heartbeat (the daemon passes its `_beat`). ``should_stop`` is asked
+    before each node and forwarded (see `orphan_sweep`); a node not reached is swept next pass.
+
+    The ROLLBACK signal is fleet-wide. With a ``census`` (fence_census.take, the daemon's, taken at
+    the start of this tick), it is judged once over every node's guests BEFORE any node is swept,
+    and every node is swept with that verdict: a node swept before the one holding the evidence no
+    longer loses its absent guests. Each node still lists its guests afresh for its own destroy
+    decisions (the census is a tick old by now). A node the census could not list is skipped this
+    pass, and absent guests are spared on every node: the skipped node's guests were not part of
+    the verdict. The verdict reads ``sweep_hold_absent`` from the ledger itself (a read error
+    raises before any node is swept), so the hold holds even when the daemon's copy of the knob is
+    stale; ``hold_absent`` (that copy) is honoured too. Without a census, each node judges for itself.
+    ``cluster_of`` (the daemon's registry lookup) gives each node's cluster to the terminal branch's
+    recorded-guest check."""
+    fleet_rollback = False
+    acknowledged: frozenset[int] = frozenset()
+    if census is not None:
+        verdict = fence_census.read_verdict(conn, census)
+        fleet_rollback, acknowledged = verdict.rollback_suspected or verdict.partial, verdict.acknowledged
+        hold_absent = hold_absent or verdict.hold_on
     out: dict[str, SweepSummary] = {}
     for node_id, driver in drivers:
         if should_stop is not None and should_stop():
             break
+        if census is not None and node_id not in census.fenced:
+            log.info("orphan sweep: node %s skipped — the fence census could not list it", node_id,
+                     extra={"node_id": node_id})
+            continue
         try:
-            out[node_id] = orphan_sweep(conn, driver, node_id=node_id, dry_run=dry_run,
-                                        allow_mass_absent=allow_mass_absent, on_progress=on_progress,
-                                        should_stop=should_stop)
+            out[node_id] = orphan_sweep(
+                conn, driver, node_id=node_id,
+                node_cluster=cluster_of(node_id) if cluster_of is not None else None,
+                dry_run=dry_run, allow_mass_absent=allow_mass_absent, hold_absent=hold_absent,
+                fleet_rollback=fleet_rollback, acknowledged=acknowledged, on_progress=on_progress,
+                should_stop=should_stop)
         except Exception:
             log.exception("orphan sweep failed for node %s — other nodes continue", node_id,
                           extra={"node_id": node_id})

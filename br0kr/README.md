@@ -107,6 +107,7 @@ stays a typed, CHECKed column.
 | A Proxmox call fails or its HTTP request times out mid-provision | the lease moves to RELEASING and the reaper destroys the fenced guest |
 | A create, clone or start task outlives its wait | the lease stays PROVISIONING until it expires or has been there `provision_stuck_seconds`, then is reclaimed; a clone not yet fenced is removed by the orphan sweep once the lease is terminal |
 | A destroy keeps failing | after `max_release_attempts` the lease ends `RELEASE_FAILED` instead of holding capacity |
+| The ledger is behind the fleet (a restore or failover) | any fence id with no lease row makes the fence census set `sweep_hold_absent` (the sweep destroys no guest without a lease row until an operator clears it), then move the lease id sequence past every guest's id (`fence_census.py`) |
 
 ## Testing
 

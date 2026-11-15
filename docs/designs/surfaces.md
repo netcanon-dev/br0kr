@@ -154,7 +154,7 @@ See also: [../architecture.md](../architecture.md#module-map), [runtime.md](runt
 - **Operator settings (`br0kr/settings.py` + migration `0021`)** — a one-row `operator_setting` SINGLETON of
   runtime-tunable reconciler/queue knobs (reap grace, sweep cadence + dry-run, provision/promote limits, the
   build/migrate actuation gates, the global `queue_max`, the reaper's `max_release_attempts` and
-  `provision_stuck_seconds`, the guest-IP-prefix), hot-applied from the ledger WITHOUT a restart. Each knob resolves COALESCE(ledger
+  `provision_stuck_seconds`, the sweep's rollback hold `sweep_hold_absent`, the guest-IP-prefix), hot-applied from the ledger WITHOUT a restart. Each knob resolves COALESCE(ledger
   override → env → code default), so an all-NULL seed row is byte-identical to the old env-only behaviour; the
   operator edits the SHARED ledger layer from the token-gated `#settings-sec` dashboard section (the dashboard
   shares neither the daemon's nor the gateway's env, so it manages the ledger override + shows each knob's

@@ -17,6 +17,7 @@ import pytest
 from br0kr import (
     admission,
     build,
+    fence_census,
     inventory,
     leader,
     lease,
@@ -56,6 +57,7 @@ class _FakeConn:
     daemon's autocommit work conn); this is not a DB, so those touches simply do nothing."""
 
     rowcount = 0
+    autocommit = True
 
     def execute(self, *args, **kwargs) -> _FakeConn:
         return self
@@ -166,15 +168,33 @@ def wired(monkeypatch):
     monkeypatch.setattr(tick_config, "apply_settings", lambda self, conn: None)
     monkeypatch.setattr(settings, "take_reload", lambda conn: False)
 
-    def fake_sweep_all(conn, drivers, dry_run=False, allow_mass_absent=False, on_progress=None, should_stop=None):
+    def fake_sweep_all(conn, drivers, dry_run=False, allow_mass_absent=False, hold_absent=False, census=None,
+                       cluster_of=None, on_progress=None, should_stop=None):
         rec["sweep_calls"] += 1
         rec["sweep_should_stop"] = should_stop   # REL-05: the daemon threads its _halted
         rec["sweep_dry_run"] = dry_run
         rec["sweep_on_progress"] = on_progress
+        rec["sweep_census"] = census              # the fleet census this tick took (lease-id rollback fix)
+        rec["sweep_hold_absent"] = hold_absent
         rec["swept_drivers"] = [nid for nid, _ in drivers]
         return {nid: sweeper.SweepSummary(destroyed=3) for nid, _ in drivers}
 
     monkeypatch.setattr(sweeper, "orphan_sweep_all", fake_sweep_all)
+
+    # The fence census (fence_census.py) lists every node over PVE and reads the ledger; its logic is proven in
+    # tests/unit/test_fence_census.py + harness_sweeper_watermark.py. Here it answers "every node listed, no
+    # fenced guest, nothing to secure", and records each census so the ORDER (before provision) is assertable.
+    rec["census_calls"] = 0
+
+    def fake_take(drivers, *, on_progress=None, should_stop=None):
+        rec["census_calls"] += 1
+        rec.setdefault("events", []).append("census")
+        return fence_census.FenceCensus(fenced={nid: () for nid, _ in drivers})
+
+    monkeypatch.setattr(fence_census, "take", fake_take)
+    monkeypatch.setattr(fence_census, "read_verdict",
+                        lambda conn, census: fence_census.Verdict(watermark=0, max_fence_id=0))
+    monkeypatch.setattr(fence_census, "secure", lambda conn, verdict: fence_census.Secured())
     return rec
 
 
@@ -596,6 +616,28 @@ def test_sweep_runs_across_every_served_node(wired):
     summary = _daemon(registry=_registry("n1", "n2"), sweep_every=1).tick(_FakeConn())
     assert sorted(wired["swept_drivers"]) == ["n1", "n2"]
     assert summary.swept == 6   # fake_sweep_all returns destroyed=3 per node × 2 nodes
+
+
+def test_the_census_runs_first_and_is_refreshed_for_every_sweep(wired, monkeypatch):
+    """The fleet census (lease-id rollback fix) runs on a leadership's first tick before anything is provisioned,
+    is kept between sweeps, and is taken again on every sweep tick and handed to that sweep. Guards a provision
+    with no census (an admitted lease whose id a lost guest carries would be built), and a sweep judging the
+    rollback over a census twelve ticks old."""
+    real_provision = reconciler.provision_lease
+
+    def provision(*a, **k):
+        wired["events"].append("provision")
+        return real_provision(*a, **k)
+
+    monkeypatch.setattr(reconciler, "provision_lease", provision)
+    wired["admitted"] = [AdmittedLease(1, "n1", 1.0, 512)]
+    d = _daemon(sweep_every=3)
+    d.tick(_FakeConn())
+    assert wired["events"] == ["census", "provision"]
+    d.tick(_FakeConn())
+    assert wired["census_calls"] == 1                  # between sweeps: the first census stands
+    d.tick(_FakeConn())                                # tick 3 is a sweep tick
+    assert wired["census_calls"] == 2 and wired["sweep_census"] is d._fence_census
 
 
 def test_provision_limit_caps_work_per_tick(wired):

@@ -399,3 +399,45 @@ tests:
       - eval_time: 8m
         alertname: Br0krLedgerSyncStandbyLost
         exp_alerts: []
+  # The census sets the rollback hold: page until an operator clears it, then stop.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_last_sweep_hold_on{instance="daemon-1"}'
+        values: '0x4 1x15 0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: Br0krLedgerBehindFleet
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: Br0krLedgerBehindFleet
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerbehindfleet'
+              summary: 'Guests carry br0kr lease ids its ledger has lost; the orphan sweep spares them until an operator decides.'
+      - eval_time: 25m
+        alertname: Br0krLedgerBehindFleet
+        exp_alerts: []
+  # A guest spared as a lease id clash pages with the hold already cleared, and stops an hour after the last one.
+  - interval: 1m
+    input_series:
+      - series: 'br0kr_last_sweep_hold_on{instance="daemon-1"}'
+        values: '0x85'
+      - series: 'br0kr_sweep_clash_spared_total{instance="daemon-1"}'
+        values: '0x4 1x80'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: Br0krLedgerBehindFleet
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: Br0krLedgerBehindFleet
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: 'https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerbehindfleet'
+              summary: 'Guests carry br0kr lease ids its ledger has lost; the orphan sweep spares them until an operator decides.'
+      - eval_time: 75m
+        alertname: Br0krLedgerBehindFleet
+        exp_alerts: []

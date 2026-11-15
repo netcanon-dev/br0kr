@@ -11,10 +11,11 @@
 #      fleet's reservations; an empty or drill database has none. Stop the broker services before a
 #      --force restore: a table they hold makes the restore wait, and it gives up after 30 s.
 #   2. pg_restore --clean --if-exists --no-owner in ONE transaction: the dump lands whole or not at all.
-#   3. With --lease-id-floor N, restarts the lease id sequence at N. For a REAL restore that a daemon will
-#      run against, N must be past the highest br0kr-lease-<id> fence tag on the fleet, or new leases
-#      re-mint ids of guests the backup does not know about (see the runbook's warning). It refuses an N
-#      at or below the restored max(lease.id).
+#   3. With --lease-id-floor N, restarts the lease id sequence at N, past the highest br0kr-lease-<id> fence
+#      tag on the fleet. The reconcile daemon does this itself before its first provision (br0kr/fence_census.py),
+#      so the flag only matters when the gateway admits leases before the daemon runs: without it those leases
+#      take ids of guests the backup does not know about (the daemon holds them, lease_id_clash, and builds
+#      nothing). It refuses an N at or below the restored max(lease.id).
 #   4. Prints the restored schema version and row counts, and the steps still to do by hand.
 # It never runs migrations and never starts anything. The password never reaches a process's argv
 # (scripts/_pgconn.sh moves it into PGPASSWORD); PGCONN_TARGET is never printed. Every query names the
@@ -102,8 +103,12 @@ echo "restored: schema $(q "SELECT COALESCE(max(version), 0) FROM public.schema_
      "$(q "SELECT count(*) FROM public.node") nodes, $(q "SELECT count(*) FROM public.cluster") clusters"
 echo "next:"
 echo "  - if this build is newer than the dump, run the migrate step (the services refuse an older schema)"
+echo "  - BEFORE a daemon runs against this ledger: put the sweep in dry-run (sweep_dry_run) and give every live"
+echo "    lease one fresh TTL (the runbook's two UPDATEs)"
 if [ -z "$floor" ]; then
-  echo "  - BEFORE a daemon runs against this ledger: re-run with --lease-id-floor <highest fence id + 1>"
+  echo "  - no --lease-id-floor: the daemon moves the id sequence past every fence before it provisions; a lease"
+  echo "    the gateway admits before that, under a lost guest's id, is held lease_id_clash, not built"
 fi
-echo "  - BEFORE real teardown: dry-run the orphan sweep (sweep_dry_run) and check its destroy list"
-echo "  (docs/runbooks/ledger-ha.md, Restore drill)"
+echo "  - if any guest carries a lease id this dump lacks, the daemon sets sweep_hold_absent and spares it: decide"
+echo "    about each one, clear the hold, read the dry-run destroy list, then clear sweep_dry_run"
+echo "  (docs/runbooks/ledger-ha.md, After a restore or a failover)"

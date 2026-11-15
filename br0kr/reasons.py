@@ -111,6 +111,7 @@ ENV_TEMPLATE_WRONG_CLUSTER: Final = "env_template_wrong_cluster"
 SOURCE_NODE_UNROUTABLE: Final = "source_node_unroutable"
 NETWORK_UNROUTABLE: Final = "network_unroutable"
 ENV_DEFAULT_MULTINODE: Final = "env_default_multinode"        # the daemon's env disk default on a multi-node fleet
+LEASE_ID_CLASH: Final = "lease_id_clash"   # a guest already carries this lease's id: a rollback minted it twice
 
 # ── Pinned leases ───────────────────────────────────────────────────────────────────────────────────────────────
 PIN_DISABLED: Final = "pin_disabled"
@@ -199,7 +200,8 @@ PROJECT: Final[frozenset[str]] = frozenset({
     UNKNOWN_PROJECT, INSUFFICIENT_PROJECT_CPU, INSUFFICIENT_PROJECT_MEM, PROJECT_LEASE_LIMIT})
 # A template deleted mid-schedule: every candidate would refuse identically.
 TEMPLATE: Final[frozenset[str]] = frozenset({UNKNOWN_TEMPLATE})
-# The hold reasons placement names (br0kr/placement.py HOLD_*); the daemon also writes ENV_DEFAULT_MULTINODE.
+# The hold reasons placement names (br0kr/placement.py HOLD_*). The daemon also writes two of its own, which are not
+# placement's: ENV_DEFAULT_MULTINODE, and LEASE_ID_CLASH from its fence census.
 HOLD: Final[frozenset[str]] = frozenset({
     INSTANCE_UNAVAILABLE, PLACEMENT_REACHABILITY_LOST, CROSS_PROVISION_REFUSED, PLACEMENT_UNRESOLVABLE,
     ENV_TEMPLATE_WRONG_CLUSTER, SOURCE_NODE_UNROUTABLE, NETWORK_UNROUTABLE})

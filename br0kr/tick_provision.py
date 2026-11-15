@@ -3,7 +3,9 @@
 `provision_step` drives up to `provision_limit` ADMITTED leases on served nodes to ACTIVE guests through
 reconciler.provision_lease. Before each clone it re-checks the lease's stamped placement on a fresh read
 (`placement_for`, shared with the held-lease re-check so the two never diverge) and HOLDS a lease that is no longer
-placeable. `held_step` is a held lease's only way back, and its bounded exit: it auto-releases after
+placeable. It builds nothing until the daemon holds a fence census (br0kr/fence_census.py), and it holds
+(`lease_id_clash`) an admitted lease whose id a guest already carries: after a ledger rollback that guest is an
+earlier lease's. `held_step` is a held lease's only way back, and its bounded exit: it auto-releases after
 `_HELD_RELEASE_AFTER` blocked re-checks. `record_provision_outcome` folds each result into the placement lifecycle:
 a verified pair on success; a quarantined pair and an audit row on a post-clone cross-provision or network-unreachable
 detection. `preflight_step` (sweep cadence) flags multi-node clusters holding an unbound template instance. All run
@@ -26,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from br0kr import audit, cloudinit, lease, placement, reasons, reconciler
+from br0kr import audit, cloudinit, fence_census, lease, placement, reasons, reconciler
 from br0kr.driver import Driver
 
 if TYPE_CHECKING:
@@ -145,6 +147,21 @@ def hold(d: Daemon, conn: psycopg.Connection[Any], lease_id: int, reason: str, s
                     lease_id, n, reason, extra={"lease_id": lease_id, "hold_reason": reason})
 
 
+def hold_clash(d: Daemon, conn: psycopg.Connection[Any], lease_id: int, summary: TickSummary, *,
+               template_id: str | None, node_id: str | None) -> None:
+    """Hold an ADMITTED lease whose id a fenced guest already carries (`lease_id_clash`, fence_census.clashes):
+    the same bounded hold as a placement block, plus an ERROR naming the guests, since each one means the ledger
+    lost lease rows after a rollback."""
+    guests = d._fence_census.guests_of(lease_id) if d._fence_census is not None else []
+    if not d._hold_checks.get(lease_id):   # once per hold, not on every re-check
+        log.error("lease %s HELD (lease_id_clash): guest(s) %s already carry its fence — an earlier lease minted "
+                  "under the same id after a ledger rollback. Nothing is built for it; it auto-releases on the "
+                  "held-lease ceiling (docs/runbooks/ledger-ha.md).", lease_id,
+                  ", ".join(f"vmid {v} on {n}" for n, v in guests) or "(unknown)",
+                  extra={"lease_id": lease_id, "hold_reason": reasons.LEASE_ID_CLASH})
+    hold(d, conn, lease_id, reasons.LEASE_ID_CLASH, summary, template_id=template_id, node_id=node_id)
+
+
 def cross_node_routable(d: Daemon, dec: placement.PlacementDecision, lease_node_id: str) -> bool:
     """Whether THIS daemon can ACTUATE a placement decision: a CROSS-NODE pick (the resolved instance's home
     node ≠ the lease's node) also needs a driver for that SOURCE node, to POST the clone there. Routing is
@@ -170,6 +187,12 @@ def resolve_clone_target(
     lockstep plan `placement_for` computed from the stamped ask), threaded to provision_lease for the attach.
     Late-stamps a legacy NULL clone_storage_id from the pure resolution (§3.3), so a pre-0033 lease converges
     cleanly."""
+    if fence_census.clashes(d._fence_census, al.id):
+        # A guest already carries this lease's fence: an earlier lease minted under the same id after a ledger
+        # rollback owns it. Building a second guest under one fence would hand the newer lease's end the older guest;
+        # HOLD instead (bounded auto-release, safe: the sweep only destroys a guest its terminal lease recorded).
+        hold_clash(d, conn, al.id, summary, template_id=al.template_id, node_id=al.node_id)
+        return None
     dec = placement_for(d, conn, al.node_id, al.template_id, al.template_instance_id, al.storage_id,
                               al.id)   # PR-3: lease id → its stamped data disks (read only for templated)
     if not dec.ok:
@@ -290,6 +313,9 @@ def recheck_held(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary)
         d._beat()
         if d._halted():
             break
+        if fence_census.clashes(d._fence_census, hl.id):   # still clashing: stays held, toward the auto-release
+            hold_clash(d, conn, hl.id, summary, template_id=hl.template_id, node_id=hl.node_id)
+            continue
         dec = placement_for(d, conn, hl.node_id, hl.template_id, hl.template_instance_id, hl.storage_id,
                                   hl.id)   # PR-3: lease id → its stamped data disks
         if dec.ok and cross_node_routable(d, dec, hl.node_id):
@@ -333,6 +359,11 @@ def provision_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummar
     (returned OR raised) is a miss, never an abort, so the rest of the tick (the reap above all) still runs."""
     # Only poll for leases on nodes we actually serve, so an unroutable backlog
     # can't head-block the capped work-list and starve routable leases.
+    if d._fence_census is None:
+        # The census step runs before this one whenever none exists, and a failed census fails the tick; so this is
+        # a step run on its own (a test, a narrowed table). Build nothing without one (fence_census.py).
+        log.warning("provision skipped: no fence census yet this leadership")
+        return
     admitted = lease.list_admitted(conn, limit=d.provision_limit, node_ids=d.registry.node_ids())
     summary.admitted_seen = len(admitted)
     for al in admitted:

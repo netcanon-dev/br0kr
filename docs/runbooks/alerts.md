@@ -20,6 +20,7 @@ at the section below that carries its name. The rules are checked and unit-teste
 | [`Br0krLedgerSlotLost`](#br0krledgerslotlost) | critical | a standby's WAL was recycled |
 | [`Br0krLedgerStandbyStalled`](#br0krledgerstandbystalled) | warning | a standby is more than 1 GiB behind for 15 minutes |
 | [`Br0krLedgerSyncStandbyLost`](#br0krledgersyncstandbylost) | critical | commits wait for a synchronous standby and none has been connected for a minute |
+| [`Br0krLedgerBehindFleet`](#br0krledgerbehindfleet) | critical | guests carry lease ids the ledger has no row for: the sweep is holding, or spared a lease id clash |
 
 The thresholds are starting points. Tune them to your queue budgets and WAL rate in your copy of the file.
 
@@ -56,6 +57,9 @@ read it repeats at most every 10 s, so they can be that much behind the ledger.
 | `br0kr_pve_request_seconds_{sum,count}{op,outcome}` | daemon, operator gateway | PVE API calls by HTTP method; `outcome` is `ok`, `denied`, `http_error`, `bad_reply`, `timeout` or `unreachable`; a GET retried after a 502/503/504 counts once, by its final answer |
 | `br0kr_release_failed_total` | daemon | leases the reaper gave up on (terminal `RELEASE_FAILED`) |
 | `br0kr_placement_released_total` | daemon | held leases released after running out of placement re-checks |
+| `br0kr_last_sweep_hold_on` | daemon | 1 while the sweep's rollback hold (the `sweep_hold_absent` setting) is on |
+| `br0kr_sweep_clash_spared_total` | daemon | guests the sweep spared because their terminal lease recorded a different guest |
+| `br0kr_sweep_migration_spared_total` | daemon | terminal-lease guests the sweep spared for a migration: one in flight, or a copy on its target it never confirmed |
 | `br0kr_last_progress_age_seconds` | daemon | seconds since the loop last stamped progress, on every role |
 
 `br0kr_admit_total` is counted at the MCP tool boundary, so it holds what the agent got: the admission verdict, a
@@ -280,6 +284,26 @@ ledger (the bundled pair) never fires this, and a standby restart of a few secon
 **Fix.** Bring the synchronous standby back. To unblock writes first, accept asynchronous replication for the
 duration: on the primary, `ALTER SYSTEM SET synchronous_standby_names = ''; SELECT pg_reload_conf();`. Set it back
 once the standby is streaming again.
+
+### Br0krLedgerBehindFleet
+
+**Means.** The ledger lost lease rows that guests in the fleet still carry: it was restored from a dump, a standby was
+promoted, or its VM failed over onto a replica that was behind. The daemon's fence census found a guest tagged
+`br0kr-lease-<id>` with no lease row (br0kr never deletes one), or one whose lease row never recorded a guest (the id
+was minted again). It set the `sweep_hold_absent` setting, so the orphan sweep destroys no guest without a lease row,
+and moved the lease id sequence past every tag, so no new lease reuses a lost id. The alert fires until an operator
+clears that setting; it comes back only for an id the hold was not already raised for (`sweep_hold_ids`), whatever
+its value. It also fires for an hour after the sweep spares a guest as a **lease id clash**: a newer lease reused its
+id before the floor moved, and nothing but an operator will remove it.
+
+**Check.** The daemon log: `LEDGER BEHIND THE FLEET` (CRITICAL, with the ids), then on each sweep `SPARING N ABSENT
+fenced guest(s)` and one line per spared guest. A clash reads `SPARED guest vmid V fenced to lease L — that lease
+(STATE) recorded vmid W`. The audit trail has `sweep_hold_absent_set` and `lease_id_floor_raised`, actor
+`fence_census`.
+
+**Fix.** Follow [ledger-ha.md](ledger-ha.md#after-a-restore-or-a-failover-the-ledger-is-behind-the-fleet): find out
+who still uses each spared guest, then clear `sweep_hold_absent` in the dashboard's Settings after a dry-run sweep, and
+remove a clash-spared guest by hand once its owner has moved off it.
 
 ## See also
 

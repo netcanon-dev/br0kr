@@ -67,6 +67,7 @@ import psycopg
 from br0kr import (
     audit,
     db,
+    fence_census,
     leader,
     lease,
     metrics_snapshot,
@@ -187,6 +188,7 @@ class Daemon:
         self.provision_stuck_seconds = provision_stuck_seconds   # 0048: the reaper's PROVISIONING budget; 0 = off
         self.sweep_every = sweep_every
         self.sweep_dry_run = sweep_dry_run
+        self.sweep_hold_absent = False   # 0053: set by the fence census on a rollback, cleared by an operator
         self.provision_limit = provision_limit
         self.promote_limit = promote_limit
         self.vm_disk = vm_disk
@@ -215,6 +217,9 @@ class Daemon:
         # the backoff of a RECLAIMING build or replication whose teardown keeps failing here (tick_builds,
         # tick_copies; reclaim_beat.RetryBackoff), so a stuck guest cannot take the tick thread every retry.
         self._hold_checks: dict[int, int] = {}
+        # The fleet's fenced guests (fence_census), taken by the census step before the first provision of each
+        # leadership and refreshed on the sweep cadence; None until then, so nothing is built before one exists.
+        self._fence_census: fence_census.FenceCensus | None = None
         self._build_backoff = reclaim_beat.RetryBackoff()
         self._repl_backoff = reclaim_beat.RetryBackoff()
         self._last_discovery_at: float | None = None
@@ -320,6 +325,9 @@ class Daemon:
         log.info("leader: entering reconcile loop (interval=%ss, provision_limit=%d, sweep every %d ticks)",
                  self.interval, self.provision_limit, self.sweep_every)
         self._consecutive_tick_failures = 0   # fresh leadership — a prior streak (ours or an ex-leader's) is void
+        # Fresh leadership, fresh census: another leader may have built or lost guests meanwhile, and the ledger may be
+        # a promoted replica. The first tick takes one before it provisions anything (tick_steps census row).
+        self._fence_census = None
         # Say so NOW, not after the first tick: that tick can run for many minutes (clones, a template download), and
         # until it ends /metrics would read br0kr_leader 0 on every instance (a false Br0krNoLeader). The tick-age
         # gauge counts from taking the lock, so a first tick that never completes still shows (review OPS-03).

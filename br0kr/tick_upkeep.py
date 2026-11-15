@@ -1,9 +1,11 @@
-"""tick_upkeep.py — housekeeping steps: reap, guest-IP discovery, orphan sweep, audit retention, discovery report.
+"""tick_upkeep.py — housekeeping steps: fence census, reap, guest-IP discovery, orphan sweep, audit retention,
+discovery report.
 
-All run on the autocommit work connection. The reap frees capacity before the promoter runs; the sweep (every
-`sweep_every` ticks) is the teardown backstop; audit retention (0024) and the reachability-discovery drift report
-(0043) are opt-in, coarse cadences, both fail-safe so neither can wedge the pass. The discovery report writes
-nothing. See tick_steps.py.
+All run on the autocommit work connection. The fence census (first tick of a leadership, then the sweep cadence)
+runs before any provision and keeps the lease id sequence ahead of the fleet (br0kr/fence_census.py). The reap
+frees capacity before the promoter runs; the sweep (every `sweep_every` ticks) is the teardown backstop; audit
+retention (0024) and the reachability-discovery drift report (0043) are opt-in, coarse cadences, both fail-safe so
+neither can wedge the pass. The discovery report writes nothing. See tick_steps.py.
 
 State: the discovery report's lives on the daemon. `_last_discovery_at` (monotonic, None = never run) is the
 wall-clock cadence gate, advanced when the report fires, so a slow or failing run backs off to the full interval.
@@ -20,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from br0kr import audit, lease, placement, reaper, reconciler, sweeper
+from br0kr import audit, fence_census, lease, placement, reaper, reconciler, sweeper
 
 if TYPE_CHECKING:
     from br0kr.daemon import Daemon
@@ -179,12 +181,41 @@ def ip_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> N
     summary.ip_discovered = discover_ips(d, conn)
 
 
+def census_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:
+    """Before the first provision of a leadership, and on every sweep tick: list every served node's fenced guests
+    (fence_census.take), judge them against the ledger, and act (fence_census.secure): on a fence id with no lease
+    row, set the `sweep_hold_absent` knob; then move the lease id sequence past the highest fence id. The hold's
+    state comes from the ledger, so the daemon's copy of the knob is corrected here even when the settings step
+    keeps failing. The census is kept on the daemon for the provision-time clash check and this tick's sweep. A
+    ledger error clears it and raises, failing the tick: no tick provisions without a census, and the next tick
+    takes one again first."""
+    try:
+        census = fence_census.take(d.registry.items(), on_progress=d._beat, should_stop=d._halted)
+        verdict = fence_census.read_verdict(conn, census)
+        secured = fence_census.secure(conn, verdict)
+    except Exception:
+        d._fence_census = None
+        raise
+    d.sweep_hold_absent = secured.hold_on   # this tick's sweep must already see it; the settings step agrees
+    if secured.hold_set:
+        summary.sweep_hold_set += 1
+    if secured.floor_raised is not None:
+        summary.lease_id_floor_raised += 1
+    summary.sweep_hold_on = int(secured.hold_on)
+    d._fence_census = census
+
+
 def sweep_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:
     """Every `sweep_every` ticks: the teardown backstop (sweeper.orphan_sweep_all) reconciles each served node's
-    real guests against the ledger and destroys orphans (`sweep_dry_run` only logs them)."""
+    real guests against the ledger and destroys orphans (`sweep_dry_run` only logs them). The rollback signal is
+    judged over this tick's fleet census, and `sweep_hold_absent` spares every guest without a lease row."""
     per_node = sweeper.orphan_sweep_all(conn, d.registry.items(), dry_run=d.sweep_dry_run,
+                                        hold_absent=d.sweep_hold_absent, census=d._fence_census,
+                                        cluster_of=d.registry.cluster_of,
                                         on_progress=d._beat, should_stop=d._halted)
     summary.swept = sum(s.destroyed for s in per_node.values())
+    summary.sweep_clash_spared = sum(s.clash_spared for s in per_node.values())
+    summary.sweep_migration_spared = sum(s.migration_spared for s in per_node.values())
 
 
 def audit_prune_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:

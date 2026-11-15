@@ -17,6 +17,11 @@ resolve in this repository.
 
 ## [Unreleased]
 
+### Fixed
+- **A ledger rollback can no longer destroy guests or reuse their lease ids.** A guest naming a lost lease id holds
+  the sweep (`sweep_hold_absent`, 0053) until an operator clears it, and new ids start above every listed guest's.
+  A copy a migration left on its target is recorded (0054), so the sweep still reclaims it.
+
 ## [0.2.1] — 2026-11-13
 
 A patch release with one fix: a cleanup that fails part-way is retried in minutes instead of hours, and backs off

@@ -39,6 +39,17 @@ Deterministic checks:
                        it unpinned (pin_refused_on_replay).
   pinned_migration     0049 is idempotent; defaults are unpinned and max_pinned 0; a negative bound is
                        refused by the CHECK.
+  owners_of_batch      lease.owners_of answers state, node and recorded guest for a batch in one query; an id
+                       with no row is absent; `recorded` matches only the vmid the row holds.
+  owners_of_migrations owners_of reads each lease's migrations (0054): a copy an aborted saga confirmed
+                       (dest_vmid) counts as recorded on its target node, a live saga marks the lease migrating,
+                       and every target node is named.
+  raise_id_floor       lease.raise_id_floor moves the id sequence forward past a floor, never back, on a
+                       transaction and an autocommit connection.
+  id_floor_lock        with another session's INSERT open, a floor the sequence is already past returns at once
+                       (no lock); a floor above it waits for that INSERT to commit and then lands above its id; an
+                       INSERT open past the lock_timeout makes the floor give up and change nothing; a floor the
+                       sequence passed while it waited re-checks under the lock and never moves it back.
 
 Concurrent invariants (barrier-synchronized, thousands of rounds):
   renew_vs_expire      1 heartbeat vs N reapers on one due lease → renewed XOR expired.
@@ -69,7 +80,7 @@ import psycopg
 
 # Import the modules under test from the repo root (scripts/ is a sibling of br0kr/).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from br0kr import gateway, lease, migrate, pin, reaper  # noqa: E402
+from br0kr import gateway, lease, migrate, migration, pin, reaper  # noqa: E402
 
 CONN = os.environ["PGCONN"]
 NODE = "n1"
@@ -748,17 +759,191 @@ def check_pinned_lease_migration() -> bool:
     return ok
 
 
-def check_states_of_batch() -> bool:
-    """lease.states_of answers {id: state} for a batch in one query; an id with no row is absent from the answer."""
+def check_owners_of_batch() -> bool:
+    """lease.owners_of answers {id: LeaseOwner(state, cluster_id, vmid, node_id)} for a batch in one query; an id with
+    no row is absent, and `recorded` is True only for the vmid the lease row holds (on its own node, whatever that
+    node's cluster is now). Guards the sweep's terminal branch: it destroys a terminal lease's guest only when that
+    lease recorded it, so a guest that merely shares the lease id (minted again after a ledger rollback) is spared."""
     reset()
-    a = insert_lease("ACTIVE", expires_offset_s=600)
+    a = insert_lease("ACTIVE", expires_offset_s=600, vmid=1501)
     b = insert_lease("RELEASED", expires_offset_s=-1)
     missing = b + 1000
     with connect() as c:
-        got = lease.states_of(c, [a, b, missing, a])
-        empty = lease.states_of(c, [])
-    ok = got == {a: "ACTIVE", b: "RELEASED"} and empty == {}
-    print(f"[states_of_batch]      {got} (missing id {missing} absent)  | {'PASS' if ok else 'FAIL'}")
+        got = lease.owners_of(c, [a, b, missing, a])
+        empty = lease.owners_of(c, [])
+        cluster = c.execute("SELECT cluster_id FROM node WHERE id = %s", (NODE,)).fetchone()[0]
+    states = {k: v.state for k, v in got.items()}
+    ok = (states == {a: "ACTIVE", b: "RELEASED"} and empty == {}
+          and got[a].vmid == 1501 and got[a].cluster_id == cluster and got[a].node_id == NODE
+          and got[a].recorded(1501, cluster, NODE) and not got[a].recorded(1502, cluster, NODE)
+          and got[a].recorded(1501, "another-cluster", NODE)   # its own node, whatever the node's cluster now
+          and not got[b].recorded(1501, cluster, NODE))     # a lease with no vmid recorded no guest
+    print(f"[owners_of_batch]      states={states} a.vmid={got[a].vmid} (missing id {missing} absent)  "
+          f"| {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_owners_of_migrations() -> bool:
+    """lease.owners_of reads each lease's migrations in its second query (review M1, 0054). Lease b ended while its
+    migration to n9 was confirming the copy, so the saga aborts (migration._abort, on this real row) with that
+    copy's vmid on the row (dest_vmid 2777): b still records its source guest, and also the copy on n9 at 2777 (not
+    2777 on another node). Lease c has a migration still MIGRATING: c is `migrating`. Lease a's only migration
+    finished (DONE), which names no target: the lease itself records the copy. Guards the abort's UPDATE (the COALESCE'd parameter) on real Postgres, the sweep sparing every
+    confirmed copy as a clash (and the alert firing for good), and reading a live saga's landing copy as a clash
+    before the saga settles."""
+    reset()
+    with psycopg.connect(CONN, autocommit=True) as c:
+        c.execute("INSERT INTO cluster(id,pve_host,token_id,token_secret_env) "
+                  "VALUES ('cl9','10.0.0.9','root@pam!t','S') ON CONFLICT (id) DO NOTHING")
+        c.execute("INSERT INTO node(id,cpu_total,mem_total_mb,cluster_id) VALUES ('n9',%s,%s,'cl9')",
+                  (NODE_CPU, NODE_MEM))
+    a = insert_lease("ACTIVE", expires_offset_s=600, vmid=1601)
+    b = insert_lease("RELEASED", expires_offset_s=-1, vmid=1602)
+    cc = insert_lease("ACTIVE", expires_offset_s=600, vmid=1603)
+    with psycopg.connect(CONN, autocommit=True) as c:
+        mid = c.execute("INSERT INTO migration(idem_key, lease_id, source_node, target_node, state) "
+                        "VALUES ('m-b', %s, %s, 'n9', 'MIGRATING') RETURNING id", (b, NODE)).fetchone()[0]
+        c.execute("INSERT INTO migration(idem_key, lease_id, source_node, target_node, state) "
+                  "VALUES ('m-c', %s, %s, 'n9', 'MIGRATING')", (cc, NODE))
+        c.execute("INSERT INTO migration(idem_key, lease_id, source_node, target_node, state) "
+                  "VALUES ('m-a', %s, %s, 'n9', 'DONE')", (a, NODE))
+    with connect() as c:
+        aborted = migration._abort(c, migration._require(migration._refresh(c, mid), mid),
+                                   "lease_gone_after_migrate", dest_vmid=2777)
+        again = migration._set_state(c, mid, "ABORTED", reason="again")   # terminal: a no-op, keeps dest_vmid
+        stored = c.execute("SELECT dest_vmid, reason FROM migration WHERE id = %s", (mid,)).fetchone()
+        c.commit()
+        got = lease.owners_of(c, [a, b, cc])
+        cluster = c.execute("SELECT cluster_id FROM node WHERE id = %s", (NODE,)).fetchone()[0]
+    ob, oc, oa = got[b], got[cc], got[a]
+    ok = (aborted.state == "ABORTED" and again.reason == "lease_gone_after_migrate"
+          and tuple(stored) == (2777, "lease_gone_after_migrate")
+          and ob.state == "RELEASED" and ob.moved == (("n9", 2777),) and not ob.migrating
+          and ob.migration_targets == {"n9"}
+          and ob.recorded(2777, "cl9", "n9") and not ob.recorded(2777, "cl9", "n8")
+          and ob.recorded(1602, cluster, NODE)
+          and oc.migrating and oc.moved == () and oc.migration_targets == {"n9"}
+          and not oa.migrating and oa.moved == () and oa.migration_targets == frozenset())
+    print(f"[owners_of_migrations] stored={tuple(stored)} b.moved={ob.moved} b.migrating={ob.migrating} c.migrating={oc.migrating} "
+          f"targets b={sorted(ob.migration_targets)} a={sorted(oa.migration_targets)}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_raise_id_floor_forward_only() -> bool:
+    """lease.raise_id_floor moves the lease id sequence past a floor and never back: a floor above the current
+    position returns the floor and the next insert gets floor + 1; a floor at or below the position is a no-op
+    (None) and the next insert continues from where it was. Run once on a transaction connection and once on an
+    autocommit one, because the daemon holds the second kind. Guards the fence census (fence_census.secure) re-minting
+    ids a guest already carries after a ledger rollback, and a lower floor ever winding the sequence back."""
+    reset()
+    first = insert_lease("RELEASED", expires_offset_s=-1)
+    floor = first + 50
+    with connect() as c:
+        raised = lease.raise_id_floor(c, floor)
+        again = lease.raise_id_floor(c, floor)          # at the position now: no-op
+        lower = lease.raise_id_floor(c, first)          # below it: no-op
+    after_raise = insert_lease("RELEASED", expires_offset_s=-1)
+    with psycopg.connect(CONN, autocommit=True) as c:
+        noop_auto = lease.raise_id_floor(c, first)      # autocommit connection, below the position
+        raised_auto = lease.raise_id_floor(c, after_raise + 10)
+    after_auto = insert_lease("RELEASED", expires_offset_s=-1)
+    ok = (raised == floor and again is None and lower is None and after_raise == floor + 1
+          and noop_auto is None and raised_auto == after_raise + 10 and after_auto == after_raise + 11)
+    print(f"[raise_id_floor]       first={first} raised={raised} again={again} lower={lower} next={after_raise} "
+          f"autocommit noop={noop_auto} raised={raised_auto} next={after_auto}  | {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def _open_insert() -> tuple[psycopg.Connection, int]:
+    """Start an INSERT into lease on a fresh connection and leave its transaction open: the session holds ROW
+    EXCLUSIVE on lease and has drawn its id. The caller commits or rolls back and closes it."""
+    c = psycopg.connect(CONN)
+    lid = c.execute(
+        "INSERT INTO lease(node_id, cluster_id, req_cpu, req_mem_mb, state, ttl_seconds, expires_at) "
+        "VALUES (%s,(SELECT cluster_id FROM node WHERE id = %s),%s,%s,'RELEASED',900,now()) RETURNING id",
+        (NODE, NODE, REQ_CPU, REQ_MEM)).fetchone()[0]
+    return c, int(lid)
+
+
+def check_raise_id_floor_lock() -> bool:
+    """The lock that keeps raise_id_floor race-free, on two real sessions (review T4). Session A holds an INSERT
+    open (it drew id N and holds ROW EXCLUSIVE on lease).
+    (1) A floor at N, which the sequence is already at, returns None at once: the healthy path takes no lock, so a
+        census on a busy ledger never queues lease writes (review P1).
+    (2) A floor of N+20 waits for A's lock (SHARE ROW EXCLUSIVE conflicts with ROW EXCLUSIVE); after A commits it
+        lands, and the next insert gets N+21. Guards a setval that could move the sequence BACK past an id a
+        concurrent insert had already drawn.
+    (3) With an INSERT held open past the 5 s lock_timeout, the floor raises LockNotAvailable and the sequence is
+        unchanged (the next insert continues from the open one's id).
+    (4) The re-check under the lock: while a floor of N+2 waits behind A, session C draws ids past it (a bare
+        nextval needs no table lock). Once A commits, the floor finds the sequence already past N+2 and returns None
+        without touching it, so the next insert continues above C's ids. Guards a setval that, read before the lock,
+        would wind the sequence back below ids already handed out."""
+    import time
+    reset()
+    a, n = _open_insert()
+    try:
+        t0 = time.monotonic()
+        with psycopg.connect(CONN, autocommit=True) as b:
+            healthy = lease.raise_id_floor(b, n)
+        healthy_s = time.monotonic() - t0
+
+        out: dict[str, object] = {}
+
+        def _raise() -> None:
+            with psycopg.connect(CONN, autocommit=True) as b2:
+                out["floor"] = lease.raise_id_floor(b2, n + 20)
+
+        th = threading.Thread(target=_raise)
+        th.start()
+        th.join(1.5)
+        waited = th.is_alive()   # still blocked behind A's ROW EXCLUSIVE
+        a.commit()
+        th.join(10)
+    finally:
+        a.close()
+    after_wait = insert_lease("RELEASED", expires_offset_s=-1)
+
+    a2, m = _open_insert()
+    timed_out = False
+    try:
+        with psycopg.connect(CONN, autocommit=True) as b:
+            try:
+                lease.raise_id_floor(b, m + 100)
+            except psycopg.errors.LockNotAvailable:
+                timed_out = True
+        a2.commit()
+    finally:
+        a2.close()
+    after_timeout = insert_lease("RELEASED", expires_offset_s=-1)
+
+    a3, k = _open_insert()
+    late: dict[str, object] = {}
+    try:
+        def _raise_late() -> None:
+            with psycopg.connect(CONN, autocommit=True) as b3:
+                late["floor"] = lease.raise_id_floor(b3, k + 2)
+
+        th = threading.Thread(target=_raise_late)
+        th.start()
+        th.join(1.5)
+        late_waited = th.is_alive()
+        with psycopg.connect(CONN, autocommit=True) as cs:
+            seq = lease._id_sequence(cs)
+            drawn = [int(cs.execute("SELECT nextval(%s::regclass)", (seq,)).fetchone()[0]) for _ in range(5)]
+        a3.commit()
+        th.join(10)
+    finally:
+        a3.close()
+    after_late = insert_lease("RELEASED", expires_offset_s=-1)
+    ok = (healthy is None and healthy_s < 1.0 and waited and out.get("floor") == n + 20
+          and after_wait == n + 21 and timed_out and after_timeout == m + 1
+          and late_waited and "floor" in late and late["floor"] is None and drawn[-1] >= k + 2
+          and after_late == drawn[-1] + 1)
+    print(f"[id_floor_lock]        healthy={healthy} in {healthy_s:.2f}s; waited={waited} floor={out.get('floor')} "
+          f"next={after_wait} (want {n + 21}); timeout={timed_out} next={after_timeout} (want {m + 1}); "
+          f"re-check waited={late_waited} floor={late.get('floor')} drawn={drawn} next={after_late}  "
+          f"| {'PASS' if ok else 'FAIL'}")
     return ok
 
 
@@ -788,7 +973,10 @@ def main() -> int:
         check_pin_race_for_the_last_slot,
         check_pinned_request_end_to_end,
         check_pinned_lease_migration,
-        check_states_of_batch,
+        check_owners_of_batch,
+        check_owners_of_migrations,
+        check_raise_id_floor_forward_only,
+        check_raise_id_floor_lock,
         check_live_lease_has_vmid,
     ]
     results = [fn() for fn in checks]

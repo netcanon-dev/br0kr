@@ -94,7 +94,7 @@ class _Saga:
                  migrate_upid=None, facts_overrides=None):
         self.row = {"id": 1, "idem_key": "mig-k", "lease_id": self.LEASE_ID, "source_node": "A",
                     "target_node": "B", "reservation_id": reservation_id, "state": state, "reason": None,
-                    "migrate_upid": migrate_upid}
+                    "migrate_upid": migrate_upid, "dest_vmid": None}
         base = {"lease_state": lease_state, "lease_vmid": lease_vmid, "lease_node": lease_node,
                 "req_cpu": 2.0, "req_mem_mb": 2048, "storage_id": None, "source_remote": "clA",
                 "target_remote": "clB", "target_pve_node": "pnB", "reservation_id": reservation_id,
@@ -138,9 +138,11 @@ class _Saga:
         self.facts = migration._Facts(**{**self.facts.__dict__, "reservation_id": rid})
         return True
 
-    def _do_set_state(self, conn, mid, state, reason=None):
+    def _do_set_state(self, conn, mid, state, reason=None, dest_vmid=None):
         self.calls["set_state"].append(state)
         self.row.update(state=state, reason=reason)
+        if dest_vmid is not None:   # the real UPDATE keeps the row's value when None (COALESCE)
+            self.row["dest_vmid"] = dest_vmid
         return self.migration()
 
     def _do_set_migrate_upid(self, conn, mid, upid):
@@ -473,17 +475,21 @@ def test_actuate_aborts_only_on_a_confirmed_task_failure(monkeypatch):
     out = saga.run(pdm)
     assert out.state == "ABORTED" and out.reason == "migrate_task:task_failed"
     assert pdm.start_calls == [] and saga.calls["settle"] == 1 and saga.calls["flip"] == 0
+    assert saga.row["dest_vmid"] is None   # no copy was confirmed, so none is recorded for the sweep
 
 
 def test_commit_aborts_when_the_lease_left_the_source_first(monkeypatch):
     """If the flip CAS finds the lease no longer on the source ('lost' — it released/expired during the
-    move), the saga ABORTS `lease_gone_after_migrate` and settles; the moved guest is left for the
-    sweep. Guards clobbering a lease that is no longer ours to move (and double-counting)."""
+    move), the saga ABORTS `lease_gone_after_migrate` and settles, recording the moved guest's vmid on the row
+    (dest_vmid, 0054) so the sweep reclaims it: the lease still records the source guest, and without it the copy
+    was spared as a lease id clash for good. Guards clobbering a lease that is no longer ours to move (and
+    double-counting), and review M1."""
     saga = _Saga(monkeypatch, state="RESERVED", reservation_id=77, flip="lost")
     pdm = _FakePdm(migrate_rc="migrated", land_on=("clB", 251))
     out = saga.run(pdm)
     assert out.state == "ABORTED" and out.reason == "lease_gone_after_migrate"
     assert saga.calls["flip"] == 1 and saga.calls["settle"] == 1
+    assert saga.row["dest_vmid"] == 251
 
 
 def test_commit_aborts_when_the_target_vmid_is_already_taken(monkeypatch):
@@ -491,11 +497,13 @@ def test_commit_aborts_when_the_target_vmid_is_already_taken(monkeypatch):
     target cluster, so the per-cluster vmid index (migration 0004) refuses the double-stamp — _commit
     ABORTS 'target_vmid_taken' and settles the reservation rather than flipping onto a contested vmid.
     Guards the index-collision the vmid backstop newly exposes on the migration flip: it must abort
-    cleanly (the real _flip_lease rolls the poisoned txn back), never wedge the saga connection."""
+    cleanly (the real _flip_lease rolls the poisoned txn back), never wedge the saga connection. The moved
+    guest's vmid is recorded (dest_vmid, 0054) for the sweep once the lease ends."""
     saga = _Saga(monkeypatch, state="RESERVED", reservation_id=77, flip="target_taken")
     out = saga.run(_FakePdm(migrate_rc="migrated", land_on=("clB", 251)))
     assert out.state == "ABORTED" and out.reason == "target_vmid_taken"
     assert saga.calls["flip"] == 1 and saga.calls["settle"] == 1   # settled, lease untouched
+    assert saga.row["dest_vmid"] == 251
 
 
 def test_actuate_stays_migrating_to_retry_a_still_running_move(monkeypatch):

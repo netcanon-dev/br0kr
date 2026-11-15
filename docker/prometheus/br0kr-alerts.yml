@@ -166,3 +166,16 @@ groups:
         annotations:
           summary: The br0kr ledger requires a synchronous standby and has none, so commits wait.
           runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgersyncstandbylost
+
+      # The daemon's fence census found guests naming lease ids the ledger has no row for (or whose row recorded no
+      # guest: the id was minted again): the ledger is BEHIND the fleet (a restored dump, a promoted standby, a VM failover onto a stale replica). It
+      # set sweep_hold_absent, so the sweep destroys none of them; this fires until an operator has decided about them
+      # and cleared it. A guest the sweep spared as a lease id clash keeps it firing too (an hour per sweep that spares
+      # one): its lease recorded another guest, so nothing but an operator will remove it.
+      - alert: Br0krLedgerBehindFleet
+        expr: max(br0kr_last_sweep_hold_on) == 1 or sum(increase(br0kr_sweep_clash_spared_total[1h])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Guests carry br0kr lease ids its ledger has lost; the orphan sweep spares them until an operator decides.
+          runbook_url: https://github.com/netcanon-dev/br0kr/blob/main/docs/runbooks/alerts.md#br0krledgerbehindfleet

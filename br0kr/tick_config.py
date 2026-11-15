@@ -124,8 +124,10 @@ def reload_cadence_due(d: Daemon) -> bool:
 
 
 def settings_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:
-    """First: hot-apply the operator_setting knobs and consume the cross-process reload flag (`apply_settings`)."""
+    """First: hot-apply the operator_setting knobs and consume the cross-process reload flag (`apply_settings`).
+    Publishes whether the sweep's rollback hold is on (`sweep_hold_on`), every tick, for its alert."""
     apply_settings(d, conn)
+    summary.sweep_hold_on = int(bool(d.sweep_hold_absent))
 
 
 def reload_step(d: Daemon, conn: psycopg.Connection[Any], summary: TickSummary) -> None:

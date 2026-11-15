@@ -261,14 +261,16 @@ def _link_reservation(conn: psycopg.Connection[Any], mig_id: int, reservation_id
     return row is not None
 
 
-def _set_state(conn: psycopg.Connection[Any], mig_id: int, state: str, reason: str | None = None) -> Migration:
+def _set_state(conn: psycopg.Connection[Any], mig_id: int, state: str, reason: str | None = None,
+               dest_vmid: int | None = None) -> Migration:
     """Move the saga to `state` (with an optional `reason`) and return the refreshed row. Guarded so
     it never re-terminates a terminal saga: the WHERE excludes DONE/ABORTED, so a second call after a
-    terminal transition is a no-op that simply re-reads the row."""
+    terminal transition is a no-op that simply re-reads the row. `dest_vmid` (0054) records a copy the saga
+    confirmed on the target but leaves behind; None keeps what the row has."""
     conn.execute(
-        "UPDATE migration SET state = %s, reason = %s, updated_at = now() "
+        "UPDATE migration SET state = %s, reason = %s, dest_vmid = COALESCE(%s, dest_vmid), updated_at = now() "
         f"WHERE id = %s AND state NOT IN {_TERMINAL_SQL}",
-        (state, reason, mig_id),
+        (state, reason, dest_vmid, mig_id),
     )
     conn.commit()
     return _require(_refresh(conn, mig_id), mig_id)
@@ -281,7 +283,7 @@ def _flip_lease(conn: psycopg.Connection[Any], lease_id: int, source_node: str,
       • 'flipped'      — this call moved the lease onto the target (debit moves source→target).
       • 'already'      — the lease is already on the target (an idempotent resume) — proceed to settle.
       • 'lost'         — the lease left the source some other way (released/expired/gone); do NOT flip
-                         (the moved guest, if any, becomes an orphan reclaimed by the sweep).
+                         (the abort records the moved guest's vmid, 0054, and the sweep reclaims it).
       • 'target_taken' — the target cluster already holds a LIVE lease on this dest vmid (the per-cluster
                          vmid-uniqueness index refuses the double-stamp). Should not happen (PDM assigns a
                          fresh dest vmid); aborted conservatively rather than wedging the connection.
@@ -687,10 +689,12 @@ def _actuate(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm,
     The reservation heartbeat is load-bearing: if it returns None the reservation has lapsed (TTL-
     reaped during a long daemon outage), so the target slot is no longer guaranteed — we ABORT rather
     than flip the lease onto a target that may have filled. An un-moved guest leaves nothing behind. A
-    moved orphan is reclaimed by the sweep ONLY once its lease is terminal — a guest stranded on a target
-    while its lease is still LIVE (e.g. a reservation_lost/lease-terminal abort that raced a landing copy)
-    is spared as live-fenced, the known cross-cluster-orphan residual (SECURITY.md; a `pdm.fenced_inventory`
-    sweep would close it)."""
+    copy the saga CONFIRMED on the target but could not move the lease onto (`_commit`'s lost / target_taken) is
+    recorded on the row (`dest_vmid`, 0054), so the sweep reclaims it once the lease is terminal. A copy that was
+    never confirmed (e.g. a reservation_lost abort that raced a landing copy) is spared as live-fenced while its
+    lease is LIVE, and once the lease is terminal it is counted `migration_spared` (warned, not the rollback alert):
+    the lease recorded the SOURCE guest, not this one. That is the known cross-cluster-orphan residual (SECURITY.md;
+    an operator removes it, and a `pdm.fenced_inventory` sweep would close it)."""
     # Re-read the row FIRST (review S07/F1): the `list_pending` snapshot can be MINUTES stale — an earlier
     # migration in the same batch can block in `wait` for the whole poll budget, and a two-leader overlap can
     # have advanced this row — so the state / migrate_upid the resume decision keys on MUST be fresh, else a
@@ -820,8 +824,9 @@ def _actuate(conn: psycopg.Connection[Any], mig: Migration, driver: pdm.Pdm,
 def _commit(conn: psycopg.Connection[Any], mig: Migration, facts: _Facts, dest: pdm.InventoryItem) -> Migration:
     """The guest is confirmed on the target (`dest`, with its real destination vmid). Flip the lease
     onto the target (its debit moves source→target), settle the reservation, and finish DONE. If the
-    lease left the source some other way (terminal), abort and let the sweep reclaim the moved guest —
-    never clobber a lease that is no longer ours to move."""
+    lease left the source some other way (terminal), or the target vmid is taken, abort with the moved guest's
+    vmid on the row (`dest_vmid`, so the sweep reclaims it once the lease ends) — never clobber a lease that is
+    no longer ours to move."""
     # Re-read the saga just before the flip (review S07/F3): the confirming `wait` can block for ~300s, in
     # which an overlapping leader may have ABORTED this migration (settling the reservation). `_flip_lease`
     # guards on LEASE liveness, not saga state, so without this a stale commit would move the lease's debit
@@ -836,30 +841,31 @@ def _commit(conn: psycopg.Connection[Any], mig: Migration, facts: _Facts, dest: 
     outcome = _flip_lease(conn, mig.lease_id, mig.source_node, mig.target_node, dest.vmid, dest.remote)
     if outcome == "target_taken":
         log.error("migration %s: dest vmid %s on %s is already held by another live lease — aborting "
-                  "(should not happen; PDM assigns a fresh dest vmid). The moved guest is left for the "
-                  "sweep / an operator", mig.id, dest.vmid, mig.target_node,
-                  extra={"lease_id": mig.lease_id, "vmid": dest.vmid})
-        return _abort(conn, mig, "target_vmid_taken")
+                  "(should not happen; PDM assigns a fresh dest vmid). The moved guest is recorded on the "
+                  "migration row and left for an operator while its lease lives, for the sweep once it ends",
+                  mig.id, dest.vmid, mig.target_node, extra={"lease_id": mig.lease_id, "vmid": dest.vmid})
+        return _abort(conn, mig, "target_vmid_taken", dest_vmid=dest.vmid)
     if outcome == "lost":
-        log.error("migration %s: lease %s left the source before commit; moved guest %s@%s is now an "
-                  "orphan for the sweep", mig.id, mig.lease_id, dest.vmid, facts.target_remote,
+        log.error("migration %s: lease %s left the source before commit; moved guest %s@%s is recorded on the "
+                  "migration row for the sweep to reclaim", mig.id, mig.lease_id, dest.vmid, facts.target_remote,
                   extra={"lease_id": mig.lease_id, "vmid": dest.vmid})
-        return _abort(conn, mig, "lease_gone_after_migrate")
+        return _abort(conn, mig, "lease_gone_after_migrate", dest_vmid=dest.vmid)
     _settle_by_key(conn, mig.id)
     log.info("migration %s DONE: lease %s now on %s (vmid %s); reservation settled", mig.id,
              mig.lease_id, mig.target_node, dest.vmid, extra={"lease_id": mig.lease_id, "vmid": dest.vmid})
     return _set_state(conn, mig.id, "DONE", reason=reasons.MIGRATED)
 
 
-def _abort(conn: psycopg.Connection[Any], mig: Migration, reason: str) -> Migration:
+def _abort(conn: psycopg.Connection[Any], mig: Migration, reason: str, *, dest_vmid: int | None = None) -> Migration:
     """Terminate the saga ABORTED with `reason`. ALWAYS settles the reservation BY KEY (idempotent) —
     `admit()` commits the reservation before its id is linked, so settling by the linked id could leak
     a committed-but-unlinked reservation; the deterministic key never misses it. The lease is never
     touched by an abort (it stays where it was, untouched), so a rejected/failed migration is a clean
-    no-op for the lease holder."""
+    no-op for the lease holder. `dest_vmid`: a copy confirmed on the target and left there (0054); the orphan
+    sweep treats it as the lease's guest and reclaims it once the lease is terminal."""
     _settle_by_key(conn, mig.id)
-    log.info("migration %s ABORTED (%s)", mig.id, reason, extra={"lease_id": mig.lease_id})
-    return _set_state(conn, mig.id, "ABORTED", reason=reason)
+    log.info("migration %s ABORTED (%s)", mig.id, reason, extra={"lease_id": mig.lease_id, "vmid": dest_vmid})
+    return _set_state(conn, mig.id, "ABORTED", reason=reason, dest_vmid=dest_vmid)
 
 
 def list_pending(conn: psycopg.Connection[Any], limit: int = 50) -> list[Migration]:

@@ -16,6 +16,7 @@ import pytest
 from br0kr import (
     build,
     daemon,
+    fence_census,
     lease,
     nodes,
     placement,
@@ -41,7 +42,8 @@ def _preserve_root_log_level():
 _KNOB_ATTRS = ("reap_grace", "sweep_every", "sweep_dry_run", "provision_limit", "promote_limit",
                "max_release_attempts", "build_limit", "migrate_limit", "guest_ip_prefix",
                "audit_retention_days", "full_clone", "placement_assert", "cross_node_clone",
-               "clone_content_enforcement", "discovery_interval_seconds", "provision_stuck_seconds")
+               "clone_content_enforcement", "discovery_interval_seconds", "provision_stuck_seconds",
+               "sweep_hold_absent")
 
 
 def _ns(**over: object) -> SimpleNamespace:
@@ -52,7 +54,7 @@ def _ns(**over: object) -> SimpleNamespace:
                                "audit_retention_days": 0, "full_clone": True, "placement_assert": True,
                                "cross_node_clone": False, "clone_content_enforcement": False,
                                "discovery_interval_seconds": 0, "_last_discovery_at": None,
-                               "provision_stuck_seconds": 1200,
+                               "provision_stuck_seconds": 1200, "sweep_hold_absent": False,
                                "_reload_requested": False,
                                "_beat": lambda: None}   # the real Daemon threads _beat into slow steps (prune)
     base.update(over)
@@ -69,7 +71,7 @@ def test_apply_settings_hot_applies_every_knob_from_the_ledger(monkeypatch):
                 "guest_ip_prefix": "192.168.1.", "audit_retention_days": 30, "queue_max": 500,
                 "full_clone": False, "placement_assert": False, "cross_node_clone": True,
                 "clone_content_enforcement": True, "discovery_interval_seconds": 300, "log_level": "DEBUG",
-                "provision_stuck_seconds": 600}
+                "provision_stuck_seconds": 600, "sweep_hold_absent": True}
     monkeypatch.setattr(settings, "effective", lambda _c: resolved)
     monkeypatch.setattr(settings, "take_reload", lambda _c: False)   # no reload pending this tick
     tick_config.apply_settings(ns, object())   # type: ignore[arg-type]
@@ -546,6 +548,7 @@ def _held_ns(monkeypatch, *, routable, hold_checks=None, holds=None):
     return SimpleNamespace(
         _hold_checks=dict(hold_checks or {7: 3}), provision_limit=10,
         registry=SimpleNamespace(node_ids=lambda: ["n1"]),
+        _fence_census=fence_census.FenceCensus(),   # an empty fleet: no lease id clashes
         _beat=lambda: None, _halted=lambda: False)
 
 

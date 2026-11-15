@@ -138,6 +138,8 @@ full rollback, extract the previous release's archive first, so the compose file
 | 0050 | the `lease_admitted_at` and `lease_active_at` partial indexes | is unaffected: it computes the same fleet stats in its single pass over `lease`, without them |
 | 0051 | `lease.releasing_at` (when a lease stopped holding its ask) | does not stamp it: the leases it releases get none, so the usage report counts them as unmeasured, after you upgrade again too |
 | 0052 | CHECK `lease_live_has_vmid`: a PROVISIONING or ACTIVE lease has its vmid and cluster | writes both on every live lease, as this image does. Its cluster delete does not pre-check leases: under an unfinished lease it fails with a 503 (the CHECK) instead of taking the lease's cluster. Finish the cluster's leases first |
+| 0053 | the `sweep_hold_absent` setting and `sweep_hold_ids` (the sweep's rollback hold) | ignores the hold and takes no fence census: after a ledger rollback its sweep can destroy guests the ledger lost, and its leases can re-mint their ids. Do not roll back past 0053 while the hold is on |
+| 0054 | `migration.dest_vmid` (the copy an aborted migration left on its target) | does not record it; its sweep destroys a terminal lease's guests without the recorded-guest check, so it reclaims such a copy anyway (and would also take a guest whose lease id was minted twice) |
 
 Every new migration adds a row here (`tests/unit/test_day2_runbook.py` fails until it does). Rolling back further
 than one release, or undoing what a migration did to the data, means [restoring](#restore-the-ledger-from-a-dump)
@@ -170,9 +172,11 @@ bash scripts/deploy.sh --no-build
 1. **Stop every service that writes** (all but the ledger pair, the proxy and the tunnel; clients get a 502 from the
    proxy meanwhile). The restore waits for a table a service holds, and gives up after 30 s.
 2. **Restore** in one transaction. The ledger DSN stays inside the container.
-   - `<N>` is one more than the highest `br0kr-lease-<id>` tag on any guest in the fleet. With a lower one, new
-     leases re-mint the ids of guests the dump does not know, and the orphan sweep can then destroy them
-     ([ledger-ha.md](ledger-ha.md#restore-drill-practice-this-before-you-need-it)).
+   - `<N>` is one more than the highest `br0kr-lease-<id>` tag on any guest in the fleet. The daemon moves the id
+     sequence there by itself before its first provision; the flag covers a gateway that admits first. With a lower
+     one, those leases take the ids of guests the dump does not know, and the daemon holds them
+     (`lease_id_clash`) instead of building them
+     ([ledger-ha.md](ledger-ha.md#after-a-restore-or-a-failover-the-ledger-is-behind-the-fleet)).
    - If it exits 4, the ledger **is** restored, but `N` was not above the dump's highest lease id. Set the floor by
      hand with the `ALTER TABLE` it prints, and do not run the restore again.
 3. **Before the daemon runs again,** in the ledger the restore just replaced:
@@ -182,8 +186,10 @@ bash scripts/deploy.sh --no-build
      reaper expires every lease an agent was keeping alive by heartbeat on the daemon's first tick, and destroys its
      VM. Agents still at work renew within that TTL; the rest expire as usual.
 4. **Bring everything back.** `migrate` brings an older dump up to the current schema.
-5. **Read what the sweep would destroy** in `docker compose logs daemon`. When it is only what you expect, clear the
-   `sweep_dry_run` override in the dashboard's Settings.
+5. **Read what the sweep would destroy** in `docker compose logs daemon`. If any guest carries a lease id the dump
+   lacks, the daemon has set `sweep_hold_absent` (alert `Br0krLedgerBehindFleet`) and spares it: decide about each
+   one first, then clear the hold. When the destroy list is only what you expect, clear the `sweep_dry_run` override
+   in the dashboard's Settings.
 
 Against an external ledger, run `restore_ledger.sh` from a host that reaches it, with the broker services stopped
 and the same two updates made before the daemon starts.

@@ -2,15 +2,17 @@
 
 The sweep's job — destroy a fenced guest IFF its lease is terminal/absent, and never
 touch one whose lease is still live — is pure control flow over two seams: the ledger
-read (lease.states_of, one query per node) and the fenced driver. So it is tested by patching it in
+read (lease.owners_of, one query per node) and the fenced driver. So it is tested by patching it in
 its home module and injecting a fake driver. The live REST behaviour (a real orphan on
 a lab node) is proven in scripts/harness_daemon.py.
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
-from br0kr import lease, sweeper
+from br0kr import fence_census, lease, sweeper
 
 pytestmark = pytest.mark.integration
 
@@ -64,43 +66,63 @@ class _FakeDriver:
         return self.repl_destroy_rc
 
 
+class _RecordedEverything(lease.LeaseOwner):
+    """A lease row given as a bare state string: it recorded whatever guest names it, so the terminal branch
+    destroys as it did before the recorded-guest check. Tests ABOUT that check put a real `lease.LeaseOwner`."""
+
+    def recorded(self, vmid, cluster_id, node_id=None):
+        return True
+
+
 class _StateTable(dict):
-    """A {lease_id: state} dict that also carries a {vmid: reclaimable?} map for the clone-orphan guard,
-    the node_ids the guard was probed with (so cluster-scope threading is assertable), and the rollback
-    `watermark` the sweep reads (lease.max_lease_id)."""
+    """A {lease_id: state | lease.LeaseOwner} dict that also carries a {vmid: reclaimable?} map for the clone-orphan guard,
+    the node_ids the guard was probed with (so cluster-scope threading is assertable), the rollback
+    `watermark` the sweep reads (lease.max_lease_id), and the ledger's hold columns a census verdict reads
+    (`hold_on` = sweep_hold_absent, `acked` = sweep_hold_ids)."""
 
     reclaimable: dict[int, bool]
     reclaim_node_ids: list[str | None]
     watermark: int
+    hold_on: bool
+    acked: frozenset[int]
 
 
 @pytest.fixture
 def states(monkeypatch):
-    """Patch lease.states_of to a dict {lease_id: state} (a missing id is absent), recording each batch on
+    """Patch lease.owners_of to a dict {lease_id: state or LeaseOwner} (a missing id is absent), recording each batch on
     `.batches`, AND
     lease.clone_orphan_reclaimable to a {vmid: bool} map on `.reclaimable` (default True = positive
     terminal-lease evidence), AND lease.max_lease_id to `.watermark` — DEFAULT a huge value so the rollback
     watermark is out of the way (every absent id is below it → destroyed as before) for the tests that aren't
     ABOUT it; the watermark tests set `.watermark` low to exercise the S20 sparing. Records the node_id each
-    clone-guard call received in `.reclaim_node_ids` so the cluster-scope plumbing is testable."""
+    clone-guard call received in `.reclaim_node_ids` so the cluster-scope plumbing is testable. A census
+    verdict's hold read (fence_census.hold_state) answers `.hold_on`/`.acked`, default off and empty."""
     table = _StateTable()
     table.reclaimable = {}
     table.reclaim_node_ids = []
     table.watermark = 10**9   # effectively no watermark; overridden by the watermark tests
+    table.hold_on, table.acked = False, frozenset()
 
     def _reclaimable(conn, vmid, node_id=None):
         table.reclaim_node_ids.append(node_id)
         return table.reclaimable.get(vmid, True)
 
-    def _states_of(conn, ids):
+    def _owners_of(conn, ids):
         ids = list(ids)
         table.batches.append(ids)
-        return {lid: table[lid] for lid in ids if table.get(lid) is not None}
+        out = {}
+        for lid in ids:
+            v = table.get(lid)
+            if v is None:
+                continue
+            out[lid] = v if isinstance(v, lease.LeaseOwner) else _RecordedEverything(v, None, None)
+        return out
 
     table.batches = []
-    monkeypatch.setattr(lease, "states_of", _states_of)
+    monkeypatch.setattr(lease, "owners_of", _owners_of)
     monkeypatch.setattr(lease, "clone_orphan_reclaimable", _reclaimable)
     monkeypatch.setattr(lease, "max_lease_id", lambda conn: table.watermark)
+    monkeypatch.setattr(fence_census, "hold_state", lambda conn: (table.hold_on, table.acked))
     return table
 
 
@@ -432,7 +454,7 @@ def test_orphan_sweep_all_isolates_a_failing_node(states):
 
 def test_on_progress_heartbeats_through_scan_classify_and_destroy(states):
     """orphan_sweep fires the optional on_progress callback after list_fenced (bounding the scan gap),
-    once after the one classify query (lease.states_of, PERF-04), and once per orphan destroy — the liveness
+    once after the one classify query (lease.owners_of, PERF-04), and once per orphan destroy — the liveness
     heartbeats that keep a big/slow
     sweep from reading as a wedge. Guards the false-restart the review caught: an un-beaten sweep (in the
     SCAN/classify phase or the destroy loop) that exceeds the daemon's stall window would 503 a healthy
@@ -483,7 +505,7 @@ def test_sweep_threads_its_heartbeat_into_both_destroy_verbs(states):
 
 
 def test_the_sweep_classifies_a_node_with_one_ledger_query(states):
-    """Every fenced guest on a node is classified from ONE lease.states_of call carrying all their lease ids: a
+    """Every fenced guest on a node is classified from ONE lease.owners_of call carrying all their lease ids: a
     terminal lease is destroyed, a live one spared, an absent one (no row) destroyed as before. Guards the sweep
     issuing one ledger query per guest (review PERF-04), which a large fleet turns into hundreds of round trips per
     sweep."""
@@ -492,3 +514,196 @@ def test_the_sweep_classifies_a_node_with_one_ledger_query(states):
     summary = sweeper.orphan_sweep(object(), drv)
     assert states.batches == [[11, 12, 13]]
     assert sorted(drv.destroyed) == [(9011, 11), (9013, 13)] and summary.destroyed == 2
+
+
+# ── The lease-id rollback fix (fence_census.py, 0053) ────────────────────────────────────────────────────────────
+
+
+def test_a_terminal_lease_reclaims_only_the_guest_it_recorded(states):
+    """After a rollback one lease id can name two guests: the lost lease's and the newer lease's. A terminal row is
+    destroy evidence only for the guest that lease recorded (its vmid, on its node or in its cluster); the other
+    guest is spared and counted clash_spared. Guards the newer lease's end destroying a guest it never owned."""
+    states.update({7: lease.LeaseOwner("RELEASED", "c1", 300)})
+    d = _FakeDriver([(300, 7), (301, 7)])
+    summary = sweeper.orphan_sweep(object(), d, node_cluster="c1")
+    assert d.destroyed == [(300, 7)]
+    assert summary.terminal == 1 and summary.clash_spared == 1 and summary.destroyed == 1
+
+
+@pytest.mark.parametrize("owner", [
+    lease.LeaseOwner("RELEASED", "c2", 300),   # the same vmid, but recorded in another cluster
+    lease.LeaseOwner("REJECTED", None, None),  # never provisioned: it recorded no guest at all
+])
+def test_a_terminal_lease_that_never_recorded_this_guest_spares_it(states, owner):
+    """A terminal lease whose recorded guest is not this one (another cluster's vmid, or none at all) is no
+    evidence about this guest. Guards a cross-cluster vmid coincidence, or a never-built lease, destroying it."""
+    states.update({7: owner})
+    d = _FakeDriver([(300, 7)])
+    summary = sweeper.orphan_sweep(object(), d, node_cluster="c1")
+    assert d.destroyed == [] and summary.clash_spared == 1 and summary.terminal == 0
+
+
+def test_the_hold_knob_spares_every_absent_guest(states):
+    """sweep_hold_absent (set by the census on a rollback) spares every absent guest even with no watermark signal
+    left in the scan (the next admission lifted the watermark above them). A terminal orphan is still reclaimed.
+    Guards the lost guests looking like ordinary orphans one admission after the rollback."""
+    states.update({2: "RELEASED"})
+    d = _FakeDriver([(100, 2), (101, 3)])   # the default watermark is huge: no signal from this scan
+    summary = sweeper.orphan_sweep(object(), d, hold_absent=True)
+    assert d.destroyed == [(100, 2)] and summary.absent_spared == 1 and summary.absent == 0
+
+
+def test_allow_mass_absent_overrides_the_hold(states):
+    """The operator override still reclaims absent guests while the hold is on. Guards the operator having no way
+    to finish a confirmed teardown short of clearing the knob."""
+    d = _FakeDriver([(101, 3)])
+    summary = sweeper.orphan_sweep(object(), d, hold_absent=True, allow_mass_absent=True)
+    assert d.destroyed == [(101, 3)] and summary.absent == 1
+
+
+def test_the_fleet_verdict_spares_a_node_swept_before_the_evidence(states):
+    """The rollback signal lives on one node (n2 holds the guest newer than the ledger); n1 only has a below-
+    watermark absent. Judged per node, n1 would destroy it before n2 is reached. With the census the verdict is
+    fleet-wide, so n1 spares it too. Guards the order of nodes deciding whether a live guest survives."""
+    states.update({2: "RELEASED"})
+    states.watermark = 10
+    n1 = [(100, 2), (101, 3)]
+    n2 = [(102, 12)]
+    d1, d2 = _FakeDriver(n1), _FakeDriver(n2)
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)])
+    assert (101, 3) in d1.destroyed   # without the census: n1 loses its guest
+
+    d1, d2 = _FakeDriver(n1), _FakeDriver(n2)
+    census = fence_census.FenceCensus(fenced={"n1": tuple(n1), "n2": tuple(n2)})
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)], census=census)
+    assert d1.destroyed == [(100, 2)] and per_node["n1"].absent_spared == 1
+    assert d2.destroyed == [] and per_node["n2"].absent_spared == 1
+
+
+def test_a_node_the_census_could_not_list_is_not_swept(states):
+    """A node whose census listing failed was not part of the verdict, so it is skipped this pass (swept next
+    time). Guards sweeping a node whose guests the rollback judgement never saw."""
+    states.update({6: "RELEASED"})
+    d1, d2 = _FakeDriver([(101, 6)]), _FakeDriver([(102, 6)])
+    census = fence_census.FenceCensus(fenced={"n1": ((101, 6),)}, failed_nodes=("n2",))
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)], census=census)
+    assert set(per_node) == {"n1"} and d2.destroyed == []
+
+
+def test_a_partial_census_spares_absent_guests_on_every_node(states):
+    """Review S5: the only at-or-above-watermark evidence may sit on the node the census could not list, so with a
+    partial census the listed nodes spare their absent guests too (a terminal guest is still reclaimed). Guards
+    node n1 losing a live below-watermark guest because n2's API was down."""
+    states.update({6: "RELEASED"})
+    states.watermark = 10
+    d1 = _FakeDriver([(101, 6), (102, 3)])
+    census = fence_census.FenceCensus(fenced={"n1": ((101, 6), (102, 3))}, failed_nodes=("n2",))
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", _FakeDriver([]))], census=census)
+    assert d1.destroyed == [(101, 6)] and per_node["n1"].absent_spared == 1
+
+
+def test_the_ledger_hold_spares_even_when_the_daemon_copy_is_off(states):
+    """Review S4: the census verdict reads sweep_hold_absent from the ledger itself, so a daemon whose hot-applied
+    copy is still False (a fresh process, a failing settings read) spares the absent guests anyway."""
+    states.hold_on = True
+    d = _FakeDriver([(101, 3)])
+    census = fence_census.FenceCensus(fenced={"n1": ((101, 3),)})
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d)], census=census, hold_absent=False)
+    assert d.destroyed == [] and per_node["n1"].absent_spared == 1
+
+
+def test_an_acknowledged_rollback_is_reclaimed_after_the_hold_is_cleared(states):
+    """Review S3: lost guests 41 and 42 above a ledger at 40, a hold raised for them (sweep_hold_ids {41, 42}), then
+    cleared by an operator after the review. They are no longer watermark evidence, so the next sweep reclaims them
+    as the runbook says. A guest not in the set (a second rollback) still spares every absent guest."""
+    states.watermark, states.acked = 40, frozenset({41, 42})
+    d = _FakeDriver([(141, 41), (142, 42)])
+    census = fence_census.FenceCensus(fenced={"n1": ((141, 41), (142, 42))})
+    sweeper.orphan_sweep_all(object(), [("n1", d)], census=census)
+    assert sorted(d.destroyed) == [(141, 41), (142, 42)]
+
+    d = _FakeDriver([(141, 41), (150, 50)])
+    census = fence_census.FenceCensus(fenced={"n1": ((141, 41), (150, 50))})
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d)], census=census)
+    assert d.destroyed == [] and per_node["n1"].absent_spared == 2
+
+
+def test_a_repointed_node_still_reclaims_its_terminal_guests(states):
+    """Review S6: set_node may move a node with no live leases to another cluster. A RELEASE_FAILED lease built on
+    that node recorded the old cluster, but its guest is still on its own node, so the sweep reclaims it instead of
+    sparing it as a clash on every pass (with Br0krLedgerBehindFleet firing for good)."""
+    states.update({6: lease.LeaseOwner("RELEASE_FAILED", "c1", 101, "n1")})
+    d = _FakeDriver([(101, 6)])
+    summary = sweeper.orphan_sweep(object(), d, node_id="n1", node_cluster="c2")
+    assert d.destroyed == [(101, 6)] and summary.clash_spared == 0
+
+
+def test_each_node_is_judged_in_its_own_cluster(states):
+    """orphan_sweep_all hands each node's cluster (the registry's cluster_of) to the recorded-guest check, so a
+    lease recorded in c1 reclaims its guest on a c1 node and spares the same vmid on a c2 node. Guards the cluster
+    never reaching the check (every vmid coincidence across clusters would then be destroyed)."""
+    states.update({6: lease.LeaseOwner("RELEASED", "c1", 101)})
+    d1, d2 = _FakeDriver([(101, 6)]), _FakeDriver([(101, 6)])
+    clusters = {"n1": "c1", "n2": "c2"}
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)], cluster_of=clusters.get)
+    assert d1.destroyed == [(101, 6)] and d2.destroyed == []
+    assert per_node["n2"].clash_spared == 1
+
+
+def test_a_lower_lost_id_from_a_returning_node_is_not_acknowledged(states):
+    """Review H1: the hold was raised for 41 while node n2 could not be listed, and an operator cleared it. n2 then
+    answers with lost guest 39, below 41 but at or above the ledger's watermark (38). It is not in sweep_hold_ids,
+    so it is watermark evidence again and every absent guest is spared; with a high-water mark it read as reviewed
+    and was destroyed unseen. (The census step, which runs first in the same tick, also raises the hold again.)"""
+    states.watermark, states.acked = 38, frozenset({41})
+    d1, d2 = _FakeDriver([(141, 41)]), _FakeDriver([(239, 39)])
+    census = fence_census.FenceCensus(fenced={"n1": ((141, 41),), "n2": ((239, 39),)})
+    per_node = sweeper.orphan_sweep_all(object(), [("n1", d1), ("n2", d2)], census=census)
+    assert d1.destroyed == [] and d2.destroyed == []
+    assert per_node["n1"].absent_spared == 1 and per_node["n2"].absent_spared == 1
+
+
+# ── Migration copies (0054, review M1) ───────────────────────────────────────────────────────────────────────────
+
+
+def test_a_confirmed_migration_copy_is_reclaimed(states):
+    """Review M1: a migration confirmed the lease's copy on its target (vmid 777 on n9, another cluster) but could
+    not move the lease onto it (the lease ended first), so it recorded the copy on the migration row (dest_vmid).
+    The lease still records the SOURCE guest, yet the copy counts as recorded and is reclaimed, as before the
+    recorded-guest check. Guards every such copy being spared for good as a clash, with the alert firing."""
+    states.update({7: lease.LeaseOwner("RELEASED", "c1", 300, "n1", moved=(("n9", 777),),
+                                       migration_targets=frozenset({"n9"}))})
+    d = _FakeDriver([(777, 7)])
+    summary = sweeper.orphan_sweep(object(), d, node_id="n9", node_cluster="c9")
+    assert d.destroyed == [(777, 7)] and summary.terminal == 1
+    assert summary.clash_spared == 0 and summary.migration_spared == 0
+
+
+def test_a_migration_in_flight_defers_its_lease_copies(states, caplog):
+    """While a migration of a terminal lease is still in flight, a guest the lease did not record (the copy landing
+    on the target) is left for the saga to confirm (and record) or abort: counted migration_spared, not a clash, so
+    no rollback alert. The lease's recorded source guest is reclaimed as before."""
+    states.update({7: lease.LeaseOwner("RELEASED", "c1", 300, "n1", migrating=True,
+                                       migration_targets=frozenset({"n9"}))})
+    target = _FakeDriver([(777, 7)])
+    with caplog.at_level(logging.INFO, logger="br0kr.sweeper"):
+        summary = sweeper.orphan_sweep(object(), target, node_id="n9", node_cluster="c9")
+    assert target.destroyed == [] and summary.migration_spared == 1 and summary.clash_spared == 0
+    assert any("still in flight" in r.getMessage() for r in caplog.records)
+    source = _FakeDriver([(300, 7)])
+    assert sweeper.orphan_sweep(object(), source, node_id="n1", node_cluster="c1").terminal == 1
+    assert source.destroyed == [(300, 7)]
+
+
+def test_an_unconfirmed_copy_on_a_migration_target_is_spared_with_a_warning(states, caplog):
+    """A guest on a node a migration of the lease targeted, which no saga confirmed (it aborted before it saw the
+    copy land): most likely the lease's own copy, but nothing recorded it, so it is spared and warned as
+    migration_spared (not the rollback alert). The same guest on a node no migration targeted is a clash."""
+    states.update({7: lease.LeaseOwner("RELEASED", "c1", 300, "n1", migration_targets=frozenset({"n9"}))})
+    d = _FakeDriver([(777, 7)])
+    with caplog.at_level(logging.WARNING, logger="br0kr.sweeper"):
+        summary = sweeper.orphan_sweep(object(), d, node_id="n9", node_cluster="c9")
+    assert d.destroyed == [] and summary.migration_spared == 1 and summary.clash_spared == 0
+    assert any("migration target" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    other = sweeper.orphan_sweep(object(), _FakeDriver([(777, 7)]), node_id="n8", node_cluster="c9")
+    assert other.clash_spared == 1 and other.migration_spared == 0

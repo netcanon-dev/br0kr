@@ -50,6 +50,11 @@ KNOBS: tuple[Knob, ...] = (
     Knob("reap_grace", "int", "BR0KR_REAP_GRACE", 30, minimum=0, daemon=True),
     Knob("sweep_every", "int", "BR0KR_SWEEP_EVERY", 12, minimum=0, daemon=True),
     Knob("sweep_dry_run", "bool", "BR0KR_SWEEP_DRY_RUN", False, daemon=True),
+    # The orphan sweep's durable rollback hold (0053). True = the sweep destroys no guest whose lease row is ABSENT
+    # (a terminal lease's own guest is still reclaimed). The daemon SETS it when its fleet census sees the ledger
+    # behind the fleet (fence_census.secure, audited); an operator clears it after the dry-run review. No env seed:
+    # it is ledger state a daemon writes, not deployment config.
+    Knob("sweep_hold_absent", "bool", None, False, daemon=True),
     Knob("provision_limit", "int", "BR0KR_PROVISION_LIMIT", 8, minimum=0, daemon=True),
     Knob("promote_limit", "int", "BR0KR_PROMOTE_LIMIT", 16, minimum=0, daemon=True),
     Knob("max_release_attempts", "int", None, 5, minimum=0, daemon=True),

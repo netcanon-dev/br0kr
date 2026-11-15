@@ -99,15 +99,16 @@ def test_the_daemon_runs_the_default_table_unless_given_one():
 
 
 def test_the_default_table_keeps_its_load_bearing_order():
-    """The default table's names are unique and its order holds the three constraints its comment names: settings
-    and the registry reload come before any lease is listed; the reap comes before the promoter, so capacity freed
+    """The default table's names are unique and its order holds the four constraints its comment names: settings
+    and the registry reload come before any lease is listed; the fence census comes before the provision, so no
+    guest is built under a lease id a guest already carries; the reap comes before the promoter, so capacity freed
     this tick is reusable; and provisioning comes before every slow, opt-in step (builds, the copies, the sweep,
     discovery), and so does the reap, so a long one never delays either. Guards a reordered or duplicated row."""
     names = [s.name for s in STEPS]
     assert len(names) == len(set(names))
     pos = {n: i for i, n in enumerate(names)}
     assert names[:2] == ["settings", "reload"]
-    assert pos["provision"] < pos["reap"] < pos["promote"]
+    assert pos["fence_census"] < pos["provision"] < pos["reap"] < pos["promote"]
     slow = ("builds", "migrate", "replicate", "sweep", "discovery")
     assert all(pos["provision"] < pos[n] and pos["reap"] < pos[n] for n in slow)
 

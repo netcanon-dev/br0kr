@@ -67,6 +67,18 @@ class TickSummary:
     # leases the reaper gave up on → terminal RELEASE_FAILED (an orphan guest to triage); br0kr_release_failed_total
     release_failed: int = field(default=0, metadata=_COUNTER)
     swept: int = field(default=0, metadata=_COUNTER)             # orphan guests the sweep destroyed
+    # guests the sweep SPARED although their lease is terminal: that lease never recorded them (a lease id minted
+    # twice after a ledger rollback, fence_census.py) — each one is a guest an operator must decide about
+    sweep_clash_spared: int = field(default=0, metadata=_COUNTER)
+    # terminal-lease guests the sweep SPARED for a migration (one in flight, or an unconfirmed copy on its target)
+    sweep_migration_spared: int = field(default=0, metadata=_COUNTER)
+    # the fence census moved the lease id sequence past a fence id the ledger had not reached (a rollback)
+    lease_id_floor_raised: int = field(default=0, metadata=_COUNTER)
+    # the fence census set the sweep_hold_absent knob (0053): the ledger was found behind the fleet
+    sweep_hold_set: int = field(default=0, metadata=_COUNTER)
+    # 1 while that knob is on, read every tick (br0kr_last_sweep_hold_on): the Br0krLedgerBehindFleet alert keeps
+    # firing until an operator has reviewed the spared guests and cleared it
+    sweep_hold_on: int = field(default=0, metadata=_GAUGE)
     # the node registry was rebuilt this tick (SIGHUP / cadence); the cumulative metric is br0kr_reloads_total
     reloaded: bool = field(default=False, metadata={"metric": "counter", "cum_key": "reloads"})
     queued_seen: int = field(default=0, metadata=_GAUGE)        # PENDING leases examined by the promoter this tick
@@ -140,6 +152,12 @@ def _sweep_tick(d: Daemon) -> bool:
     return bool(d.sweep_every) and d._ticks % d.sweep_every == 0
 
 
+def _census_due(d: Daemon) -> bool:
+    """The fence census: on the first tick of a leadership (no census yet, so nothing is built before one) and on
+    every sweep tick (the sweep judges the rollback signal over it)."""
+    return d._fence_census is None or _sweep_tick(d)
+
+
 def _builds_on(d: Daemon) -> bool:
     return d.build_limit > 0
 
@@ -173,12 +191,14 @@ def _replicate_conn(d: Daemon) -> Connect | None:
     return d._replicate_connect
 
 
-# The tick, in order. The order is load-bearing in three places: settings and the registry reload come before any
-# lease is listed; the reap comes before the promoter, so capacity freed this tick is reusable; and the slow, opt-in
-# steps (builds, copies, the sweep, discovery) come last, so a long one never delays provisioning or the reap.
+# The tick, in order. The order is load-bearing in four places: settings and the registry reload come before any
+# lease is listed; the fence census comes before the provision, so no guest is built under a lease id a guest already
+# carries; the reap comes before the promoter, so capacity freed this tick is reusable; and the slow, opt-in steps
+# (builds, copies, the sweep, discovery) come last, so a long one never delays provisioning or the reap.
 STEPS: tuple[Step, ...] = (
     Step("settings", tick_config.settings_step),
     Step("reload", tick_config.reload_step),
+    Step("fence_census", tick_upkeep.census_step, due=_census_due),
     Step("provision", tick_provision.provision_step),
     Step("held_recheck", tick_provision.held_step),
     Step("reap", tick_upkeep.reap_step),

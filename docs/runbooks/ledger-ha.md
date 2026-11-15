@@ -193,6 +193,7 @@ the same class of mistake as logging the failure at `debug`.
 | `Br0krLedgerSlotLost` (re-clone; restarting the bundled standby does it) | `br0kr_ledger_slots_lost > 0` | 0m |
 | `Br0krLedgerStandbyStalled` (streaming, replaying nothing) | `br0kr_ledger_replay_lag_bytes > 1073741824` | 15m |
 | `Br0krLedgerSyncStandbyLost` (commits wait) | `br0kr_ledger_sync_required == 1 and br0kr_ledger_standbys_sync == 0` | 1m |
+| `Br0krLedgerBehindFleet` (a restore or failover lost lease rows) | `max(br0kr_last_sweep_hold_on) == 1 or sum(increase(br0kr_sweep_clash_spared_total[1h])) > 0` | 0m |
 
 `Br0krLedgerSyncStandbyLost` keys on `br0kr_ledger_sync_required`, not on `configured`: an asynchronous ledger
 (the bundled pair has no `synchronous_standby_names`) has no synchronous standby by design, and a rule on the sync
@@ -283,33 +284,60 @@ A backup you have never restored is a hope, not a backup. Periodically:
    `PGCONN="$PGCONN_TARGET" python -m br0kr.migrate`
 4. Record the restore time — that is your real **RTO** input.
 
-For a REAL restore that a daemon will run against, add `--lease-id-floor <N>` (step 1 of the warning
-below) and do the sweep dry-run before resuming teardown.
+For a REAL restore that a daemon will run against, read the next section first: the ledger you restore is behind
+the fleet.
 
-> **⚠️ After a restore or a failover to a lagging standby, the ledger is BEHIND the real fleet — do these two
-> steps BEFORE resuming the reconcile daemon, or the orphan sweep can destroy live guests:**
->
-> Guests provisioned after the backup/replication point have no lease row, so the sweep sees them as absent. The
-> **rollback watermark** (`lease.max_lease_id`) mitigates this: when any absent guest's id is at/above the
-> ledger's max, a rollback is suspected and the sweep spares EVERY absent guest that pass (below-watermark ones
-> too — lease id order is not commit order). But the id **sequence** is rolled back with the ledger, so new
-> admissions re-mint ids in the spared range and a re-minted id going terminal can still destroy the old guest.
-> So:
->
-> 1. **Restart the id sequence past the fleet's highest fence id.** Find the max `br0kr-lease-<id>` tag across
->    all nodes (`qm config`/the tags on each guest), then:
->    `ALTER TABLE lease ALTER COLUMN id RESTART WITH <max_fence_id + 1>;`
->    This stops re-minting into the spared range and restores the "ids are monotonic, never reused" invariant the
->    sweep (and admission) rely on. `scripts/restore_ledger.sh --lease-id-floor <max_fence_id + 1>` does this as
->    part of the restore, and refuses an N at or below the restored `max(lease.id)`.
-> 2. **Dry-run the sweep first.** Point the daemon at the restored ledger with `sweep_dry_run=true` (or call
->    `orphan_sweep(..., dry_run=True)`) and confirm the destroy list is empty / expected before allowing real
->    teardown. Only set `allow_mass_absent` after you have confirmed a genuine teardown.
-> 3. **Give every live lease one fresh TTL.** The restored `expires_at` values are as old as the backup, so the reaper
->    would expire every heartbeat-held lease on the daemon's first tick and destroy its VM:
->    `UPDATE lease SET expires_at = greatest(expires_at, now() + make_interval(secs => ttl_seconds)) WHERE state IN
->    ('ADMITTED', 'PROVISIONING', 'ACTIVE');`. Agents still at work renew within that TTL.
-> [day2-operations.md](day2-operations.md#restore-the-ledger-from-a-dump) has the whole sequence on the Compose stack.
+### After a restore or a failover: the ledger is behind the fleet
+
+Guests created after the dump (or after the last WAL a promoted standby received, or the last minute a VM replica
+copied) carry lease ids the restored ledger has no row for, and its lease id sequence is rolled back with it. Left
+alone, new leases would re-mint those ids (one id, two guests), and the orphan sweep would destroy the lost guests as
+orphans once new ids passed them.
+
+**What the daemon does by itself** (`br0kr/fence_census.py`). On its first tick as leader, before it provisions
+anything, and on every sweep tick, it lists every node's `br0kr-lease-<id>` guests in one pass and:
+
+- when a guest names a lease id with no row (br0kr never deletes one, so any such id means rows were lost), or one
+  whose row never recorded a guest (the id was minted again), sets the `sweep_hold_absent` setting and records every
+  such id in `sweep_hold_ids`, committed before anything else (audited `sweep_hold_absent_set`, with the ids). While
+  it is on the sweep destroys no guest without a lease row, on any node, and `Br0krLedgerBehindFleet` fires;
+- then moves the lease id sequence past the highest id any guest carries (forward only; audited
+  `lease_id_floor_raised`). It never moves the floor without the hold;
+- holds (`lease_id_clash`) a lease the gateway admitted under such an id before the floor moved, instead of building
+  a second guest under one tag. And the sweep reclaims a terminal lease's guest only if that lease recorded it, so a
+  re-minted lease's end never takes the older guest; that guest is spared and reported (`clash_spared`). A copy a
+  migration left on its target counts as recorded once the migration confirmed it; while a migration of the lease is
+  in flight, or for a copy on its target the migration never confirmed, the guest is spared (`migration_spared`).
+
+A node it cannot list is skipped by that pass's sweep, which then spares absent guests on every node. An id already
+in `sweep_hold_ids` does not raise the hold again once you clear it; any other id does, whatever its value, so a
+skipped node that comes back with a lower lost id raises it again. The census lists every node before the tick's
+reap, so a node whose API hangs delays that tick's reap by up to the API timeout.
+
+**What is still yours:**
+
+1. **Give every live lease one fresh TTL, before the daemon runs.** The restored `expires_at` values are as old as
+   the dump, so the reaper would expire every heartbeat-held lease on the daemon's first tick and destroy its VM:
+   `UPDATE lease SET expires_at = greatest(expires_at, now() + make_interval(secs => ttl_seconds)) WHERE state IN
+   ('ADMITTED', 'PROVISIONING', 'ACTIVE');`. Agents still at work renew within that TTL.
+2. **Decide about the spared guests.** The sweep logs them on every pass (`SPARING N ABSENT fenced guest(s)`, then one
+   line per guest). Find out who still uses each one (its name is `br0kr-<id>`; ask the projects' agents). The ledger
+   cannot take a lost guest back: its user moves off it and asks for a new lease.
+3. **Clear the hold.** Clear it only after a sweep that skipped no node (the log names a skipped node), since a
+   skipped node's guests are on no list yet. Clearing acknowledges the ids in `sweep_hold_ids`, the ones the
+   `sweep_hold_absent_set` audit rows name. Set `sweep_dry_run` on, clear `sweep_hold_absent` in the dashboard's
+   Settings, and read the next sweep's destroy list in the daemon log: the guests you reviewed are on it. When it is only the guests you
+   decided to reclaim, clear `sweep_dry_run`; the next sweep destroys them. The alert stops when the hold is off (a
+   clash-spared guest keeps it firing for an hour after the last time a sweep spared it, so remove those first).
+4. **Remove clash-spared guests by hand** (and migration-spared ones once no migration of their lease is in flight).
+   The sweep never reclaims one: its lease row is terminal and recorded a different guest. On its node check that `qm config <vmid>` carries `br0kr-lease-<id>`, then
+   `qm stop <vmid> && qm destroy <vmid> --purge`.
+
+`scripts/restore_ledger.sh --lease-id-floor <N>` still sets the floor at restore time, with `N` one more than the
+highest `br0kr-lease-<id>` in the fleet. The daemon no longer needs it, but it keeps the gateway from admitting a
+clashing lease if the gateway starts before the daemon's first census. The hold does not depend on it: a lease
+admitted early lifts the ledger's highest id, and the lost ids still have no row.
+[day2-operations.md](day2-operations.md#restore-the-ledger-from-a-dump) has the whole sequence on the Compose stack.
 
 ---
 
