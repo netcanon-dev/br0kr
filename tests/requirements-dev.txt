@@ -5,7 +5,7 @@ pytest>=9.2.0
 pytest-cov>=7.1.0
 # Parses the shipped Prometheus rules in tests/unit/test_alert_rules.py (promtool itself runs in
 # scripts/check_alert_rules.sh).
-pyyaml>=6
+pyyaml>=6.0.3
 
 # Import-time deps of the package (psycopg, requests, the MCP SDK) come from the
 # RUNTIME manifest, never restated here. CI installs them from the hashed
